@@ -51,6 +51,8 @@ impl Store {
     }
 
     pub fn append(&self, block: &Block) -> Result<i64> {
+        let duration_ms = i64::try_from(block.duration_ms)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         self.conn.execute(
             "INSERT INTO blocks (session, command, output, exit_code, cwd, duration_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -60,7 +62,7 @@ impl Store {
                 block.output,
                 block.exit_code,
                 block.cwd,
-                block.duration_ms as i64,
+                duration_ms,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -91,6 +93,9 @@ impl Store {
             out.push_str(&block.command);
             out.push('\n');
             out.push_str(&block.output);
+            if !block.output.ends_with('\n') {
+                out.push('\n');
+            }
             out.push_str(&format!(
                 "[exit {}, {}ms]\n",
                 block.exit_code, block.duration_ms
@@ -101,6 +106,10 @@ impl Store {
 }
 
 fn row_to_block(row: &rusqlite::Row<'_>) -> Result<Block> {
+    let raw_duration: i64 = row.get(6)?;
+    let duration_ms = u64::try_from(raw_duration).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Integer, Box::new(e))
+    })?;
     Ok(Block {
         id: row.get(0)?,
         session: row.get(1)?,
@@ -108,6 +117,6 @@ fn row_to_block(row: &rusqlite::Row<'_>) -> Result<Block> {
         output: row.get(3)?,
         exit_code: row.get(4)?,
         cwd: row.get(5)?,
-        duration_ms: row.get::<_, i64>(6)? as u64,
+        duration_ms,
     })
 }

@@ -1,5 +1,9 @@
 use zet_blocks::{Block, Store};
 
+fn temp_db(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("zet-blocks-{name}-{}.sqlite", std::process::id()))
+}
+
 fn sample(session: &str) -> Block {
     Block {
         id: 0,
@@ -47,7 +51,7 @@ fn list_returns_session_blocks_in_order() {
 
 #[test]
 fn blocks_persist_across_reopen() {
-    let path = std::env::temp_dir().join(format!("zet-blocks-test-{}.sqlite", std::process::id()));
+    let path = temp_db("persist");
     let _ = std::fs::remove_file(&path);
     let id = {
         let store = Store::open(path.to_str().unwrap()).unwrap();
@@ -79,6 +83,28 @@ fn replay_renders_ordered_transcript() {
         "$ echo hi\nhi\n[exit 0, 3ms]\n$ boom\nkaboom\n[exit 1, 12ms]\n"
     );
     assert_eq!(store.replay("empty").unwrap(), "");
+}
+
+#[test]
+fn replay_separates_marker_from_unterminated_output() {
+    let store = Store::open_in_memory().unwrap();
+    let mut block = sample("s1");
+    block.command = "printf hi".to_string();
+    block.output = "hi".to_string();
+    store.append(&block).unwrap();
+
+    assert_eq!(
+        store.replay("s1").unwrap(),
+        "$ printf hi\nhi\n[exit 0, 3ms]\n"
+    );
+}
+
+#[test]
+fn absurd_duration_errors_instead_of_wrapping() {
+    let store = Store::open_in_memory().unwrap();
+    let mut block = sample("s1");
+    block.duration_ms = u64::MAX;
+    assert!(store.append(&block).is_err());
 }
 
 #[test]
