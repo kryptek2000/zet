@@ -49,9 +49,9 @@ impl Damage {
         let mut i = 0;
         while i < self.rects.len() {
             if rect.overlaps(&self.rects[i]) {
-                let merged = rect.union(&self.rects[i]);
+                rect = rect.union(&self.rects[i]);
                 self.rects.remove(i);
-                rect = merged;
+                i = 0;
             } else {
                 i += 1;
             }

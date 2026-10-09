@@ -20,6 +20,7 @@ pub struct Atlas {
 
 impl Atlas {
     pub fn new(cols: u32, rows: u32, cell_w: u32, cell_h: u32) -> Self {
+        assert!(cell_w > 0 && cell_h > 0, "cell dimensions must be nonzero");
         let mut free = Vec::with_capacity((cols * rows) as usize);
         for y in 0..rows {
             for x in 0..cols {
@@ -47,6 +48,11 @@ impl Atlas {
     }
 
     pub fn free(&mut self, slot: Slot) {
+        // Reject slots that don't align to the grid: without this, a
+        // fabricated slot aliases a live cell and corrupts the free list.
+        if !slot.x.is_multiple_of(self.cell_w) || !slot.y.is_multiple_of(self.cell_h) {
+            return;
+        }
         let gx = slot.x / self.cell_w;
         let gy = slot.y / self.cell_h;
         if gx < self.cols && gy < self.rows && !self.free.contains(&(gx, gy)) {

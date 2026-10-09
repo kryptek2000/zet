@@ -13,6 +13,7 @@ struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     frames_left: u32,
+    rendered: u32,
 }
 
 impl ApplicationHandler for App {
@@ -42,16 +43,17 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                if let Some(r) = &mut self.renderer {
-                    r.render();
-                }
                 if self.frames_left == 0 {
                     event_loop.exit();
                 } else {
+                    if let Some(r) = &mut self.renderer {
+                        r.render();
+                        self.rendered += 1;
+                    }
                     self.frames_left -= 1;
-                }
-                if let Some(w) = &self.window {
-                    w.request_redraw();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
                 }
             }
             _ => {}
@@ -69,7 +71,9 @@ fn main() {
         window: None,
         renderer: None,
         frames_left: frames,
+        rendered: 0,
     };
     event_loop.run_app(&mut app).unwrap();
-    eprintln!("zet-window: rendered {frames} frames, clean exit");
+    eprintln!("zet-window: rendered {} frames, clean exit", app.rendered);
+    assert_eq!(app.rendered, frames, "frame count mismatch");
 }
