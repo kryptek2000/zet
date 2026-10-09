@@ -3,3 +3,10 @@ name = "zet-gpu"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+wgpu = "30"
+winit = "0.30"
+
+[dev-dependencies]
+pollster = "1"

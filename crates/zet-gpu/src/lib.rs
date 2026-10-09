@@ -1,1 +1,5 @@
-// zet-gpu — see docs/ZET-DESIGN.md §8
+pub mod atlas;
+pub mod damage;
+pub mod renderer;
+
+pub use renderer::Renderer;
