@@ -1,4 +1,4 @@
-use zet_term::{Color, Terminal};
+use zet_term::{Color, Event, Terminal};
 
 #[test]
 fn printable_text_advances_cursor_and_stores_cells() {
@@ -89,4 +89,59 @@ fn relative_cursor_moves_clamp_at_edges() {
     assert_eq!(t.cursor(), (0, 3));
     t.feed(b"\x1b[99A");
     assert_eq!(t.cursor(), (0, 0));
+}
+
+#[test]
+fn osc_sequences_are_skipped_silently() {
+    let mut t = Terminal::new(80, 24);
+    t.feed(b"a\x1b]133;A\x07b");
+    assert_eq!(t.cell(0, 0).unwrap().c, 'a');
+    assert_eq!(t.cell(1, 0).unwrap().c, 'b');
+    assert_eq!(t.cursor(), (2, 0));
+}
+
+#[test]
+fn osc_events_surface_with_code_and_body() {
+    let mut t = Terminal::new(80, 24);
+    t.feed(b"\x1b]133;A\x07");
+    t.feed(b"\x1b]133;D;0\x1b\\");
+    assert_eq!(
+        t.drain_events(),
+        vec![
+            Event::Osc {
+                code: 133,
+                body: "A".to_string()
+            },
+            Event::Osc {
+                code: 133,
+                body: "D;0".to_string()
+            },
+        ]
+    );
+    assert!(t.drain_events().is_empty());
+}
+
+#[test]
+fn utf8_multibyte_chars_occupy_one_cell() {
+    let mut t = Terminal::new(80, 24);
+    t.feed("héllo".as_bytes());
+    assert_eq!(t.cell(0, 0).unwrap().c, 'h');
+    assert_eq!(t.cell(1, 0).unwrap().c, 'é');
+    assert_eq!(t.cell(2, 0).unwrap().c, 'l');
+    assert_eq!(t.cursor(), (5, 0));
+}
+
+#[test]
+fn utf8_split_across_feeds_and_invalid_bytes() {
+    let mut t = Terminal::new(80, 24);
+    let bytes = "é".as_bytes();
+    t.feed(&bytes[..1]);
+    assert_eq!(t.cursor(), (0, 0));
+    t.feed(&bytes[1..]);
+    assert_eq!(t.cell(0, 0).unwrap().c, 'é');
+    assert_eq!(t.cursor(), (1, 0));
+    t.feed(b"\xff\xfe!");
+    assert_eq!(t.cell(1, 0).unwrap().c, '\u{FFFD}');
+    assert_eq!(t.cell(2, 0).unwrap().c, '\u{FFFD}');
+    assert_eq!(t.cell(3, 0).unwrap().c, '!');
 }
