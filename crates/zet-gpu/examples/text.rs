@@ -19,7 +19,7 @@ fn demo_term() -> Terminal {
     t.feed(b"----------------------------------------\r\n");
     t.feed(b"\x1b[33m$ \x1b[0m\x1b[37mecho hello\x1b[0m\r\n");
     t.feed(b"hello\r\n");
-    t.feed(b"\x1b[31mE\x1b[33ml\x1b[32ml\x1b[36mo\x1b[34m \x1b[35mW\x1b[37mo\x1b[90mr\x1b[92ml\x1b[93md\x1b[0m\r\n");
+    t.feed(b"\x1b[31mH\x1b[33me\x1b[32ml\x1b[36ml\x1b[34mo\x1b[35m \x1b[37mW\x1b[90mo\x1b[92mr\x1b[93ml\x1b[95md\x1b[0m\r\n");
     t.feed(b"The quick brown fox jumps over 1234567890\r\n");
     t.feed(b"\x1b[41;97m RED BACKGROUND \x1b[0m plain\r\n");
     t

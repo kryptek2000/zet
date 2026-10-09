@@ -66,7 +66,8 @@ impl std::error::Error for InitError {}
 
 /// Map a terminal cell color to linear-ish display RGB.
 /// M0 palette: classic 16 ANSI colors; Rgb passes through normalized.
-pub fn term_color(color: zet_term::Color) -> Rgba {
+/// Bold lifts standard colors 0-7 to their bright 8-15 variants.
+pub fn term_color(color: zet_term::Color, bold: bool) -> Rgba {
     const PALETTE: [(f32, f32, f32); 16] = [
         (0.10, 0.10, 0.10), // 0 black
         (0.80, 0.20, 0.20), // 1 red
@@ -88,6 +89,7 @@ pub fn term_color(color: zet_term::Color) -> Rgba {
     match color {
         zet_term::Color::Default => Rgba::WHITE,
         zet_term::Color::Indexed(i) => {
+            let i = if bold && i < 8 { i + 8 } else { i };
             let (r, g, b) = PALETTE[(i % 16) as usize];
             Rgba::rgb(r, g, b)
         }
@@ -397,6 +399,7 @@ impl Renderer {
             for (x, &c) in line.iter().enumerate().take(cols) {
                 let cell = term.cell(x, y);
                 let bg = cell.map(|cell| cell.bg).unwrap_or_default();
+                let bold = cell.map(|cell| cell.bold).unwrap_or(false);
                 if bg != zet_term::Color::Default {
                     if let Some(bg_slot) = self.bg_slot {
                         self.quads.extend(cell_quad(
@@ -406,7 +409,7 @@ impl Renderer {
                             self.cell_h,
                             (bg_slot.x, bg_slot.y),
                             self.atlas_size,
-                            term_color(bg),
+                            term_color(bg, false),
                         ));
                     }
                 }
@@ -424,7 +427,7 @@ impl Renderer {
                     self.cell_h,
                     (slot.x, slot.y),
                     self.atlas_size,
-                    term_color(color),
+                    term_color(color, bold),
                 ));
             }
         }
