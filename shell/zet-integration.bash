@@ -25,3 +25,10 @@ fi
 if [[ "$PS1" != *"]133;B"* ]]; then
     PS1+='\[\e]133;B\a\]'
 fi
+
+# Mark pre-execution (command is about to run). PS0 expands after readline
+# accepts a line and before bash executes it. Static text only — no
+# command substitution, so sourcing this cannot execute anything.
+if [[ "${PS0:-}" != *"]133;C"* ]]; then
+    PS0+='\e]133;C\a'
+fi

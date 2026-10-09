@@ -29,7 +29,11 @@ impl ShellState {
     }
 
     pub fn observe(&mut self, event: &Event) {
-        let Event::Osc { code, body } = event;
+        // Single-arm match (not let/if-let): exhaustive today, and a
+        // compile error here — not silent misbehavior — if Event grows.
+        let (code, body) = match event {
+            Event::Osc { code, body } => (code, body),
+        };
         if *code != 133 && *code != 633 {
             return;
         }
@@ -43,7 +47,11 @@ impl ShellState {
             "C" => self.phase = Phase::Running,
             "D" => {
                 self.phase = Phase::Prompt;
-                self.last_exit = arg.and_then(|a| a.parse::<u32>().ok());
+                if let Some(a) = arg {
+                    if let Ok(code) = a.parse::<u32>() {
+                        self.last_exit = Some(code);
+                    }
+                }
             }
             _ => {}
         }
