@@ -3,3 +3,7 @@ name = "zet-pty"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+portable-pty = "0.9"
+zet-term = { path = "../zet-term" }
