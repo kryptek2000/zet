@@ -115,6 +115,7 @@ pub struct Renderer {
     atlas_size: (u32, u32),
     coverage: HashMap<char, Vec<(i32, i32, u8)>>,
     slots: HashMap<char, Slot>,
+    bg_slot: Option<Slot>,
     quads: Vec<Vertex>,
 }
 
@@ -143,11 +144,9 @@ impl Renderer {
             .ok_or(InitError::NoSurfaceConfig)?;
         surface.configure(&device, &config);
 
-        let mut shaper = Shaper::new(16.0);
-        let adv = shaper.shape_line("M")[0].advance.ceil().max(1.0);
-        let cell_w = adv;
-        let cell_h = shaper.cell_size().1.ceil().max(1.0);
-        let (cw, ch) = (cell_w as u32, cell_h as u32);
+        let shaper = Shaper::new(16.0);
+        let (cw, ch) = shaper.cell_px();
+        let (cell_w, cell_h) = (cw as f32, ch as f32);
         let atlas_w = ATLAS_COLS * cw;
         let atlas_h = ATLAS_ROWS * ch;
         let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -277,7 +276,7 @@ impl Renderer {
             cache: None,
         });
 
-        let renderer = Renderer {
+        let mut renderer = Renderer {
             surface,
             device,
             queue,
@@ -300,9 +299,16 @@ impl Renderer {
             atlas_size: (atlas_w, atlas_h),
             coverage: HashMap::new(),
             slots: HashMap::new(),
+            bg_slot: None,
             quads: Vec::new(),
         };
         renderer.write_uniform(size.width.max(1), size.height.max(1));
+        // Reserve the first atlas slot as a solid-white texel for bg fills.
+        if let Some(slot) = renderer.atlas_alloc.alloc() {
+            let (cw, ch) = (renderer.cell_w as u32, renderer.cell_h as u32);
+            renderer.write_slot(&slot, &vec![255u8; cw as usize * ch as usize * 4], cw, ch);
+            renderer.bg_slot = Some(slot);
+        }
         Ok(renderer)
     }
 
@@ -348,17 +354,15 @@ impl Renderer {
                 self.atlas_alloc.alloc()?
             }
         };
-        let (cw, ch) = (self.cell_w as usize, self.cell_h as usize);
-        let mut rgba = vec![0u8; cw * ch * 4];
-        for &(x, y, alpha) in cov.iter() {
-            if x >= 0 && y >= 0 && (x as usize) < cw && (y as usize) < ch {
-                let i = ((y as usize) * cw + x as usize) * 4;
-                rgba[i] = 255;
-                rgba[i + 1] = 255;
-                rgba[i + 2] = 255;
-                rgba[i + 3] = alpha;
-            }
-        }
+        let (cw, ch) = (self.cell_w as u32, self.cell_h as u32);
+        let ascent = self.shaper.ascent_px();
+        let rgba = crate::text::blit(cov, ascent, cw, ch);
+        self.write_slot(&slot, &rgba, cw, ch);
+        self.slots.insert(c, slot);
+        Some(slot)
+    }
+
+    fn write_slot(&self, slot: &Slot, rgba: &[u8], cw: u32, ch: u32) {
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.atlas_tex,
@@ -370,20 +374,18 @@ impl Renderer {
                 },
                 aspect: wgpu::TextureAspect::All,
             },
-            &rgba,
+            rgba,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some((cw * 4) as u32),
-                rows_per_image: Some(ch as u32),
+                bytes_per_row: Some(cw * 4),
+                rows_per_image: Some(ch),
             },
             wgpu::Extent3d {
-                width: cw as u32,
-                height: ch as u32,
+                width: cw,
+                height: ch,
                 depth_or_array_layers: 1,
             },
         );
-        self.slots.insert(c, slot);
-        Some(slot)
     }
 
     /// Stage terminal grid cells as textured quads for the next render().
@@ -393,6 +395,21 @@ impl Renderer {
         for y in 0..rows {
             let line: Vec<char> = term.line_text(y).chars().collect();
             for (x, &c) in line.iter().enumerate().take(cols) {
+                let cell = term.cell(x, y);
+                let bg = cell.map(|cell| cell.bg).unwrap_or_default();
+                if bg != zet_term::Color::Default {
+                    if let Some(bg_slot) = self.bg_slot {
+                        self.quads.extend(cell_quad(
+                            x as u32,
+                            y as u32,
+                            self.cell_w,
+                            self.cell_h,
+                            (bg_slot.x, bg_slot.y),
+                            self.atlas_size,
+                            term_color(bg),
+                        ));
+                    }
+                }
                 if c == ' ' {
                     continue;
                 }
