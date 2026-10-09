@@ -14,6 +14,7 @@ struct App {
     renderer: Option<Renderer>,
     frames_left: u32,
     rendered: u32,
+    persistent: bool,
 }
 
 impl ApplicationHandler for App {
@@ -43,7 +44,16 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                if self.frames_left == 0 {
+                if self.frames_left == 0 && self.persistent {
+                    // Persistent mode: keep redrawing until closed.
+                    if let Some(r) = &mut self.renderer {
+                        r.render();
+                        self.rendered += 1;
+                    }
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                } else if self.frames_left == 0 {
                     event_loop.exit();
                 } else {
                     if let Some(r) = &mut self.renderer {
@@ -62,18 +72,22 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
+    // N frames then exit; 0 = stay open until the window is closed.
     let frames: u32 = std::env::args()
         .nth(1)
         .and_then(|a| a.parse().ok())
-        .unwrap_or(120);
+        .unwrap_or(0);
     let event_loop = EventLoop::new().unwrap();
     let mut app = App {
         window: None,
         renderer: None,
         frames_left: frames,
         rendered: 0,
+        persistent: frames == 0,
     };
     event_loop.run_app(&mut app).unwrap();
-    eprintln!("zet-window: rendered {} frames, clean exit", app.rendered);
-    assert_eq!(app.rendered, frames, "frame count mismatch");
+    if !app.persistent {
+        eprintln!("zet-window: rendered {} frames, clean exit", app.rendered);
+        assert_eq!(app.rendered, frames, "frame count mismatch");
+    }
 }

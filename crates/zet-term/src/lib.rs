@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Color {
+    #[default]
     Default,
     Indexed(u8),
     Rgb(u8, u8, u8),
@@ -53,6 +54,8 @@ impl Pen {
                 1 => self.bold = true,
                 30..=37 => self.fg = Color::Indexed((p - 30) as u8),
                 40..=47 => self.bg = Color::Indexed((p - 40) as u8),
+                90..=97 => self.fg = Color::Indexed((p - 90 + 8) as u8),
+                100..=107 => self.bg = Color::Indexed((p - 100 + 8) as u8),
                 _ => {}
             }
         }

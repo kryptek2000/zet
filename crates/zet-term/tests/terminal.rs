@@ -41,6 +41,14 @@ fn sgr_sets_foreground_color() {
 }
 
 #[test]
+fn sgr_bright_colors() {
+    let mut t = Terminal::new(80, 24);
+    t.feed(b"\x1b[91mR\x1b[102mG");
+    assert_eq!(t.cell(0, 0).unwrap().fg, Color::Indexed(9));
+    assert_eq!(t.cell(1, 0).unwrap().bg, Color::Indexed(10));
+}
+
+#[test]
 fn cup_moves_cursor() {
     let mut t = Terminal::new(80, 24);
     t.feed(b"\x1b[3;5HX");
