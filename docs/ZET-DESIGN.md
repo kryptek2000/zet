@@ -145,7 +145,13 @@ Threading: UI/GPU thread ↔ PTY reader ↔ agent tokio runtime ↔ model stream
 
 State: `~/.zet/sessions/<id>/` (blocks.sqlite, journal.sqlite, transcript.md). Config: `~/.zet/config.toml` + `zet.mcp.toml` + per-repo `.zet/`.
 
-Model gateway: single `chat_stream(messages, tools)` trait. Router picks: local-small (autocomplete/classify) → user-default frontier (agent) → local-8B fallback offline. Keys in OS keychain, never in files. Zero-retention flag propagates to providers that support it.
+Model gateway: single `chat_stream(messages, tools)` trait. Router picks: local-small (autocomplete/classify) → user-default frontier (agent) → local-8B fallback offline. Keys per provider in OS keychain, never in files. Zero-retention flag propagates to providers that support it.
+
+BYOK providers (all user-supplied keys, mix-and-match per task):
+- **Native:** Anthropic, OpenAI.
+- **OpenAI-compatible (`base_url` + key):** OpenRouter, Together, Groq, DeepSeek, xAI, Fireworks, any self-hosted OpenAI-compat endpoint — one config line each.
+- **opencode-style:** provider/model IDs resolve through the same gateway, so any model opencode-go supports (incl. via OpenRouter) works in ZET with the same key.
+- **Local:** llama.cpp / Ollama / LM Studio (no key, offline-capable; default for inline suggest + classifier).
 
 Rendering pipeline: VT grid → shaped glyph run cache → wgpu atlas → damage rects → present. Sixel/Kitty/iTerm images decoded off-thread, cached as textures. Ligatures via shaping; emoji/Nerd fallback chain.
 
@@ -169,6 +175,10 @@ font = "JetBrainsMono Nerd Font"; font_size = 13; opacity = 0.96
 default = "zsh"; scrollback = 500_000
 [models]
 default = "anthropic:claude-sonnet"; inline = "local:qwen3-1.7b-q4"
+# BYOK examples (keys live in OS keychain via `zet auth add <provider>`):
+# agent_alt = "openrouter:anthropic/claude-sonnet"
+# cheap = "openrouter:deepseek/deepseek-chat"
+# custom = "compat:https://my-gateway.internal/v1:my-model"
 [agent]
 approvals = "tiered"; max_replans = 3; sandbox = true
 ```
