@@ -258,3 +258,41 @@ fn alt_scrolling_does_not_pollute_main_scrollback() {
     assert_eq!(t.scrollback_line(0).unwrap(), "m1   ");
     assert_eq!(t.line_text(0), "m2   ");
 }
+
+#[test]
+fn alt_reentrancy_and_1047_1048_variants() {
+    let mut t = Terminal::new(10, 4);
+    t.feed(b"main\x1b[2;2H");
+    // Re-entrant enter is a no-op: content and cursor preserved.
+    t.feed(b"\x1b[?1049hA\x1b[?1049hB");
+    assert_eq!(t.line_text(0).trim_end(), "AB");
+    t.feed(b"\x1b[?1049l");
+    assert_eq!(t.line_text(0).trim_end(), "main");
+    assert_eq!(t.cursor(), (1, 1));
+    // Exit without enter is a no-op.
+    t.feed(b"\x1b[?1049l");
+    assert_eq!(t.line_text(0).trim_end(), "main");
+    // 1047: blank switch without cursor save/restore.
+    t.feed(b"\x1b[?1047h");
+    assert_eq!(t.line_text(0).trim(), "");
+    t.feed(b"X");
+    t.feed(b"\x1b[?1047l");
+    assert_eq!(t.line_text(0).trim_end(), "main");
+    // 1048: cursor save/restore only, grid untouched.
+    t.feed(b"\x1b[3;3H\x1b[?1048h\x1b[9;9H\x1b[?1048l");
+    assert_eq!(t.cursor(), (2, 2));
+    assert_eq!(t.line_text(0).trim_end(), "main");
+}
+
+#[test]
+fn resize_mid_alt_preserves_both_grids() {
+    let mut t = Terminal::new(10, 4);
+    t.feed(b"main");
+    t.feed(b"\x1b[?1049h");
+    t.feed(b"alt");
+    t.resize(6, 3);
+    assert_eq!(t.line_text(0).trim_end(), "alt");
+    t.feed(b"\x1b[?1049l");
+    assert_eq!(t.line_text(0).trim_end(), "main");
+    assert_eq!(t.line_text(1), "      ");
+}
