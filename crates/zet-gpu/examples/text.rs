@@ -15,7 +15,8 @@ const ROWS: usize = 24;
 
 fn demo_term() -> Terminal {
     let mut t = Terminal::new(COLS, ROWS);
-    t.feed(b"\x1b[1;36mZET \x1b[0m\x1b[32mterminal emulator\x1b[0m\r\n");
+    // Column-0 marker: bright-white bg block proves the first cell renders.
+    t.feed(b"\x1b[107m \x1b[0m\x1b[1;36mZET \x1b[0m\x1b[32mterminal emulator\x1b[0m\r\n");
     t.feed(b"----------------------------------------\r\n");
     t.feed(b"\x1b[33m$ \x1b[0m\x1b[37mecho hello\x1b[0m\r\n");
     t.feed(b"hello\r\n");

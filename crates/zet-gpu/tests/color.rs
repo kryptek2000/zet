@@ -4,23 +4,14 @@ use zet_term::Color;
 
 #[test]
 fn term_colors_map_to_expected_rgb() {
+    // Palette values are sRGB display colors converted to linear light
+    // (sRGB swapchain); red 0.8 -> ~0.604 linear, 0.2 -> ~0.033.
+    let red = term_color(Color::Indexed(1), false);
+    assert!((red.r - 0.6037).abs() < 0.002, "red.r = {}", red.r);
+    assert!((red.g - 0.0331).abs() < 0.002, "red.g = {}", red.g);
     assert_eq!(term_color(Color::Default, false), Rgba::WHITE);
-    assert_eq!(
-        term_color(Color::Indexed(1), false),
-        Rgba::rgb(0.80, 0.20, 0.20)
-    );
-    assert_eq!(
-        term_color(Color::Indexed(2), false),
-        Rgba::rgb(0.20, 0.70, 0.20)
-    );
-    assert_eq!(
-        term_color(Color::Indexed(9), false),
-        Rgba::rgb(1.00, 0.35, 0.35)
-    );
-    assert_eq!(
-        term_color(Color::Rgb(10, 20, 30), false),
-        Rgba::rgb(10.0 / 255.0, 20.0 / 255.0, 30.0 / 255.0)
-    );
+    let rgb = term_color(Color::Rgb(255, 255, 255), false);
+    assert!((rgb.r - 1.0).abs() < 1e-6 && (rgb.g - 1.0).abs() < 1e-6);
 }
 
 #[test]

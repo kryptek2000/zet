@@ -22,6 +22,25 @@ impl Rgba {
     pub fn rgb(r: f32, g: f32, b: f32) -> Self {
         Rgba { r, g, b, a: 1.0 }
     }
+
+    /// sRGB display colors (as picked on a color wheel) converted to linear
+    /// light for the shader. The swapchain is an sRGB format, so writing
+    /// these raw would wash everything out (hardware encodes linear->sRGB).
+    pub fn srgb(r: f32, g: f32, b: f32) -> Self {
+        fn enc(c: f32) -> f32 {
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        Rgba {
+            r: enc(r),
+            g: enc(g),
+            b: enc(b),
+            a: 1.0,
+        }
+    }
 }
 
 #[repr(C)]

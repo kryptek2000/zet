@@ -64,9 +64,10 @@ impl fmt::Display for InitError {
 
 impl std::error::Error for InitError {}
 
-/// Map a terminal cell color to linear-ish display RGB.
-/// M0 palette: classic 16 ANSI colors; Rgb passes through normalized.
-/// Bold lifts standard colors 0-7 to their bright 8-15 variants.
+/// Map a terminal cell color to linear display RGB.
+/// M0 palette: classic 16 ANSI colors picked as sRGB display values and
+/// converted to linear (the swapchain is an sRGB format); Rgb passes
+/// through the same conversion. Bold lifts 0-7 to bright 8-15.
 pub fn term_color(color: zet_term::Color, bold: bool) -> Rgba {
     const PALETTE: [(f32, f32, f32); 16] = [
         (0.10, 0.10, 0.10), // 0 black
@@ -91,10 +92,10 @@ pub fn term_color(color: zet_term::Color, bold: bool) -> Rgba {
         zet_term::Color::Indexed(i) => {
             let i = if bold && i < 8 { i + 8 } else { i };
             let (r, g, b) = PALETTE[(i % 16) as usize];
-            Rgba::rgb(r, g, b)
+            Rgba::srgb(r, g, b)
         }
         zet_term::Color::Rgb(r, g, b) => {
-            Rgba::rgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
+            Rgba::srgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
         }
     }
 }
@@ -145,6 +146,10 @@ impl Renderer {
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .ok_or(InitError::NoSurfaceConfig)?;
         surface.configure(&device, &config);
+        eprintln!(
+            "zet-gpu: format={:?} present={:?} {}x{}",
+            config.format, config.present_mode, config.width, config.height
+        );
 
         let shaper = Shaper::new(16.0);
         let (cw, ch) = shaper.cell_px();
