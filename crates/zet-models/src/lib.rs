@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub mod keys;
 pub mod mcp;
 pub mod openai;
 
+pub use keys::KeyError;
 pub use mcp::McpError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
