@@ -61,6 +61,18 @@ impl Session {
         Ok(self.child.try_wait()?.map(|s| s.exit_code()))
     }
 
+    /// The line discipline's erase character (termios VERASE), for Backspace.
+    /// Falls back to DEL when unreadable or disabled.
+    #[cfg(unix)]
+    pub fn erase_char(&self) -> u8 {
+        use nix::sys::termios::SpecialCharacterIndices;
+        self.master
+            .get_termios()
+            .map(|t| t.control_chars[SpecialCharacterIndices::VERASE as usize])
+            .filter(|&c| c != 0)
+            .unwrap_or(0x7f)
+    }
+
     pub fn resize(&self, cols: u16, rows: u16) -> std::io::Result<()> {
         self.master
             .resize(PtySize {

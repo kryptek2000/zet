@@ -38,6 +38,7 @@ pub fn translate(
         Key::Named(NamedKey::Home) => Some(b"\x1b[H".to_vec()),
         Key::Named(NamedKey::End) => Some(b"\x1b[F".to_vec()),
         Key::Named(NamedKey::Delete) => Some(b"\x1b[3~".to_vec()),
+        Key::Character(s) if &**s == "\u{8}" => Some(b"\x7f".to_vec()),
         _ => text.map(|t| t.as_bytes().to_vec()),
     }
 }

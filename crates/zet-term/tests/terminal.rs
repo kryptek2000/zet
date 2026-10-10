@@ -190,3 +190,44 @@ fn cursor_save_restore_roundtrip() {
     u.feed(b"\x1b[3;3H\x1b[s\x1b[9;9H\x1b[u");
     assert_eq!(u.cursor(), (2, 2));
 }
+
+#[test]
+fn backspace_moves_cursor_back_for_overwrite() {
+    let mut t = Terminal::new(80, 24);
+    t.feed(b"ab\x08X");
+    assert_eq!(t.line_text(0).trim_end(), "aX");
+    assert_eq!(t.cursor(), (2, 0));
+    let mut edge = Terminal::new(80, 24);
+    edge.feed(b"\x08\x08Q");
+    assert_eq!(edge.cell(0, 0).unwrap().c, 'Q');
+    assert_eq!(edge.cursor(), (1, 0));
+}
+
+#[test]
+fn tab_advances_to_next_stop() {
+    let mut t = Terminal::new(80, 24);
+    t.feed(b"a\tb");
+    assert_eq!(t.cell(0, 0).unwrap().c, 'a');
+    assert_eq!(t.cell(8, 0).unwrap().c, 'b');
+    assert_eq!(t.cursor(), (9, 0));
+}
+
+#[test]
+fn vt_ff_act_as_linefeed_and_bel_ignored() {
+    let mut t = Terminal::new(80, 24);
+    t.feed(b"a\x0bB\x0cC\x07D");
+    assert_eq!(t.cell(0, 0).unwrap().c, 'a');
+    assert_eq!(t.cell(0, 1).unwrap().c, 'B');
+    assert_eq!(t.cell(0, 2).unwrap().c, 'C');
+    assert_eq!(t.cell(1, 2).unwrap().c, 'D');
+}
+
+#[test]
+fn readline_erase_echo_removes_char_visually() {
+    // What bash emits when the user hits Backspace: BS, space, BS.
+    let mut t = Terminal::new(80, 24);
+    t.feed(b"ab");
+    t.feed(b"\x08 \x08");
+    assert_eq!(t.line_text(0).trim_end(), "a");
+    assert_eq!(t.cursor(), (1, 0));
+}

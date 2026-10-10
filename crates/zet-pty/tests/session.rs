@@ -65,3 +65,14 @@ fn consecutive_writes_all_reach_shell() {
         String::from_utf8_lossy(&out)
     );
 }
+
+#[test]
+#[cfg(unix)]
+fn erase_char_matches_line_discipline() {
+    let s = Session::spawn("sh", &[], 80, 24).unwrap();
+    let erase = s.erase_char();
+    assert!(
+        erase == 0x7f || erase == 0x08,
+        "implausible VERASE {erase:#x}"
+    );
+}

@@ -196,6 +196,17 @@ impl Terminal {
             self.cx = 0;
         } else if b == 0x1b {
             self.state = State::Escape;
+        } else if b == 0x08 {
+            self.cx = self.cx.saturating_sub(1);
+        } else if b == b'\t' {
+            self.cx = ((self.cx / 8) + 1) * 8;
+            if self.cx >= self.cols {
+                self.cx = 0;
+                self.linefeed();
+            }
+        } else if b == 0x0b || b == 0x0c {
+            self.linefeed();
+            self.cx = 0;
         } else {
             self.text(b);
         }

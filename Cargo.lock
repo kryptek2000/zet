@@ -2996,6 +2996,7 @@ version = "0.1.0"
 name = "zet-pty"
 version = "0.1.0"
 dependencies = [
+ "nix",
  "portable-pty",
  "zet-term",
 ]

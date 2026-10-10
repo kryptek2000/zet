@@ -46,6 +46,7 @@ struct App {
     rows: usize,
     shell_name: String,
     dead: bool,
+    erase: u8,
 }
 
 impl App {
@@ -115,12 +116,16 @@ impl ApplicationHandler for App {
                 self.mods = m.state();
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if let Some(bytes) = translate(
+                if let Some(mut bytes) = translate(
                     &event.logical_key,
                     event.text.as_deref(),
                     event.state == ElementState::Pressed,
                     &self.mods,
                 ) {
+                    // Send exactly what the line discipline erases with.
+                    if bytes == [0x7f] {
+                        bytes = vec![self.erase];
+                    }
                     if let Some(s) = &mut self.session {
                         let _ = s.write_all(&bytes);
                     }
@@ -195,6 +200,10 @@ fn main() {
         rows: 24,
         shell_name,
         dead: false,
+        erase: 0x7f,
     };
+    if let Some(s) = &app.session {
+        app.erase = s.erase_char();
+    }
     event_loop.run_app(&mut app).unwrap();
 }

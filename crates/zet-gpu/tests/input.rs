@@ -52,3 +52,17 @@ fn navigation_keys_emit_escape_sequences() {
         );
     }
 }
+
+#[test]
+fn backspace_as_text_maps_to_del() {
+    // Some platforms report Backspace as U+0008 text instead of Named.
+    assert_eq!(
+        translate(
+            &Key::Character("\u{8}".into()),
+            Some("\u{8}"),
+            true,
+            &plain()
+        ),
+        Some(vec![0x7f])
+    );
+}

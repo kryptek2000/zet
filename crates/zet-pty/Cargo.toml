@@ -7,3 +7,6 @@ license.workspace = true
 [dependencies]
 portable-pty = "0.9"
 zet-term = { path = "../zet-term" }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.28", features = ["term"] }
