@@ -42,7 +42,10 @@ fn auth_add(provider: &str) {
         std::process::exit(2);
     }
     // First line only: read_to_string blocks to EOF on a terminal and would
-    // swallow later input into the key.
+    // swallow later input into the key. Stdin::lines is inherent.
+    eprint!("Paste API key for {provider}: ");
+    use std::io::Write as _;
+    let _ = std::io::stderr().flush();
     let key = match std::io::stdin().lines().next() {
         Some(Ok(line)) => line,
         _ => {

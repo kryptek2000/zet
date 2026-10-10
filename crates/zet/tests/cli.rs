@@ -28,12 +28,14 @@ fn auth_bad_usage_fails_loudly() {
 #[test]
 #[ignore]
 fn auth_add_stores_first_stdin_line_only() {
+    use std::io::Read as _;
     use std::io::Write;
     use std::process::Stdio;
     let mut child = zet()
         .args(["auth", "add", "compat"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     child
@@ -43,6 +45,14 @@ fn auth_add_stores_first_stdin_line_only() {
         .write_all(b"line1-key\nline2-junk\n")
         .unwrap();
     assert!(child.wait().unwrap().success());
+    let mut err = String::new();
+    child
+        .stderr
+        .as_mut()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
+    assert!(err.contains("Paste API key for compat"), "{err}");
     let stored = zet_models::keys::SystemKeychain.get("compat");
     assert_eq!(stored.as_deref(), Some("line1-key"));
     zet_models::keys::SystemKeychain.delete("compat").unwrap();
