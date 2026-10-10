@@ -78,35 +78,57 @@ pub fn classify(cmd: &str) -> Tier {
     let lower = cmd.to_lowercase();
 
     // --- T3: critical. Checked first; nothing below may downgrade these. ---
-    if lower.contains("sudo") {
+    // Privilege escalation: sudo/doas anywhere, su/gosu as a real token
+    // (bare-substring "su" would false-positive on "super", "result").
+    // Over-classifying here is the safe direction.
+    if lower.contains("sudo")
+        || lower.contains("doas")
+        || cmd
+            .split_whitespace()
+            .any(|t| matches!(t.to_lowercase().as_str(), "su" | "gosu" | "runas"))
+    {
         return Tier::T3;
     }
     if lower.contains(":(){") || lower.contains("mkfs") || lower.starts_with("dd ") {
         return Tier::T3;
     }
-    // Mass delete: rm -rf aimed at root, home, or everything.
+    // Recursive rm in any flag spelling: -r, -R, bundles (-rfv), long form.
     let toks: Vec<&str> = cmd.split_whitespace().collect();
-    if toks.first().is_some_and(|t| t.eq_ignore_ascii_case("rm"))
-        && toks
-            .iter()
-            .any(|t| *t == "-rf" || *t == "-fr" || *t == "-r")
-    {
-        let targets: Vec<&&str> = toks
-            .iter()
-            .skip(1)
-            .filter(|t| !t.starts_with('-'))
-            .collect();
-        let mass = targets.iter().any(|t| {
-            let t = t.trim_matches('\'').trim_matches('"');
-            matches!(
-                t,
-                "/" | "/*" | "~" | "~/*" | "." | "./" | "*" | "$HOME" | "$HOME/*"
-            )
+    if toks.first().is_some_and(|t| t.eq_ignore_ascii_case("rm")) {
+        let recursive = toks.iter().skip(1).any(|t| {
+            *t == "--recursive"
+                || (t.starts_with('-')
+                    && !t.starts_with("--")
+                    && t[1..].chars().any(|c| c == 'r' || c == 'R'))
         });
-        if mass || targets.is_empty() {
-            return Tier::T3;
+        if recursive {
+            let targets: Vec<&&str> = toks
+                .iter()
+                .skip(1)
+                .filter(|t| !t.starts_with('-'))
+                .collect();
+            let mass = targets.iter().any(|t| {
+                let t = t.trim_matches('\'').trim_matches('"');
+                matches!(
+                    t,
+                    "/" | "/*"
+                        | "~"
+                        | "~/*"
+                        | "~/"
+                        | "."
+                        | "./"
+                        | "*"
+                        | "$HOME"
+                        | "$HOME/*"
+                        | "$HOME/"
+                )
+            });
+            if mass || targets.is_empty() {
+                return Tier::T3;
+            }
+            return Tier::T2;
         }
-        return Tier::T2;
+        return Tier::T1;
     }
     if cmd.split_whitespace().any(is_secret_token) {
         return Tier::T3;
@@ -119,11 +141,15 @@ pub fn classify(cmd: &str) -> Tier {
     }
 
     // --- T2: risky. ---
-    if lower.contains("| sh")
-        || lower.contains("| bash")
-        || lower.contains("| sudo")
-        || lower.contains("|sudo")
-    {
+    // Pipe-to-shell in any spacing: split on '|' and inspect each segment's
+    // command, so `|sh`, `|  sh`, `|bash` all match while `|show` does not.
+    let piped_shell = lower.split('|').skip(1).any(|seg| {
+        matches!(
+            first_token(seg),
+            "sh" | "bash" | "dash" | "zsh" | "fish" | "sudo" | "doas" | "su"
+        )
+    });
+    if piped_shell {
         return Tier::T2;
     }
     let first = first_token(&lower);
@@ -156,9 +182,7 @@ pub fn classify(cmd: &str) -> Tier {
     ) {
         return Tier::T1;
     }
-    if first == "rm" {
-        return Tier::T1;
-    }
+    // Note: `rm` is handled above (recursive spellings); plain rm returns T1 there.
 
     // --- T0: known reads. ---
     if matches!(

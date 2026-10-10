@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use zet_agent::{Agent, AllowAll, DenyNonRead};
+use zet_agent::{Agent, AgentError, AllowAll, DenyNonRead, UndoError};
 use zet_models::{ChatModel, ChatRequest, ChatResponse, Message, Role, ToolCall};
 use zet_policy::Tier;
 
@@ -296,4 +296,71 @@ fn checkpoint_outside_a_repo_is_none() {
     .with_workdir(dir.clone());
     assert!(agent.checkpoint().unwrap().is_none());
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn max_iters_stops_a_chatty_model() {
+    let model = Script::new(vec![
+        Script::shell_call("c1", "echo one"),
+        Script::shell_call("c2", "echo two"),
+        Script::shell_call("c3", "echo three"),
+    ]);
+    let mut agent = Agent::new(model, AllowAll, true, 2);
+    match agent.run("never stops").unwrap_err() {
+        AgentError::MaxIters(2) => {}
+        other => panic!("expected MaxIters(2), got {other:?}"),
+    }
+    assert_eq!(agent.journal.len(), 2);
+}
+
+#[test]
+fn checkpoint_failure_blocks_the_step() {
+    // Unborn repo: work tree exists but HEAD does not, so rev-parse fails.
+    let dir = std::env::temp_dir().join(format!(
+        "zet_unborn_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    git(&dir, &["init", "-q"]);
+
+    let model = Script::new(vec![
+        Script::shell_call("c1", "echo hi > f.txt"),
+        Script::final_text("blocked?"),
+    ]);
+    let mut agent = Agent::new(model, AllowAll, true, 8).with_workdir(dir.clone());
+    assert_eq!(agent.run("write it").unwrap(), "blocked?");
+    assert_eq!(agent.journal.len(), 1);
+    let step = &agent.journal[0];
+    assert!(step.approved && !step.executed);
+    assert!(step.output.contains("checkpoint failed"));
+    assert!(!dir.join("f.txt").exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn undo_of_a_dropped_stash_surfaces_not_found() {
+    let dir = temp_repo();
+    std::fs::write(dir.join("f.txt"), "v1").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "v1"]);
+    std::fs::write(dir.join("f.txt"), "dirt").unwrap();
+
+    let agent = Agent::new(
+        Script::new(vec![Script::final_text("x")]),
+        AllowAll,
+        true,
+        8,
+    )
+    .with_workdir(dir.clone());
+    let cp = agent.checkpoint().unwrap();
+    assert!(cp.is_some());
+    git(&dir, &["stash", "drop"]);
+    match agent.undo(&cp).unwrap_err() {
+        UndoError::NotFound(_) => {}
+        other => panic!("expected NotFound, got {other:?}"),
+    }
 }

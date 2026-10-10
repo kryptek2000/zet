@@ -53,6 +53,8 @@ pub struct JournalEntry {
     pub approved: bool,
     pub executed: bool,
     pub exit_code: Option<i32>,
+    /// Raw step output, verbatim. M0: no redaction — secret scrubbing before
+    /// model upload is zet-context's job (M1); never ship the journal off-box.
     pub output: String,
     /// Pre-mutation checkpoint (Some when a T1+ step ran in a repo).
     pub checkpoint: Option<Checkpoint>,
