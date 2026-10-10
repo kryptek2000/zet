@@ -25,6 +25,8 @@ fn fake_model_roundtrips_through_trait() {
         messages: vec![Message {
             role: Role::User,
             text: "hi".to_string(),
+            tool_call_id: None,
+            tool_calls: vec![],
         }],
         tools: vec![],
         max_tokens: 64,

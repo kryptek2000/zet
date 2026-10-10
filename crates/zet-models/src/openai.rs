@@ -9,6 +9,7 @@ pub struct OpenAICompat {
     base_url: String,
     api_key: String,
     model: String,
+    agent: ureq::Agent,
 }
 
 impl OpenAICompat {
@@ -17,6 +18,11 @@ impl OpenAICompat {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
             model,
+            agent: ureq::Agent::new_with_config(
+                ureq::config::Config::builder()
+                    .http_status_as_error(false)
+                    .build(),
+            ),
         }
     }
 
@@ -30,6 +36,18 @@ impl OpenAICompat {
     }
 }
 
+/// First 300 chars of an error body, single-lined. Provider errors name
+/// the real cause (unknown model, bad field); bare statuses don't.
+fn snippet(body: &mut ureq::Body) -> String {
+    let text = body.read_to_string().unwrap_or_default();
+    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut short = flat.chars().take(300).collect::<String>();
+    if short.len() < flat.len() {
+        short.push('…');
+    }
+    short
+}
+
 impl ChatModel for OpenAICompat {
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, ModelError> {
         let mut messages = Vec::with_capacity(req.messages.len() + 1);
@@ -37,7 +55,30 @@ impl ChatModel for OpenAICompat {
             messages.push(json!({"role": "system", "content": system}));
         }
         for m in &req.messages {
-            messages.push(json!({"role": Self::role(m.role), "content": m.text}));
+            let mut msg = serde_json::Map::new();
+            msg.insert(
+                "role".to_string(),
+                Value::String(Self::role(m.role).to_string()),
+            );
+            msg.insert("content".to_string(), Value::String(m.text.clone()));
+            if let Some(id) = &m.tool_call_id {
+                msg.insert("tool_call_id".to_string(), Value::String(id.clone()));
+            }
+            if !m.tool_calls.is_empty() {
+                let calls: Vec<Value> = m
+                    .tool_calls
+                    .iter()
+                    .map(|c| {
+                        json!({
+                            "id": c.id,
+                            "type": "function",
+                            "function": {"name": c.name, "arguments": c.arguments},
+                        })
+                    })
+                    .collect();
+                msg.insert("tool_calls".to_string(), Value::Array(calls));
+            }
+            messages.push(Value::Object(msg));
         }
         let tools: Vec<Value> = req
             .tools
@@ -60,25 +101,29 @@ impl ChatModel for OpenAICompat {
             "max_tokens": req.max_tokens,
         });
 
-        let mut resp = ureq::post(format!("{}/chat/completions", self.base_url))
+        let mut resp = self
+            .agent
+            .post(format!("{}/chat/completions", self.base_url))
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .send_json(body)
-            .map_err(|e| match e {
-                ureq::Error::StatusCode(401 | 403) => {
-                    ModelError::Auth("provider rejected the credentials".to_string())
+            .map_err(|e| ModelError::Network(e.to_string()))?;
+        // Provider error bodies carry the real reason (bad model id, bad
+        // payload shape); surface a snippet instead of a bare status.
+        let status = resp.status().as_u16();
+        if status != 200 {
+            let snippet = snippet(resp.body_mut());
+            return Err(match status {
+                401 | 403 => {
+                    ModelError::Auth(format!("provider rejected the credentials: {snippet}"))
                 }
-                ureq::Error::StatusCode(429) => {
-                    ModelError::RateLimited("provider rate limit hit".to_string())
-                }
-                ureq::Error::StatusCode(code) if code >= 500 => {
-                    ModelError::Server(format!("provider status {code}"))
-                }
-                ureq::Error::StatusCode(code) => {
-                    ModelError::Protocol(format!("provider rejected request: status {code}"))
-                }
-                other => ModelError::Network(other.to_string()),
-            })?;
+                429 => ModelError::RateLimited(format!("provider rate limit hit: {snippet}")),
+                500.. => ModelError::Server(format!("provider status {status}: {snippet}")),
+                _ => ModelError::Protocol(format!(
+                    "provider rejected request: status {status}: {snippet}"
+                )),
+            });
+        }
         let payload: Value = resp
             .body_mut()
             .read_json()

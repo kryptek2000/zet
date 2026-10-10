@@ -88,6 +88,8 @@ fn openai_compat_roundtrip_against_stub() {
         messages: vec![Message {
             role: Role::User,
             text: "hello".to_string(),
+            tool_call_id: None,
+            tool_calls: vec![],
         }],
         tools: vec![ToolDef {
             name: "read_file".to_string(),
@@ -111,10 +113,94 @@ fn bare_req() -> ChatRequest {
         messages: vec![Message {
             role: Role::User,
             text: "hi".to_string(),
+            tool_call_id: None,
+            tool_calls: vec![],
         }],
         tools: vec![],
         max_tokens: 8,
     }
+}
+
+#[test]
+fn tool_messages_carry_call_id() {
+    use zet_models::openai::OpenAICompat;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            head.push(byte[0]);
+        }
+        let head_text = String::from_utf8_lossy(&head).into_owned().to_lowercase();
+        let len = head_text
+            .lines()
+            .find_map(|l| {
+                l.strip_prefix("content-length:")
+                    .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+            })
+            .unwrap_or(0);
+        let mut body = vec![0u8; len];
+        stream.read_exact(&mut body).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // Real providers 400 without this (OpenRouter: tool messages must
+        // include a non-empty string tool_call_id).
+        let tool_msg = payload["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .expect("no tool message sent");
+        assert_eq!(tool_msg["tool_call_id"], "call_9");
+        let assistant_msg = payload["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("no assistant message sent");
+        assert_eq!(assistant_msg["tool_calls"][0]["id"], "call_9");
+        assert_eq!(assistant_msg["tool_calls"][0]["type"], "function");
+        let reply =
+            serde_json::json!({"choices": [{"message": {"role": "assistant", "content": "ok"}}]});
+        let bytes = serde_json::to_vec(&reply).unwrap();
+        use std::io::Write;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            bytes.len()
+        )
+        .unwrap();
+        stream.write_all(&bytes).unwrap();
+    });
+
+    let client = OpenAICompat::new(
+        format!("http://{addr}"),
+        "sk-test".to_string(),
+        "stub-model".to_string(),
+    );
+    let mut req = bare_req();
+    req.messages.push(Message {
+        role: Role::Assistant,
+        text: String::new(),
+        tool_call_id: None,
+        tool_calls: vec![zet_models::ToolCall {
+            id: "call_9".to_string(),
+            name: "run_shell".to_string(),
+            arguments: "{}".to_string(),
+        }],
+    });
+    req.messages.push(Message {
+        role: Role::Tool,
+        text: "output".to_string(),
+        tool_call_id: Some("call_9".to_string()),
+        tool_calls: vec![],
+    });
+    let res = client.chat(&req).unwrap();
+    assert_eq!(res.text, "ok");
+    server.join().unwrap();
 }
 
 #[test]

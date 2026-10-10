@@ -156,6 +156,8 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
         let mut messages = vec![Message {
             role: Role::User,
             text: goal.to_string(),
+            tool_call_id: None,
+            tool_calls: vec![],
         }];
         for _ in 0..self.max_iters {
             let req = ChatRequest {
@@ -166,10 +168,14 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
                 max_tokens: 1024,
             };
             let res = self.model.chat(&req).map_err(AgentError::Model)?;
-            if !res.text.is_empty() {
+            // The assistant turn is always recorded, calls included: providers
+            // reject tool messages that answer no preceding tool_calls.
+            if !res.text.is_empty() || !res.tool_calls.is_empty() {
                 messages.push(Message {
                     role: Role::Assistant,
                     text: res.text.clone(),
+                    tool_call_id: None,
+                    tool_calls: res.tool_calls.clone(),
                 });
             }
             if res.tool_calls.is_empty() {
@@ -186,10 +192,11 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
                 ));
             }
             for (id, text) in results {
-                let _ = id;
                 messages.push(Message {
                     role: Role::Tool,
                     text,
+                    tool_call_id: Some(id),
+                    tool_calls: vec![],
                 });
             }
         }

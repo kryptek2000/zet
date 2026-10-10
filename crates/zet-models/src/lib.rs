@@ -21,6 +21,13 @@ pub enum Role {
 pub struct Message {
     pub role: Role,
     pub text: String,
+    /// Set on Tool messages: which call this answers (OpenAI-compat
+    /// providers reject tool messages without one).
+    pub tool_call_id: Option<String>,
+    /// Set on Assistant messages that requested tool calls. Providers
+    /// require the tool message to answer a preceding assistant message
+    /// bearing the matching `tool_calls` entry.
+    pub tool_calls: Vec<ToolCall>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -81,6 +88,12 @@ pub trait ChatModel {
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, ModelError>;
 }
 
+impl ChatModel for Box<dyn ChatModel> {
+    fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, ModelError> {
+        (**self).chat(req)
+    }
+}
+
 /// Provider configuration. Keys arrive from the OS keychain at runtime
 /// (see `zet auth add`); they are never written to disk by this crate.
 #[derive(Debug, Clone)]
@@ -103,6 +116,21 @@ impl Provider {
             base_url: "https://openrouter.ai/api/v1".to_string(),
             api_key,
             model,
+        }
+    }
+
+    /// Build the chat client for this provider. Local endpoints reuse the
+    /// OpenAI-compatible client with an empty key.
+    pub fn into_client(self) -> Box<dyn ChatModel> {
+        match self {
+            Provider::OpenAICompat {
+                base_url,
+                api_key,
+                model,
+            } => Box::new(openai::OpenAICompat::new(base_url, api_key, model)),
+            Provider::Local { endpoint, model } => {
+                Box::new(openai::OpenAICompat::new(endpoint, String::new(), model))
+            }
         }
     }
 
