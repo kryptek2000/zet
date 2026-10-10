@@ -12,6 +12,14 @@ fn term_colors_map_to_expected_rgb() {
     assert_eq!(term_color(Color::Default, false), Rgba::WHITE);
     let rgb = term_color(Color::Rgb(255, 255, 255), false);
     assert!((rgb.r - 1.0).abs() < 1e-6 && (rgb.g - 1.0).abs() < 1e-6);
+    // Low end exercises the linear branch (10/255 = 0.0392 <= 0.04045).
+    let low = term_color(Color::Rgb(10, 20, 30), false);
+    assert!(
+        (low.r - 10.0 / 255.0 / 12.92).abs() < 1e-6,
+        "low.r = {}",
+        low.r
+    );
+    assert!((low.g - 0.0063).abs() < 0.001, "low.g = {}", low.g);
 }
 
 #[test]
