@@ -1,4 +1,3 @@
-use std::io::Read;
 use zet_models::keys::{EnvKeychain, Keychain, SystemKeychain};
 
 const PROVIDERS: &[&str] = &["openai", "openrouter", "compat"];
@@ -42,11 +41,15 @@ fn auth_add(provider: &str) {
         eprintln!("unknown provider {provider:?}: want one of {PROVIDERS:?}");
         std::process::exit(2);
     }
-    let mut key = String::new();
-    if std::io::stdin().read_to_string(&mut key).is_err() {
-        eprintln!("failed to read key from stdin");
-        std::process::exit(1);
-    }
+    // First line only: read_to_string blocks to EOF on a terminal and would
+    // swallow later input into the key.
+    let key = match std::io::stdin().lines().next() {
+        Some(Ok(line)) => line,
+        _ => {
+            eprintln!("failed to read key from stdin");
+            std::process::exit(1);
+        }
+    };
     let key = key.trim();
     if key.is_empty() {
         eprintln!("empty key, not stored");
