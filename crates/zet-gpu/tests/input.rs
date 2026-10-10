@@ -1,5 +1,5 @@
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use zet_gpu::input::translate;
+use zet_gpu::input::{paste_bytes, translate};
 
 fn plain() -> ModifiersState {
     ModifiersState::empty()
@@ -7,6 +7,10 @@ fn plain() -> ModifiersState {
 
 fn ctrl() -> ModifiersState {
     ModifiersState::CONTROL
+}
+
+fn ctrl_shift() -> ModifiersState {
+    ModifiersState::CONTROL | ModifiersState::SHIFT
 }
 
 #[test]
@@ -65,4 +69,30 @@ fn backspace_as_text_maps_to_del() {
         ),
         Some(vec![0x7f])
     );
+}
+
+#[test]
+fn paste_chords_are_detected_not_typed() {
+    use zet_gpu::input::is_paste;
+    // Ctrl+Shift+V and Shift+Insert paste.
+    assert!(is_paste(&Key::Character("V".into()), true, &ctrl_shift()));
+    assert!(is_paste(&Key::Character("v".into()), true, &ctrl_shift()));
+    assert!(is_paste(
+        &Key::Named(NamedKey::Insert),
+        true,
+        &ModifiersState::SHIFT
+    ));
+    // Nearby chords are not paste: Ctrl+V is a literal control char,
+    // plain V types, releases never paste.
+    assert!(!is_paste(&Key::Character("v".into()), true, &ctrl()));
+    assert!(!is_paste(&Key::Character("v".into()), true, &plain()));
+    assert!(!is_paste(&Key::Character("V".into()), false, &ctrl_shift()));
+    assert!(!is_paste(&Key::Named(NamedKey::Insert), true, &plain()));
+}
+
+#[test]
+fn paste_normalizes_newlines_to_cr() {
+    assert_eq!(paste_bytes("abc"), b"abc");
+    assert_eq!(paste_bytes("a\nb\r\nc\rd"), b"a\rb\rc\rd");
+    assert_eq!(paste_bytes(""), b"");
 }

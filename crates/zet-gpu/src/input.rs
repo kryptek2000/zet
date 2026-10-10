@@ -4,6 +4,29 @@
 
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
+/// True when this press is a paste chord (Ctrl+Shift+V, Shift+Insert),
+/// not text to type. Check before [`translate`]: with Ctrl held, V would
+/// otherwise become a literal SYN byte (0x16).
+pub fn is_paste(logical: &Key, pressed: bool, mods: &ModifiersState) -> bool {
+    if !pressed {
+        return false;
+    }
+    let ctrl = mods.contains(ModifiersState::CONTROL);
+    let shift = mods.contains(ModifiersState::SHIFT);
+    match logical {
+        Key::Character(s) if ctrl && shift && s.eq_ignore_ascii_case("v") => true,
+        Key::Named(NamedKey::Insert) if shift && !ctrl => true,
+        _ => false,
+    }
+}
+
+/// Clipboard text as PTY bytes: lone LF and CRLF both become CR, bare CR
+/// passes through. (Bracketed paste, mode 2004, is a follow-up: pastes
+/// execute line-by-line until then, like any non-bracketed terminal.)
+pub fn paste_bytes(text: &str) -> Vec<u8> {
+    text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+}
+
 /// Translate a key press into bytes for the PTY.
 /// Returns None for releases and unmapped keys.
 pub fn translate(
