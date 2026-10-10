@@ -80,6 +80,8 @@ enum State {
     Osc {
         saw_esc: bool,
     },
+    /// ESC ( X / ESC ) X: charset select; consumes the final byte.
+    Scs,
 }
 
 pub struct Terminal {
@@ -94,6 +96,8 @@ pub struct Terminal {
     saved_cursor: (usize, usize),
     alt_grid: Vec<Vec<Cell>>,
     alt_active: bool,
+    scroll_top: usize,
+    scroll_bottom: usize,
     pen: Pen,
     state: State,
     osc_buf: Vec<u8>,
@@ -121,6 +125,8 @@ impl Terminal {
             saved_cursor: (0, 0),
             alt_grid: Vec::new(),
             alt_active: false,
+            scroll_top: 0,
+            scroll_bottom: rows - 1,
             pen: Pen {
                 fg: Color::Default,
                 bg: Color::Default,
@@ -140,6 +146,7 @@ impl Terminal {
             match self.state {
                 State::Ground => self.ground(b),
                 State::Escape => self.escape(b),
+                State::Scs => self.state = State::Ground,
                 State::Osc { saw_esc } => self.osc(b, saw_esc),
                 State::Csi {
                     mut current,
@@ -273,8 +280,20 @@ impl Terminal {
         } else if b == b']' {
             self.osc_buf.clear();
             self.state = State::Osc { saw_esc: false };
+        } else if b == b'(' || b == b')' || b == b'*' || b == b'+' {
+            self.state = State::Scs;
         } else if b == b'7' {
             self.saved_cursor = (self.cx, self.cy);
+            self.state = State::Ground;
+        } else if b == b'M' {
+            self.reverse_index();
+            self.state = State::Ground;
+        } else if b == b'E' {
+            self.linefeed();
+            self.cx = 0;
+            self.state = State::Ground;
+        } else if b == b'D' {
+            self.linefeed();
             self.state = State::Ground;
         } else if b == b'8' {
             (self.cx, self.cy) = self.saved_cursor;
@@ -350,6 +369,21 @@ impl Terminal {
                 self.cx = self.cx.min(self.cols - 1);
                 self.cy = self.cy.min(self.rows - 1);
             }
+            b'r' => {
+                let top = params.first().copied().unwrap_or(1).max(1) as usize;
+                let bottom = params.get(1).copied().unwrap_or(self.rows as u16) as usize;
+                let top = (top - 1).min(self.rows - 1);
+                let bottom = bottom.clamp(1, self.rows) - 1;
+                if top < bottom {
+                    self.scroll_top = top;
+                    self.scroll_bottom = bottom;
+                } else {
+                    self.scroll_top = 0;
+                    self.scroll_bottom = self.rows - 1;
+                }
+                self.cx = 0;
+                self.cy = self.scroll_top;
+            }
             b'H' | b'f' => {
                 let row = params.first().copied().unwrap_or(1).max(1);
                 let col = params.get(1).copied().unwrap_or(1).max(1);
@@ -406,10 +440,34 @@ impl Terminal {
     }
 
     fn linefeed(&mut self) {
-        if self.cy + 1 >= self.rows {
-            self.scroll_up();
+        if self.cy == self.scroll_bottom {
+            if self.scroll_top == 0 && self.scroll_bottom + 1 >= self.rows {
+                self.scroll_up();
+            } else {
+                self.scroll_region_up();
+            }
+        } else if self.cy + 1 >= self.rows {
+            self.cy = self.rows - 1;
         } else {
             self.cy += 1;
+        }
+    }
+
+    fn scroll_region_up(&mut self) {
+        for y in self.scroll_top..self.scroll_bottom {
+            let next = self.grid[y + 1].clone();
+            self.grid[y] = next;
+        }
+        self.grid[self.scroll_bottom] = vec![Cell::blank(); self.cols];
+    }
+
+    fn reverse_index(&mut self) {
+        if self.cy == self.scroll_top {
+            let blank = vec![Cell::blank(); self.cols];
+            self.grid.remove(self.scroll_bottom);
+            self.grid.insert(self.scroll_top, blank);
+        } else {
+            self.cy = self.cy.saturating_sub(1);
         }
     }
 
@@ -482,6 +540,8 @@ impl Terminal {
         self.rows = rows;
         self.cx = self.cx.min(cols - 1);
         self.cy = self.cy.min(rows - 1);
+        self.scroll_top = 0;
+        self.scroll_bottom = rows - 1;
         if self.alt_active {
             // self.grid is alt content, self.alt_grid is main: resize both.
             let mut main = vec![vec![Cell::blank(); cols]; rows];

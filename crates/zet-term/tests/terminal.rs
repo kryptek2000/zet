@@ -296,3 +296,50 @@ fn resize_mid_alt_preserves_both_grids() {
     assert_eq!(t.line_text(0).trim_end(), "main");
     assert_eq!(t.line_text(1), "      ");
 }
+
+#[test]
+fn charset_select_consumed_silently() {
+    let mut t = Terminal::new(80, 24);
+    t.feed(b"a\x1b(Bb\x1b(0c\x1b)Bd");
+    assert_eq!(t.line_text(0).trim_end(), "abcd");
+    assert_eq!(t.cursor(), (4, 0));
+}
+
+#[test]
+fn reverse_index_scrolls_down_at_top() {
+    let mut t = Terminal::new(80, 4);
+    t.feed(b"one\ntwo\n\x1b[1;1H\x1bM");
+    assert_eq!(t.line_text(0).trim(), "");
+    assert_eq!(t.line_text(1).trim_end(), "one");
+    assert_eq!(t.line_text(2).trim_end(), "two");
+    // Mid-screen RI just moves up.
+    t.feed(b"\x1b[3;1H\x1bM");
+    assert_eq!(t.cursor(), (0, 1));
+}
+
+#[test]
+fn nel_and_ind_feed_lines() {
+    let mut t = Terminal::new(80, 4);
+    t.feed(b"ab\x1bE");
+    assert_eq!(t.cursor(), (0, 1));
+    t.feed(b"cd\x1bD");
+    assert_eq!(t.cursor(), (2, 2));
+}
+
+#[test]
+fn scroll_region_constrains_scrolling() {
+    let mut t = Terminal::new(10, 6);
+    t.feed(b"A\nB\nC\nD\nE\nF");
+    t.feed(b"\x1b[2;4r\x1b[4;1H\n");
+    // Region rows 1..=3 scrolled; outside untouched.
+    assert_eq!(t.line_text(0).trim_end(), "A");
+    assert_eq!(t.line_text(1).trim_end(), "C");
+    assert_eq!(t.line_text(2).trim_end(), "D");
+    assert_eq!(t.line_text(3).trim(), "");
+    assert_eq!(t.line_text(4).trim_end(), "E");
+    assert_eq!(t.line_text(5).trim_end(), "F");
+    // Reset restores full scrolling.
+    t.feed(b"\x1b[r");
+    t.feed(b"\x1b[6;1H\n");
+    assert_eq!(t.line_text(4).trim_end(), "F");
+}
