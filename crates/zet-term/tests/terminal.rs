@@ -231,3 +231,30 @@ fn readline_erase_echo_removes_char_visually() {
     assert_eq!(t.line_text(0).trim_end(), "a");
     assert_eq!(t.cursor(), (1, 0));
 }
+
+#[test]
+fn alt_screen_preserves_main_grid_and_cursor() {
+    let mut t = Terminal::new(80, 24);
+    t.feed(b"main\x1b[5;10H");
+    t.feed(b"\x1b[?1049h");
+    assert_eq!(t.line_text(0).trim(), "");
+    assert_eq!(t.cursor(), (0, 0));
+    t.feed(b"alt-screen");
+    assert_eq!(t.line_text(0).trim_end(), "alt-screen");
+    t.feed(b"\x1b[?1049l");
+    assert_eq!(t.line_text(0).trim_end(), "main");
+    assert_eq!(t.cursor(), (9, 4));
+}
+
+#[test]
+fn alt_scrolling_does_not_pollute_main_scrollback() {
+    let mut t = Terminal::with_scrollback(5, 2, 10);
+    t.feed(b"m1\nm2\n");
+    assert_eq!(t.scrollback_len(), 1);
+    t.feed(b"\x1b[?1049h");
+    t.feed(b"a\nb\nc\nd\n");
+    t.feed(b"\x1b[?1049l");
+    assert_eq!(t.scrollback_len(), 1);
+    assert_eq!(t.scrollback_line(0).unwrap(), "m1   ");
+    assert_eq!(t.line_text(0), "m2   ");
+}

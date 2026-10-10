@@ -92,6 +92,8 @@ pub struct Terminal {
     cy: usize,
     cursor_visible: bool,
     saved_cursor: (usize, usize),
+    alt_grid: Vec<Vec<Cell>>,
+    alt_active: bool,
     pen: Pen,
     state: State,
     osc_buf: Vec<u8>,
@@ -117,6 +119,8 @@ impl Terminal {
             cy: 0,
             cursor_visible: true,
             saved_cursor: (0, 0),
+            alt_grid: Vec::new(),
+            alt_active: false,
             pen: Pen {
                 fg: Color::Default,
                 bg: Color::Default,
@@ -320,6 +324,23 @@ impl Terminal {
                         self.cursor_visible = show;
                     }
                 }
+                for &p in params {
+                    match (p, show) {
+                        (1049, true) => self.enter_alt(true),
+                        (1049, false) => self.exit_alt(true),
+                        (1047, true) => self.enter_alt(false),
+                        (1047, false) => self.exit_alt(false),
+                        (1048, true) => {
+                            self.saved_cursor = (self.cx, self.cy);
+                        }
+                        (1048, false) => {
+                            (self.cx, self.cy) = self.saved_cursor;
+                            self.cx = self.cx.min(self.cols - 1);
+                            self.cy = self.cy.min(self.rows - 1);
+                        }
+                        _ => {}
+                    }
+                }
             }
             b's' => {
                 self.saved_cursor = (self.cx, self.cy);
@@ -396,12 +417,45 @@ impl Terminal {
         let top = self.grid[0].clone();
         self.grid.remove(0);
         self.grid.push(vec![Cell::blank(); self.cols]);
-        if self.scrollback_cap > 0 {
+        if self.scrollback_cap > 0 && !self.alt_active {
             self.scrollback.push_back(top);
             while self.scrollback.len() > self.scrollback_cap {
                 self.scrollback.pop_front();
             }
         }
+    }
+
+    fn blank_grid(&self) -> Vec<Vec<Cell>> {
+        vec![vec![Cell::blank(); self.cols]; self.rows]
+    }
+
+    /// DECSET 1049/1047: switch to the alternate buffer (blank, no scrollback).
+    fn enter_alt(&mut self, save_cursor: bool) {
+        if self.alt_active {
+            return;
+        }
+        if save_cursor {
+            self.saved_cursor = (self.cx, self.cy);
+        }
+        let blank = self.blank_grid();
+        self.alt_grid = std::mem::replace(&mut self.grid, blank);
+        self.cx = 0;
+        self.cy = 0;
+        self.alt_active = true;
+    }
+
+    /// DECRST 1049/1047: restore the main buffer (and cursor for 1049).
+    fn exit_alt(&mut self, restore_cursor: bool) {
+        if !self.alt_active {
+            return;
+        }
+        self.grid = std::mem::take(&mut self.alt_grid);
+        if restore_cursor {
+            (self.cx, self.cy) = self.saved_cursor;
+            self.cx = self.cx.min(self.cols - 1);
+            self.cy = self.cy.min(self.rows - 1);
+        }
+        self.alt_active = false;
     }
 
     pub fn cursor(&self) -> (usize, usize) {
@@ -428,6 +482,17 @@ impl Terminal {
         self.rows = rows;
         self.cx = self.cx.min(cols - 1);
         self.cy = self.cy.min(rows - 1);
+        if self.alt_active {
+            // self.grid is alt content, self.alt_grid is main: resize both.
+            let mut main = vec![vec![Cell::blank(); cols]; rows];
+            for (y, row) in main.iter_mut().enumerate() {
+                if let Some(old) = self.alt_grid.get(y) {
+                    let n = row.len().min(old.len());
+                    row[..n].copy_from_slice(&old[..n]);
+                }
+            }
+            self.alt_grid = main;
+        }
     }
 
     pub fn cell(&self, x: usize, y: usize) -> Option<Cell> {
