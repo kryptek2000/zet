@@ -121,7 +121,7 @@ impl ApplicationHandler for App {
                     event.state == ElementState::Pressed,
                     &self.mods,
                 ) {
-                    if let Some(s) = &self.session {
+                    if let Some(s) = &mut self.session {
                         let _ = s.write_all(&bytes);
                     }
                 }
@@ -159,7 +159,7 @@ fn main() {
     let (prog, hook) = shell_program();
     let shell_name = prog.clone();
     // Guarantee a sane TERM even under GUI launchers.
-    let session = Session::spawn("env", &["TERM=xterm-256color", &prog, "-i"], 80, 24).unwrap();
+    let mut session = Session::spawn("env", &["TERM=xterm-256color", &prog, "-i"], 80, 24).unwrap();
     if let Some(hook) = hook {
         let _ = session.write_all(format!("source {hook}\nclear\n").as_bytes());
     }

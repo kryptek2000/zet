@@ -166,3 +166,27 @@ fn utf8_split_across_feeds_and_invalid_bytes() {
     assert_eq!(t.cell(2, 0).unwrap().c, '\u{FFFD}');
     assert_eq!(t.cell(3, 0).unwrap().c, '!');
 }
+
+#[test]
+fn private_csi_sequences_parse_without_leaking() {
+    let mut t = Terminal::new(80, 24);
+    t.feed(b"a\x1b[?2004h\x1b[?25lX");
+    assert_eq!(t.cell(0, 0).unwrap().c, 'a');
+    assert_eq!(t.cell(1, 0).unwrap().c, 'X');
+    assert_eq!(t.cursor(), (2, 0));
+    assert!(!t.cursor_visible());
+    t.feed(b"\x1b[?25h");
+    assert!(t.cursor_visible());
+}
+
+#[test]
+fn cursor_save_restore_roundtrip() {
+    let mut t = Terminal::new(80, 24);
+    t.feed(b"\x1b[5;10H\x1b7\x1b[1;1HX\x1b8Y");
+    assert_eq!(t.cell(0, 0).unwrap().c, 'X');
+    assert_eq!(t.cell(9, 4).unwrap().c, 'Y');
+    assert_eq!(t.cursor(), (10, 4));
+    let mut u = Terminal::new(80, 24);
+    u.feed(b"\x1b[3;3H\x1b[s\x1b[9;9H\x1b[u");
+    assert_eq!(u.cursor(), (2, 2));
+}

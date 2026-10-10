@@ -5,6 +5,7 @@ pub mod shell;
 
 pub struct Session {
     master: Box<dyn MasterPty + Send>,
+    writer: Box<dyn Write + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
 }
 
@@ -25,15 +26,18 @@ impl Session {
             .slave
             .spawn_command(cmd)
             .map_err(std::io::Error::other)?;
+        // take_writer() is single-use: hold the one writer for the session.
+        let writer = pair.master.take_writer().map_err(std::io::Error::other)?;
         Ok(Session {
             master: pair.master,
+            writer,
             child,
         })
     }
 
-    pub fn write_all(&self, bytes: &[u8]) -> std::io::Result<()> {
-        let mut writer = self.master.take_writer().map_err(std::io::Error::other)?;
-        writer.write_all(bytes)
+    pub fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.writer.write_all(bytes)?;
+        self.writer.flush()
     }
 
     /// A second read handle for a pump thread; closed when the slave exits.

@@ -413,6 +413,7 @@ impl Renderer {
     pub fn draw_terminal(&mut self, term: &zet_term::Terminal, cols: usize, rows: usize) {
         self.quads.clear();
         let (cur_x, cur_y) = term.cursor();
+        let show_cursor = term.cursor_visible();
         for y in 0..rows {
             let line: Vec<char> = term.line_text(y).chars().collect();
             for (x, &c) in line.iter().enumerate().take(cols) {
@@ -420,7 +421,7 @@ impl Renderer {
                 let fg = cell.map(|cell| cell.fg).unwrap_or_default();
                 let bg = cell.map(|cell| cell.bg).unwrap_or_default();
                 let bold = cell.map(|cell| cell.bold).unwrap_or(false);
-                let cursor_here = x == cur_x && y == cur_y;
+                let cursor_here = show_cursor && x == cur_x && y == cur_y;
                 if bg != zet_term::Color::Default || cursor_here {
                     let fill = if cursor_here {
                         match fg {

@@ -50,3 +50,18 @@ fn cloned_reader_streams_output_from_thread() {
     .unwrap();
     assert!(String::from_utf8_lossy(&out).contains("from-thread"));
 }
+
+#[test]
+fn consecutive_writes_all_reach_shell() {
+    let mut s = Session::spawn("sh", &[], 80, 24).unwrap();
+    s.write_all(b"echo ").unwrap();
+    s.write_all(b"hi\n").unwrap();
+    s.write_all(b"exit\n").unwrap();
+    let mut out = Vec::new();
+    s.wait_with_output(&mut out).unwrap();
+    assert!(
+        String::from_utf8_lossy(&out).contains("hi"),
+        "output was: {:?}",
+        String::from_utf8_lossy(&out)
+    );
+}

@@ -75,6 +75,7 @@ enum State {
         current: u16,
         params: [u16; 16],
         count: usize,
+        private: Option<u8>,
     },
     Osc {
         saw_esc: bool,
@@ -89,6 +90,8 @@ pub struct Terminal {
     scrollback_cap: usize,
     cx: usize,
     cy: usize,
+    cursor_visible: bool,
+    saved_cursor: (usize, usize),
     pen: Pen,
     state: State,
     osc_buf: Vec<u8>,
@@ -112,6 +115,8 @@ impl Terminal {
             scrollback_cap,
             cx: 0,
             cy: 0,
+            cursor_visible: true,
+            saved_cursor: (0, 0),
             pen: Pen {
                 fg: Color::Default,
                 bg: Color::Default,
@@ -136,6 +141,7 @@ impl Terminal {
                     mut current,
                     mut params,
                     mut count,
+                    mut private,
                 } => {
                     if b.is_ascii_digit() {
                         current = current.saturating_mul(10).saturating_add((b - b'0') as u16);
@@ -143,6 +149,7 @@ impl Terminal {
                             current,
                             params,
                             count,
+                            private,
                         };
                     } else if b == b';' {
                         if count < params.len() {
@@ -153,13 +160,25 @@ impl Terminal {
                             current: 0,
                             params,
                             count,
+                            private,
+                        };
+                    } else if (0x3c..=0x3f).contains(&b) && count == 0 && current == 0 {
+                        // Private markers (? <= >) and intermediates.
+                        if b == b'?' {
+                            private = Some(b'?');
+                        }
+                        self.state = State::Csi {
+                            current,
+                            params,
+                            count,
+                            private,
                         };
                     } else if (0x40..=0x7e).contains(&b) {
                         if count < params.len() {
                             params[count] = current;
                             count += 1;
                         }
-                        self.dispatch_csi(b, &params[..count]);
+                        self.dispatch_csi(b, &params[..count], private);
                         self.state = State::Ground;
                     } else {
                         self.state = State::Ground;
@@ -234,10 +253,19 @@ impl Terminal {
                 current: 0,
                 params: [0; 16],
                 count: 0,
+                private: None,
             };
         } else if b == b']' {
             self.osc_buf.clear();
             self.state = State::Osc { saw_esc: false };
+        } else if b == b'7' {
+            self.saved_cursor = (self.cx, self.cy);
+            self.state = State::Ground;
+        } else if b == b'8' {
+            (self.cx, self.cy) = self.saved_cursor;
+            self.cx = self.cx.min(self.cols - 1);
+            self.cy = self.cy.min(self.rows - 1);
+            self.state = State::Ground;
         } else {
             self.state = State::Ground;
         }
@@ -271,9 +299,25 @@ impl Terminal {
         self.osc_buf.clear();
     }
 
-    fn dispatch_csi(&mut self, final_byte: u8, params: &[u16]) {
+    fn dispatch_csi(&mut self, final_byte: u8, params: &[u16], private: Option<u8>) {
         match final_byte {
             b'm' => self.pen.sgr(params),
+            b'h' | b'l' if private == Some(b'?') => {
+                let show = final_byte == b'h';
+                for &p in params {
+                    if p == 25 {
+                        self.cursor_visible = show;
+                    }
+                }
+            }
+            b's' => {
+                self.saved_cursor = (self.cx, self.cy);
+            }
+            b'u' => {
+                (self.cx, self.cy) = self.saved_cursor;
+                self.cx = self.cx.min(self.cols - 1);
+                self.cy = self.cy.min(self.rows - 1);
+            }
             b'H' | b'f' => {
                 let row = params.first().copied().unwrap_or(1).max(1);
                 let col = params.get(1).copied().unwrap_or(1).max(1);
@@ -351,6 +395,10 @@ impl Terminal {
 
     pub fn cursor(&self) -> (usize, usize) {
         (self.cx, self.cy)
+    }
+
+    pub fn cursor_visible(&self) -> bool {
+        self.cursor_visible
     }
 
     /// Resize the visible grid, preserving the overlapping top-left content.
