@@ -49,6 +49,19 @@ fn sgr_bright_colors() {
 }
 
 #[test]
+fn resize_preserves_overlapping_content() {
+    let mut t = Terminal::new(10, 4);
+    t.feed(b"hello\nworld\n");
+    t.resize(5, 3);
+    assert_eq!(t.line_text(0), "hello");
+    assert_eq!(t.line_text(1), "world");
+    assert_eq!(t.line_text(2), "     ");
+    t.feed(b"XY");
+    assert_eq!(t.cell(0, 2).unwrap().c, 'X');
+    assert_eq!(t.cursor(), (2, 2));
+}
+
+#[test]
 fn cup_moves_cursor() {
     let mut t = Terminal::new(80, 24);
     t.feed(b"\x1b[3;5HX");

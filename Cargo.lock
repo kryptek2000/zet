@@ -2976,6 +2976,7 @@ dependencies = [
  "pollster",
  "wgpu",
  "winit",
+ "zet-pty",
  "zet-term",
 ]
 

@@ -353,6 +353,24 @@ impl Terminal {
         (self.cx, self.cy)
     }
 
+    /// Resize the visible grid, preserving the overlapping top-left content.
+    /// Cursor is clamped into the new bounds; scrollback is untouched.
+    pub fn resize(&mut self, cols: usize, rows: usize) {
+        let (cols, rows) = (cols.max(1), rows.max(1));
+        let mut grid = vec![vec![Cell::blank(); cols]; rows];
+        for (y, row) in grid.iter_mut().enumerate() {
+            if let Some(old) = self.grid.get(y) {
+                let n = row.len().min(old.len());
+                row[..n].copy_from_slice(&old[..n]);
+            }
+        }
+        self.grid = grid;
+        self.cols = cols;
+        self.rows = rows;
+        self.cx = self.cx.min(cols - 1);
+        self.cy = self.cy.min(rows - 1);
+    }
+
     pub fn cell(&self, x: usize, y: usize) -> Option<Cell> {
         self.grid.get(y)?.get(x).copied()
     }

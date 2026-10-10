@@ -36,6 +36,13 @@ impl Session {
         writer.write_all(bytes)
     }
 
+    /// A second read handle for a pump thread; closed when the slave exits.
+    pub fn clone_reader(&self) -> std::io::Result<Box<dyn Read + Send>> {
+        self.master
+            .try_clone_reader()
+            .map_err(std::io::Error::other)
+    }
+
     pub fn wait_with_output(&mut self, out: &mut Vec<u8>) -> std::io::Result<u32> {
         let mut reader = self
             .master

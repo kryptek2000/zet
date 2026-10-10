@@ -10,6 +10,7 @@ winit = "0.30"
 cosmic-text = "0.19"
 bytemuck = { version = "1", features = ["derive"] }
 zet-term = { path = "../zet-term" }
+zet-pty = { path = "../zet-pty" }
 
 [dev-dependencies]
 pollster = "1"

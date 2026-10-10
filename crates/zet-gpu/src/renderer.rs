@@ -64,6 +64,14 @@ impl fmt::Display for InitError {
 
 impl std::error::Error for InitError {}
 
+/// Renderer clear color as a quad tint (for inverted cursor glyphs).
+const BG_RGBA: Rgba = Rgba {
+    r: 0.008,
+    g: 0.012,
+    b: 0.027,
+    a: 1.0,
+};
+
 /// Map a terminal cell color to linear display RGB.
 /// M0 palette: classic 16 ANSI colors picked as sRGB display values and
 /// converted to linear (the swapchain is an sRGB format); Rgb passes
@@ -332,6 +340,10 @@ impl Renderer {
         self.write_uniform(self.config.width, self.config.height);
     }
 
+    pub fn cell_px(&self) -> (u32, u32) {
+        (self.cell_w as u32, self.cell_h as u32)
+    }
+
     fn slot_for(&mut self, c: char) -> Option<Slot> {
         if let Some(&slot) = self.slots.get(&c) {
             return Some(slot);
@@ -397,15 +409,27 @@ impl Renderer {
 
     /// Stage terminal grid cells as textured quads for the next render().
     /// M0: one glyph per cell; CJK/combining alignment is a follow-up.
+    /// The cursor cell is drawn inverted (block cursor).
     pub fn draw_terminal(&mut self, term: &zet_term::Terminal, cols: usize, rows: usize) {
         self.quads.clear();
+        let (cur_x, cur_y) = term.cursor();
         for y in 0..rows {
             let line: Vec<char> = term.line_text(y).chars().collect();
             for (x, &c) in line.iter().enumerate().take(cols) {
                 let cell = term.cell(x, y);
+                let fg = cell.map(|cell| cell.fg).unwrap_or_default();
                 let bg = cell.map(|cell| cell.bg).unwrap_or_default();
                 let bold = cell.map(|cell| cell.bold).unwrap_or(false);
-                if bg != zet_term::Color::Default {
+                let cursor_here = x == cur_x && y == cur_y;
+                if bg != zet_term::Color::Default || cursor_here {
+                    let fill = if cursor_here {
+                        match fg {
+                            zet_term::Color::Default => Rgba::WHITE,
+                            _ => term_color(fg, bold),
+                        }
+                    } else {
+                        term_color(bg, false)
+                    };
                     if let Some(bg_slot) = self.bg_slot {
                         self.quads.extend(cell_quad(
                             x as u32,
@@ -414,14 +438,21 @@ impl Renderer {
                             self.cell_h,
                             (bg_slot.x, bg_slot.y),
                             self.atlas_size,
-                            term_color(bg, false),
+                            fill,
                         ));
                     }
                 }
                 if c == ' ' {
                     continue;
                 }
-                let color = term.cell(x, y).map(|cell| cell.fg).unwrap_or_default();
+                let ink = if cursor_here {
+                    match bg {
+                        zet_term::Color::Default => BG_RGBA,
+                        _ => term_color(bg, false),
+                    }
+                } else {
+                    term_color(fg, bold)
+                };
                 let Some(slot) = self.slot_for(c) else {
                     continue;
                 };
@@ -432,7 +463,7 @@ impl Renderer {
                     self.cell_h,
                     (slot.x, slot.y),
                     self.atlas_size,
-                    term_color(color, bold),
+                    ink,
                 ));
             }
         }
