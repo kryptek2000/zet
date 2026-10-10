@@ -45,6 +45,15 @@ pub struct McpClient {
     _child: Child,
 }
 
+impl Drop for McpClient {
+    fn drop(&mut self) {
+        // Best effort: kill() on an exited child errors (ignored);
+        // wait() reaps the zombie so no orphan or lingering server survives.
+        let _ = self._child.kill();
+        let _ = self._child.wait();
+    }
+}
+
 impl McpClient {
     pub fn spawn(program: &str, args: &[&str]) -> Result<Self, McpError> {
         let mut child = Command::new(program)
@@ -78,6 +87,11 @@ impl McpClient {
         )?;
         client.notify("notifications/initialized", json!({}))?;
         Ok(client)
+    }
+
+    /// Server pid, for supervision and tests.
+    pub fn pid(&self) -> u32 {
+        self._child.id()
     }
 
     pub fn list_tools(&mut self) -> Result<Vec<McpTool>, McpError> {

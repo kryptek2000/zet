@@ -27,3 +27,24 @@ fn mcp_unknown_tool_is_a_server_error() {
         "{err:?}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn drop_kills_the_server() {
+    let client = McpClient::spawn("python3", &[stub_path().as_str()]).unwrap();
+    let pid = client.pid();
+    drop(client);
+    // SIGKILL is async; poll for the reaped child.
+    for _ in 0..100 {
+        let gone = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|o| !o.status.success())
+            .unwrap_or(true);
+        if gone {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("server process {pid} survived client drop");
+}

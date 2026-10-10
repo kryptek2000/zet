@@ -124,11 +124,14 @@ fn provider_errors_map_to_typed_errors() {
 
     for (status, reason, check) in [
         (401u16, "Unauthorized", ModelError::Auth(String::new())),
+        (403u16, "Forbidden", ModelError::Auth(String::new())),
         (
             429u16,
             "Too Many Requests",
             ModelError::RateLimited(String::new()),
         ),
+        (400u16, "Bad Request", ModelError::Protocol(String::new())),
+        (404u16, "Not Found", ModelError::Protocol(String::new())),
         (500u16, "Bad Gateway", ModelError::Server(String::new())),
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

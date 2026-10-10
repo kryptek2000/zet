@@ -65,14 +65,17 @@ impl ChatModel for OpenAICompat {
             .header("Content-Type", "application/json")
             .send_json(body)
             .map_err(|e| match e {
-                ureq::Error::StatusCode(401) => {
-                    ModelError::Auth("provider rejected the API key".to_string())
+                ureq::Error::StatusCode(401 | 403) => {
+                    ModelError::Auth("provider rejected the credentials".to_string())
                 }
                 ureq::Error::StatusCode(429) => {
                     ModelError::RateLimited("provider rate limit hit".to_string())
                 }
                 ureq::Error::StatusCode(code) if code >= 500 => {
                     ModelError::Server(format!("provider status {code}"))
+                }
+                ureq::Error::StatusCode(code) => {
+                    ModelError::Protocol(format!("provider rejected request: status {code}"))
                 }
                 other => ModelError::Network(other.to_string()),
             })?;
