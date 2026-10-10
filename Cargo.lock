@@ -3508,6 +3508,11 @@ version = "0.1.0"
 [[package]]
 name = "zet-agent"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "zet-models",
+ "zet-policy",
+]
 
 [[package]]
 name = "zet-blocks"

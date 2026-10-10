@@ -3,3 +3,8 @@ name = "zet-agent"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+zet-models = { path = "../zet-models" }
+zet-policy = { path = "../zet-policy" }
+serde_json = "1"
