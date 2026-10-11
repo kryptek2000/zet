@@ -56,9 +56,10 @@ struct App {
     needs_draw: bool,
 }
 
-/// Redraw at most every 16ms (~60fps). Input/resize set needs_draw for an
-/// immediate frame; the deadline heartbeat covers PTY output and NL polls.
-const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+/// Heartbeat for the NL-answer poll and missed-wake safety net. PTY
+/// output and input wake the loop immediately (proxy + needs_draw);
+/// idleness costs one cheap render per beat, not sixty per second.
+const FRAME: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Shell's current directory via /proc (unix). Best effort: "" when unknown.
 fn shell_cwd(session: &Option<Session>) -> String {
@@ -236,13 +237,14 @@ impl ApplicationHandler for App {
         self.rows = rows;
         self.window = Some(window);
         self.renderer = Some(renderer);
-        // Capped frame rate: uncapped Poll redraws burned 100% CPU and
-        // starved input. Events (keys, resize) still wake the loop
-        // immediately; the deadline is only an idle heartbeat (which the
-        // NL-answer poll rides on).
-        event_loop.set_control_flow(ControlFlow::WaitUntil(
-            std::time::Instant::now() + std::time::Duration::from_millis(16),
-        ));
+        // Heartbeat re-armed every about_to_wait; this initial value only
+        // covers the first idle gap (events and the PTY proxy wake sooner).
+        event_loop.set_control_flow(ControlFlow::WaitUntil(std::time::Instant::now() + FRAME));
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
+        // PTY reader thread has bytes: prompt frame, coalesced by the flag.
+        self.needs_draw = true;
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -394,6 +396,10 @@ fn main() {
     }
     let reader = session.clone_reader().unwrap();
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let event_loop = EventLoop::new().unwrap();
+    // Wake the loop the moment PTY bytes land: output renders instantly
+    // instead of waiting for the heartbeat.
+    let proxy = event_loop.create_proxy();
     std::thread::spawn(move || {
         let mut reader = reader;
         let mut buf = [0u8; 4096];
@@ -405,13 +411,13 @@ fn main() {
                     if tx.send(buf[..n].to_vec()).is_err() {
                         break;
                     }
+                    let _ = proxy.send_event(());
                 }
                 Err(_) => break,
             }
         }
     });
 
-    let event_loop = EventLoop::new().unwrap();
     let session_id = format!(
         "{}-{}",
         std::time::SystemTime::now()
