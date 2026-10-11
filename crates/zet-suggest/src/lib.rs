@@ -59,7 +59,7 @@ impl<M: ChatModel> ModelSuggester<M> {
     /// Natural language to shell command. Replies with only the command.
     pub fn suggest_nl(&self, nl: &str) -> Option<String> {
         self.ask(
-            "Translate the request to a single shell command. Reply with ONLY the command, no prose, no fences.",
+            "Translate the request to a single shell command. Reply with ONLY the command, no prose, no fences. Examples: 'list files' -> ls -la; 'disk usage' -> df -h; 'find todos' -> grep -rn TODO .",
             nl,
         )
     }

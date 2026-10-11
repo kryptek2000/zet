@@ -83,12 +83,23 @@ type AgentDone = (String, Vec<zet_agent::JournalEntry>);
 
 /// Executor that runs agent steps in the visible shell: sends the command
 /// to the window (main loop types it) and blocks for the recorded result.
+/// Syntax-gated like NL answers: broken commands fail fast with exit 2
+/// (bash's own syntax-error code) instead of stranding a continuation.
 struct PtyExec {
     req: Sender<String>,
     res: Receiver<ExecRes>,
+    shell: String,
 }
 
 impl zet_agent::Executor for PtyExec {
+    fn check(&self, command: &str) -> Option<String> {
+        if zet_pty::syntax_ok(&self.shell, command) {
+            None
+        } else {
+            Some(format!("syntax error, not executed: {command}"))
+        }
+    }
+
     fn exec(&mut self, command: &str, _workdir: &std::path::Path) -> ExecRes {
         if self.req.send(command.to_string()).is_err() {
             return (None, "window gone".to_string());
@@ -263,7 +274,14 @@ impl App {
             if let Ok(answer) = rx.try_recv() {
                 self.nl_rx = None;
                 if let Some(cmd) = answer {
-                    self.accept_line(&cmd);
+                    // Never strand the shell in a continuation prompt:
+                    // syntactically broken replies notice instead of swap.
+                    if zet_pty::syntax_ok(&self.shell_name, &cmd) {
+                        self.accept_line(&cmd);
+                    } else if let Some(input) = self.current_text() {
+                        let short: String = cmd.chars().take(60).collect();
+                        self.ghost.notify(input, format!("(invalid: {short})"));
+                    }
                 } else if let Some(input) = self.current_text() {
                     self.ghost.notify(input, "(no command)".to_string());
                 }
@@ -371,6 +389,7 @@ impl App {
         self.goal_mode = false;
         self.agent_busy = true;
         self.retitle();
+        let shell_name = self.shell_name.clone();
         std::thread::spawn(move || {
             let done = build_client(&spec).map(|client| {
                 let mut agent = zet_agent::Agent::new(client, AgentMode, in_repo, 8)
@@ -378,6 +397,7 @@ impl App {
                     .with_executor(PtyExec {
                         req: req_tx,
                         res: res_rx,
+                        shell: shell_name,
                     });
                 let summary = agent
                     .run(&goal)

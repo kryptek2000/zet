@@ -418,3 +418,32 @@ fn journal_jsonl_roundtrips() {
     let _ = journal_path_default();
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+struct VetoExec;
+
+impl zet_agent::Executor for VetoExec {
+    fn exec(&mut self, _command: &str, _workdir: &std::path::Path) -> (Option<i32>, String) {
+        panic!("vetoed steps must never reach exec");
+    }
+
+    fn check(&self, command: &str) -> Option<String> {
+        Some(format!("rejected: {command}"))
+    }
+}
+
+#[test]
+fn executor_veto_journals_never_run_without_checkpoint() {
+    let model = Script::new(vec![
+        Script::shell_call("c1", "echo hello"),
+        Script::final_text("said it"),
+    ]);
+    let mut agent = Agent::new(model, AllowAll, false, 4).with_executor(VetoExec);
+    let out = agent.run("say hi via shell").unwrap();
+    assert_eq!(out, "said it");
+    assert_eq!(agent.journal.len(), 1);
+    let entry = &agent.journal[0];
+    assert!(!entry.executed);
+    assert_eq!(entry.exit_code, None);
+    assert!(entry.checkpoint.is_none());
+    assert!(entry.output.contains("rejected: echo hello"));
+}

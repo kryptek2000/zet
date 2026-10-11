@@ -3,6 +3,41 @@ use std::io::{Read, Write};
 
 pub mod shell;
 
+/// Parse-check a command with `<shell> -n` (stdin script, never
+/// executed). Guards the agent/NL line-swap: a syntactically broken
+/// model reply must notice, not strand the shell in a continuation
+/// prompt. Only Bourne-family shells are checked (their `-n` is
+/// parse-only); anything else fails OPEN (old behavior) — this gate is
+/// UX, not policy; tiers still decide what runs.
+pub fn syntax_ok(shell: &str, cmd: &str) -> bool {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    let base = shell.rsplit('/').next().unwrap_or(shell);
+    if !matches!(base, "bash" | "zsh" | "sh" | "dash") {
+        return true;
+    }
+    let mut child = match Command::new(shell)
+        .arg("-n")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return true,
+    };
+    let wrote = child
+        .stdin
+        .as_mut()
+        .map(|s| s.write_all(cmd.as_bytes()).is_ok() && s.write_all(b"\n").is_ok())
+        .unwrap_or(false);
+    // Close stdin so the checker sees EOF (else it waits forever), then
+    // always reap: a skipped wait would zombie.
+    drop(child.stdin.take());
+    let parsed = child.wait().map(|s| s.success()).unwrap_or(false);
+    wrote && parsed
+}
+
 pub struct Session {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,

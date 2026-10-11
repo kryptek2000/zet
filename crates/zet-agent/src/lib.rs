@@ -30,6 +30,13 @@ pub fn shell_tool_def() -> ToolDef {
 /// PTY executor so every agent action is typed visibly and recorded.
 pub trait Executor: Send {
     fn exec(&mut self, command: &str, workdir: &Path) -> (Option<i32>, String);
+    /// Pre-execution veto, after approval but before checkpoint: Some
+    /// reason rejects the step (journaled, executed:false, no checkpoint
+    /// taken). Default: no opinion. The PTY executor rejects syntactically
+    /// broken model replies so they never strand a continuation prompt.
+    fn check(&self, _command: &str) -> Option<String> {
+        None
+    }
 }
 
 pub struct DirectExec;
@@ -274,6 +281,22 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
         }
         // Checkpoint every mutation: snapshot the repo before T1+ writes so
         // one-key undo can restore. A failed checkpoint blocks the step.
+        //
+        // Executor veto first: rejected steps (e.g. model syntax slips)
+        // journal as never-run with no checkpoint taken.
+        if let Some(reason) = self.executor.check(&command) {
+            self.journal.push(JournalEntry {
+                command: command.clone(),
+                tier,
+                approval,
+                approved: true,
+                executed: false,
+                exit_code: None,
+                output: reason.clone(),
+                checkpoint: None,
+            });
+            return (call.id.clone(), reason);
+        }
         let checkpoint = if tier != Tier::T0 && self.in_repo {
             match self.checkpoint() {
                 Ok(cp) => cp,

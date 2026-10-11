@@ -76,3 +76,32 @@ fn erase_char_matches_line_discipline() {
         "implausible VERASE {erase:#x}"
     );
 }
+
+#[test]
+fn syntax_gate_parses_without_executing() {
+    // Valid single and multi-line commands pass; the exact broken shape
+    // a small model emitted live (missing ';' before done) fails.
+    for cmd in [
+        "echo hi",
+        "echo 'agent-was-here' > /tmp/x",
+        "if true; then\necho hi\nfi",
+        "ls | head -5",
+    ] {
+        assert!(zet_pty::syntax_ok("bash", cmd), "{cmd:?}");
+    }
+    for cmd in [
+        "for file in $(@); do echo \"$file\" done",
+        "echo 'unterminated",
+        "if true; then",
+    ] {
+        assert!(!zet_pty::syntax_ok("bash", cmd), "{cmd:?}");
+    }
+    // Nothing executes: a would-be destructive command leaves no trace.
+    let probe = "/tmp/zet-syntax-probe";
+    let _ = std::fs::remove_file(probe);
+    assert!(zet_pty::syntax_ok("bash", &format!("touch {probe}")));
+    assert!(!std::path::Path::new(probe).exists());
+    // Uncheckable shells fail open (old behavior), never block.
+    assert!(zet_pty::syntax_ok("nushell", "for $x in [] {}"));
+    assert!(zet_pty::syntax_ok("/bin/nonexistent-sh-xyz", "rm -rf /"));
+}
