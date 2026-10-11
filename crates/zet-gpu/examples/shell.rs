@@ -64,6 +64,8 @@ struct App {
     perf_t0: Option<std::time::Instant>,
     perf_input: Option<std::time::Instant>,
     perf_frames: u64,
+    cmd_t0: Option<std::time::Instant>,
+    perf_blocks: usize,
 }
 
 /// One approved agent step, serviced by the main loop: typed visibly into
@@ -149,6 +151,21 @@ impl App {
         if let Some(rec) = &mut self.recorder {
             rec.pump(&mut self.term, &shell_cwd(&self.session));
         }
+        // Settle probe (ZET_PERF=1 only): Enter-to-block with a fully
+        // drained channel. Parsed + recorded; pixels ≤1 frame behind
+        // (the D chunk's proxy poke already requested the frame).
+        if self.perf_t0.is_some() {
+            if let Some(rec) = &self.recorder {
+                if let Ok(blocks) = rec.blocks() {
+                    if blocks.len() > self.perf_blocks {
+                        self.perf_blocks = blocks.len();
+                        if let Some(t0) = self.cmd_t0.take() {
+                            eprintln!("perf: cmd_settle_ms={}", t0.elapsed().as_millis());
+                        }
+                    }
+                }
+            }
+        }
         self.service_exec();
         self.poll_agent_done();
         if let Some(code) = self.shell_state.last_exit() {
@@ -201,6 +218,9 @@ impl App {
                     let _ = s.write_all(b"\r");
                 }
                 st.typed = true;
+                // Agent-typed steps record blocks too: void any human stamp
+                // so their settle never prints against it.
+                self.cmd_t0 = None;
                 return;
             }
             if self.dead {
@@ -655,6 +675,20 @@ impl ApplicationHandler for App {
                     if let Some(s) = &mut self.session {
                         let _ = s.write_all(&bytes);
                     }
+                    // Settle-probe stamps (ZET_PERF=1 only): Enter on a
+                    // non-empty line starts the clock; Ctrl+C voids it
+                    // (aborted typing records no block). NL/goal/agent
+                    // paths return before here, so this is human shell
+                    // commands only.
+                    if self.perf_t0.is_some() {
+                        if bytes.as_slice() == b"\r" {
+                            if self.current_text().is_some_and(|t| !t.trim().is_empty()) {
+                                self.cmd_t0 = Some(std::time::Instant::now());
+                            }
+                        } else if bytes.as_slice() == b"\x03" {
+                            self.cmd_t0 = None;
+                        }
+                    }
                 }
             }
             WindowEvent::Resized(size) => {
@@ -786,6 +820,8 @@ fn main() {
         perf_t0,
         perf_input: None,
         perf_frames: 0,
+        cmd_t0: None,
+        perf_blocks: 0,
     };
     if let Some(s) = &app.session {
         app.erase = s.erase_char();
