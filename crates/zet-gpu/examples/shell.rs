@@ -61,6 +61,9 @@ struct App {
     last_journal: Vec<zet_agent::JournalEntry>,
     last_frame: std::time::Instant,
     needs_draw: bool,
+    perf_t0: Option<std::time::Instant>,
+    perf_input: Option<std::time::Instant>,
+    perf_frames: u64,
 }
 
 /// One approved agent step, serviced by the main loop: typed visibly into
@@ -404,6 +407,24 @@ impl App {
         };
         self.ghost.notify(input, text);
     }
+
+    /// Perf probe (ZET_PERF=1 only): first-frame age, key-to-render
+    /// latency, frame counter. Zero cost when disabled (early return).
+    fn note_frame(&mut self) {
+        let Some(t0) = self.perf_t0 else {
+            return;
+        };
+        self.perf_frames += 1;
+        if self.perf_frames == 1 {
+            eprintln!("perf: first_frame_ms={}", t0.elapsed().as_millis());
+        }
+        if let Some(tin) = self.perf_input.take() {
+            eprintln!("perf: input_latency_us={}", tin.elapsed().as_micros());
+        }
+        if self.perf_frames.is_multiple_of(120) {
+            eprintln!("perf: frames={}", self.perf_frames);
+        }
+    }
 }
 
 /// Build a concrete (Send) model suggester from a spec string.
@@ -492,6 +513,9 @@ impl ApplicationHandler for App {
                 let pressed = event.state == ElementState::Pressed;
                 // Any key gets a prompt frame; the heartbeat covers the rest.
                 self.needs_draw = true;
+                if pressed && self.perf_t0.is_some() {
+                    self.perf_input = Some(std::time::Instant::now());
+                }
                 // Agent running: input locked (its steps own the line).
                 // Ctrl+C still reaches the shell: the emergency brake that
                 // cancels the agent's running command (D fires, step ends).
@@ -663,6 +687,7 @@ impl ApplicationHandler for App {
                     r.render();
                     self.last_frame = std::time::Instant::now();
                     self.needs_draw = false;
+                    self.note_frame();
                 }
                 // No re-arm here: about_to_wait drives the heartbeat.
             }
@@ -726,6 +751,9 @@ fn main() {
     // NL model for Ctrl+; mode: spec like "local:qwen3-1.7b-q4" or
     // "openrouter:openai/gpt-4o-mini" (key from env/OS keychain).
     let inline_spec = std::env::var("ZET_INLINE_SPEC").ok();
+    let perf_t0 = std::env::var("ZET_PERF")
+        .ok()
+        .map(|_| std::time::Instant::now());
     let mut app = App {
         window: None,
         renderer: None,
@@ -753,6 +781,9 @@ fn main() {
         last_journal: Vec::new(),
         last_frame: std::time::Instant::now(),
         needs_draw: true,
+        perf_t0,
+        perf_input: None,
+        perf_frames: 0,
     };
     if let Some(s) = &app.session {
         app.erase = s.erase_char();
