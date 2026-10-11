@@ -176,6 +176,10 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 self.pump();
+                if self.dead {
+                    event_loop.exit();
+                    return;
+                }
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
                     r.draw_terminal(&self.term, self.cols, self.rows);
                     r.render();
