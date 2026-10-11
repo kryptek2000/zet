@@ -7,9 +7,9 @@ use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::ModifiersState;
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::Window;
-use zet_gpu::input::{is_paste, paste_bytes, translate};
+use zet_gpu::input::{is_nl_toggle, is_paste, paste_bytes, translate};
 use zet_gpu::Renderer;
 use zet_pty::shell::ShellState;
 use zet_pty::Session;
@@ -48,6 +48,14 @@ struct App {
     dead: bool,
     erase: u8,
     recorder: Option<zet_blocks::Recorder>,
+    history_store: Option<zet_blocks::Store>,
+    inline_spec: Option<String>,
+    ghost: Option<String>,
+    dismissed: Option<String>,
+    last_prefix: String,
+    cached_suggestion: Option<String>,
+    nl_mode: bool,
+    nl_rx: Option<Receiver<Option<String>>>,
 }
 
 /// Shell's current directory via /proc (unix). Best effort: "" when unknown.
@@ -90,10 +98,132 @@ impl App {
         }
         if let Some(code) = self.shell_state.last_exit() {
             if let Some(w) = &self.window {
-                w.set_title(&format!("ZET — {} (exit {code})", self.shell_name));
+                let nl = if self.nl_mode { " (nl)" } else { "" };
+                w.set_title(&format!("ZET — {} (exit {code}){nl}", self.shell_name));
             }
         }
+        self.update_ghost();
     }
+
+    /// Refresh the visible ghost suffix from current input. History only
+    /// (sync, sub-ms); the model runs solely on NL Enter, in a thread.
+    fn update_ghost(&mut self) {
+        // NL answer landed: swap the NL line for the command (the preview).
+        if let Some(rx) = &self.nl_rx {
+            if let Ok(answer) = rx.try_recv() {
+                self.nl_rx = None;
+                if let Some(cmd) = answer {
+                    self.accept_line(&cmd);
+                } else {
+                    self.ghost = Some("(no command)".to_string());
+                }
+                self.nl_mode = false;
+                self.retitle();
+            } else {
+                self.ghost = Some("…".to_string());
+                return;
+            }
+        }
+        let Some(rec) = &self.recorder else {
+            self.ghost = None;
+            return;
+        };
+        let Some((input, bcol, brows_abs)) = rec.current_input(&self.term) else {
+            self.ghost = None;
+            return;
+        };
+        if input.is_empty() || self.dismissed.as_deref() == Some(&input) {
+            self.ghost = None;
+            return;
+        }
+        if input != self.last_prefix {
+            self.last_prefix = input.clone();
+            self.cached_suggestion = self.history_store.as_ref().and_then(|s| {
+                use zet_suggest::Suggest;
+                zet_suggest::HistorySuggester::new(s).suggest(&input)
+            });
+        }
+        let suffix = match &self.cached_suggestion {
+            Some(full) => match zet_suggest::ghost_suffix(&input, full) {
+                Some(suffix) => suffix.to_string(),
+                None => {
+                    self.ghost = None;
+                    return;
+                }
+            },
+            None => {
+                self.ghost = None;
+                return;
+            }
+        };
+        // Cursor at input end only (single-row input; wrapped gets none).
+        let (cx, cy) = self.term.cursor();
+        if self.term.scrollback_len() + cy != brows_abs || cx != bcol + input.chars().count() {
+            self.ghost = None;
+            return;
+        }
+        self.ghost = Some(suffix);
+    }
+
+    /// Replace the current line with `cmd` (Ctrl+U then type).
+    fn accept_line(&mut self, cmd: &str) {
+        self.ghost = None;
+        self.dismissed = None;
+        if let Some(s) = &mut self.session {
+            let _ = s.write_all(&[0x15]);
+            let _ = s.write_all(cmd.as_bytes());
+        }
+    }
+
+    fn retitle(&self) {
+        if let Some(w) = &self.window {
+            let nl = if self.nl_mode { " (nl)" } else { "" };
+            w.set_title(&format!("ZET — {}{nl}", self.shell_name));
+        }
+    }
+
+    /// Kick off an NL-to-command request on a thread; the answer swaps the
+    /// line when it lands (polled in update_ghost). Returns false with no
+    /// model configured.
+    fn start_nl_request(&mut self, nl: String) -> bool {
+        let spec = match &self.inline_spec {
+            Some(s) => s.clone(),
+            None => {
+                self.ghost = Some("(set ZET_INLINE_SPEC for NL)".to_string());
+                return false;
+            }
+        };
+        let (tx, rx) = mpsc::channel();
+        self.nl_rx = Some(rx);
+        std::thread::spawn(move || {
+            let answer = build_suggester(&spec).and_then(|m| m.suggest_nl(&nl));
+            let _ = tx.send(answer);
+        });
+        true
+    }
+}
+
+/// Build a concrete (Send) model suggester from a spec string.
+fn build_suggester(
+    spec: &str,
+) -> Option<zet_suggest::ModelSuggester<zet_models::openai::OpenAICompat>> {
+    use zet_models::keys::{resolve_provider, EnvKeychain, Keychain, SystemKeychain};
+    use zet_models::Provider;
+    let env = EnvKeychain;
+    let sys = SystemKeychain;
+    let chains: [&dyn Keychain; 2] = [&env, &sys];
+    let provider = resolve_provider(spec, &chains).ok()?;
+    let (base_url, api_key, model) = match provider {
+        Provider::OpenAICompat {
+            base_url,
+            api_key,
+            model,
+        } => (base_url, api_key, model),
+        Provider::Local { endpoint, model } => (endpoint, String::new(), model),
+    };
+    Some(zet_suggest::ModelSuggester::new(
+        zet_models::openai::OpenAICompat::new(base_url, api_key, model),
+    ))
 }
 
 impl ApplicationHandler for App {
@@ -145,6 +275,59 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
+                // NL mode toggle: Ctrl+; would otherwise type ESC (0x1b).
+                if is_nl_toggle(&event.logical_key, pressed, &self.mods) {
+                    self.nl_mode = !self.nl_mode;
+                    self.ghost = None;
+                    self.dismissed = None;
+                    self.nl_rx = None;
+                    self.retitle();
+                    return;
+                }
+                let is_tab = pressed && matches!(&event.logical_key, Key::Named(NamedKey::Tab));
+                let is_enter = pressed && matches!(&event.logical_key, Key::Named(NamedKey::Enter));
+                let is_esc = pressed && matches!(&event.logical_key, Key::Named(NamedKey::Escape));
+                // Tab accepts the visible ghost suffix.
+                if is_tab {
+                    if let Some(suffix) = self.ghost.take() {
+                        self.dismissed = None;
+                        if let Some(s) = &mut self.session {
+                            let _ = s.write_all(suffix.as_bytes());
+                        }
+                        return;
+                    }
+                }
+                // Escape clears ghost / cancels NL; swallowed only when it did.
+                if is_esc {
+                    let active = self.ghost.is_some() || self.nl_mode || self.nl_rx.is_some();
+                    self.ghost = None;
+                    if active {
+                        self.dismissed = Some(self.last_prefix.clone());
+                        self.nl_rx = None;
+                        if self.nl_mode {
+                            self.nl_mode = false;
+                            self.retitle();
+                        }
+                        return;
+                    }
+                }
+                // Enter in NL mode sends the line to the model, not the shell.
+                if is_enter && self.nl_mode && self.nl_rx.is_none() {
+                    let input = self
+                        .recorder
+                        .as_ref()
+                        .and_then(|rec| rec.current_input(&self.term))
+                        .map(|(text, _, _)| text)
+                        .unwrap_or_default();
+                    if !input.trim().is_empty() {
+                        self.start_nl_request(input);
+                    }
+                    return;
+                }
+                // Enter while an NL answer is in flight: wait for it.
+                if is_enter && self.nl_rx.is_some() {
+                    return;
+                }
                 if let Some(mut bytes) = translate(
                     &event.logical_key,
                     event.text.as_deref(),
@@ -182,6 +365,10 @@ impl ApplicationHandler for App {
                 }
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
                     r.draw_terminal(&self.term, self.cols, self.rows);
+                    if let Some(g) = &self.ghost {
+                        let (cx, cy) = self.term.cursor();
+                        r.draw_ghost(cy, cx, g, self.cols);
+                    }
                     r.render();
                 }
                 if let Some(w) = &self.window {
@@ -232,6 +419,12 @@ fn main() {
     let recorder = zet_blocks::Store::open_default()
         .map(|store| zet_blocks::Recorder::new(store, &session_id))
         .ok();
+    // Second handle on the same store for instant history suggestions
+    // (borrows would fight the recorder's &mut pump).
+    let history_store = zet_blocks::Store::open_default().ok();
+    // NL model for Ctrl+; mode: spec like "local:qwen3-1.7b-q4" or
+    // "openrouter:openai/gpt-4o-mini" (key from env/OS keychain).
+    let inline_spec = std::env::var("ZET_INLINE_SPEC").ok();
     let mut app = App {
         window: None,
         renderer: None,
@@ -246,6 +439,14 @@ fn main() {
         dead: false,
         erase: 0x7f,
         recorder,
+        history_store,
+        inline_spec,
+        ghost: None,
+        dismissed: None,
+        last_prefix: String::new(),
+        cached_suggestion: None,
+        nl_mode: false,
+        nl_rx: None,
     };
     if let Some(s) = &app.session {
         app.erase = s.erase_char();

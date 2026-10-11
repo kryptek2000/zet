@@ -72,6 +72,14 @@ const BG_RGBA: Rgba = Rgba {
     a: 1.0,
 };
 
+/// Ghost-text ink: dimmed so suggestions read as preview, not content.
+const GHOST_RGBA: Rgba = Rgba {
+    r: 0.42,
+    g: 0.44,
+    b: 0.50,
+    a: 1.0,
+};
+
 /// Map a terminal cell color to linear display RGB.
 /// M0 palette: classic 16 ANSI colors picked as sRGB display values and
 /// converted to linear (the swapchain is an sRGB format); Rgb passes
@@ -466,6 +474,30 @@ impl Renderer {
                     self.atlas_size,
                     ink,
                 ));
+            }
+        }
+    }
+
+    /// Ghost autocomplete suffix, dimmed, starting at (row, col) — the
+    /// remainder of a suggestion after the typed prefix. Spaces advance
+    /// without quads (matching draw_terminal). Clipped to grid width.
+    pub fn draw_ghost(&mut self, row: usize, col: usize, text: &str, cols: usize) {
+        for (x, c) in (col..).zip(text.chars()) {
+            if x >= cols {
+                break;
+            }
+            if c != ' ' {
+                if let Some(slot) = self.slot_for(c) {
+                    self.quads.extend(cell_quad(
+                        x as u32,
+                        row as u32,
+                        self.cell_w,
+                        self.cell_h,
+                        (slot.x, slot.y),
+                        self.atlas_size,
+                        GHOST_RGBA,
+                    ));
+                }
             }
         }
     }

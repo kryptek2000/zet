@@ -145,3 +145,20 @@ fn first_line(text: &str) -> Option<String> {
     }
     None
 }
+
+/// Visible ghost suffix: first line of `suggestion` after `prefix`.
+///
+/// History commands can span lines (continuation rows join with \n); the
+/// ghost must be single-line, since Tab types it raw and an embedded LF
+/// would execute the prefix early. None on exact match, non-prefix, or a
+/// prefix that itself spans lines (typed input never contains \n).
+pub fn ghost_suffix<'a>(prefix: &str, suggestion: &'a str) -> Option<&'a str> {
+    if prefix.contains('\n') {
+        return None;
+    }
+    let rest = suggestion.lines().next()?.strip_prefix(prefix)?;
+    if rest.is_empty() {
+        return None;
+    }
+    Some(rest)
+}

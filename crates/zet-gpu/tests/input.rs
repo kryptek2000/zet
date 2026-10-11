@@ -96,3 +96,14 @@ fn paste_normalizes_newlines_to_cr() {
     assert_eq!(paste_bytes("a\nb\r\nc\rd"), b"a\rb\rc\rd");
     assert_eq!(paste_bytes(""), b"");
 }
+
+#[test]
+fn ctrl_semicolon_toggles_nl_not_types() {
+    use zet_gpu::input::is_nl_toggle;
+    // Real Ctrl+; arrives as ";" with Control held (no shift: shift would
+    // make it ":"). It must toggle, not type ESC (0x1b) via translate.
+    assert!(is_nl_toggle(&Key::Character(";".into()), true, &ctrl()));
+    assert!(!is_nl_toggle(&Key::Character(";".into()), true, &plain()));
+    assert!(!is_nl_toggle(&Key::Character(";".into()), false, &ctrl()));
+    assert!(!is_nl_toggle(&Key::Character(":".into()), true, &ctrl()));
+}

@@ -27,6 +27,18 @@ pub fn paste_bytes(text: &str) -> Vec<u8> {
     text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
 }
 
+/// True when this press toggles NL-to-command mode (Ctrl+;). Check before
+/// [`translate`]: Ctrl+; would otherwise become an ESC byte (0x1b).
+pub fn is_nl_toggle(logical: &Key, pressed: bool, mods: &ModifiersState) -> bool {
+    if !pressed {
+        return false;
+    }
+    if !mods.contains(ModifiersState::CONTROL) {
+        return false;
+    }
+    matches!(logical, Key::Character(s) if &**s == ";")
+}
+
 /// Translate a key press into bytes for the PTY.
 /// Returns None for releases and unmapped keys.
 pub fn translate(

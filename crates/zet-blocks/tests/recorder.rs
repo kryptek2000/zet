@@ -116,3 +116,25 @@ fn next_prompt_does_not_leak_into_output() {
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0].output, "hi");
 }
+
+#[test]
+fn current_input_tracks_typing_until_exec() {
+    let (mut t, mut rec) = recorder();
+    assert_eq!(rec.current_input(&t), None);
+    feed_pump(&mut t, &mut rec, b"$ ");
+    feed_pump(&mut t, &mut rec, b"\x1b]133;B\x07");
+    feed_pump(&mut t, &mut rec, b"ec");
+    let (text, col, _row) = rec.current_input(&t).expect("typing visible");
+    assert_eq!(text, "ec");
+    assert_eq!(col, 2);
+    feed_pump(&mut t, &mut rec, b"ho");
+    assert_eq!(
+        rec.current_input(&t).map(|(t, _, _)| t).as_deref(),
+        Some("echo")
+    );
+    // Executing hides the ghost source; done clears it.
+    feed_pump(&mut t, &mut rec, b"\r\n\x1b]133;C\x07");
+    assert_eq!(rec.current_input(&t), None);
+    feed_pump(&mut t, &mut rec, b"echo\r\n\x1b]133;D;0\x07");
+    assert_eq!(rec.current_input(&t), None);
+}

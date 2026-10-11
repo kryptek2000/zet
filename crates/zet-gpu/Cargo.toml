@@ -16,3 +16,5 @@ zet-pty = { path = "../zet-pty" }
 pollster = "1"
 arboard = "3"
 zet-blocks = { path = "../zet-blocks" }
+zet-models = { path = "../zet-models" }
+zet-suggest = { path = "../zet-suggest" }

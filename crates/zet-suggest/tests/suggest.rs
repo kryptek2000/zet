@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use zet_blocks::{Block, Store};
 use zet_models::{ChatModel, ChatRequest, ChatResponse, ModelError};
-use zet_suggest::{ChainSuggester, HistorySuggester, ModelSuggester, Suggest};
+use zet_suggest::{ghost_suffix, ChainSuggester, HistorySuggester, ModelSuggester, Suggest};
 
 fn seed(cmds: &[(&str, i32)]) -> Store {
     let store = Store::open_in_memory().unwrap();
@@ -144,4 +144,16 @@ fn model_strips_fences_and_bullets() {
             "{reply:?}"
         );
     }
+}
+
+#[test]
+fn ghost_suffix_truncates_multiline_suggestions() {
+    // The audit hole: a multi-line history command must never ghost (or
+    // Tab-type) an embedded LF, which would execute the prefix early.
+    assert_eq!(ghost_suffix("fo", "foo\nbar"), Some("o"));
+    assert_eq!(ghost_suffix("foo", "foo\nbar"), None);
+    assert_eq!(ghost_suffix("x", "foo"), None);
+    assert_eq!(ghost_suffix("foo\n", "foo\nbar"), None);
+    assert_eq!(ghost_suffix("", "foo"), Some("foo"));
+    assert_eq!(ghost_suffix("foo", ""), None);
 }

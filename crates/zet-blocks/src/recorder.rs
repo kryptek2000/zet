@@ -38,6 +38,33 @@ impl Recorder {
         self.store.list(&self.session)
     }
 
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    /// Text being typed at the current prompt: (text, prompt column,
+    /// absolute prompt row). Some only while typing (after B, before C);
+    /// None while executing or idle. Ghost-text source for autocomplete.
+    pub fn current_input(&self, term: &Terminal) -> Option<(String, usize, usize)> {
+        let (abs, col) = self.cmd?;
+        if self.pending.is_some() {
+            return None;
+        }
+        let sb = term.scrollback_len();
+        let cur_abs = sb + term.cursor().1;
+        let mut text = String::new();
+        for r in abs..=cur_abs {
+            let line = abs_line_text(term, r);
+            let part = if r == abs {
+                line.chars().skip(col).collect::<String>()
+            } else {
+                line
+            };
+            text.push_str(&part);
+        }
+        Some((text.trim_end().to_string(), col, abs))
+    }
+
     pub fn pump(&mut self, term: &mut Terminal, cwd: &str) {
         for m in term.drain_markers() {
             match m.kind {

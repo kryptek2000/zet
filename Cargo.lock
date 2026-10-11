@@ -4479,7 +4479,9 @@ dependencies = [
  "wgpu",
  "winit",
  "zet-blocks",
+ "zet-models",
  "zet-pty",
+ "zet-suggest",
  "zet-term",
 ]
 
