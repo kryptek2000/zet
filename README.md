@@ -6,6 +6,7 @@ A modern, ultra-fast AI-native terminal emulator — Ghostty-class speed, Warp-b
 ## Docs
 - **Full spec:** [`docs/ZET-DESIGN.md`](docs/ZET-DESIGN.md) — product, agentic core (plan→gate→exec→verify), safety tiers, perf gates, roadmap
 - **Architecture:** [`zet-architecture.html`](zet-architecture.html) — open in a browser (offline, no deps)
+- **Shortcuts:** [`docs/SHORTCUTS.md`](docs/SHORTCUTS.md) — keys, NL/agent modes, undo, local model setup
 - **Workspace:** `Cargo.toml` + `crates/` — `zet-term, zet-pty, zet-gpu, zet-blocks, zet-context, zet-agent, zet-policy, zet-models, zet-mcp, zet-daemon`
 
 ## Edge (vs Warp / Ghostty / Amazon Q)

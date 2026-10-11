@@ -646,11 +646,13 @@ impl ApplicationHandler for App {
                         return;
                     }
                 }
-                // Escape clears ghost / cancels NL; swallowed only when it did.
+                // Escape clears ghost / cancels NL / exits goal mode;
+                // swallowed only when it did something.
                 if is_esc {
                     let was_nl = self.nl_mode || self.nl_rx.is_some();
+                    let was_goal = self.goal_mode;
                     let swallowed = self.ghost.cancel();
-                    if was_nl {
+                    if was_nl || was_goal {
                         self.ghost.dismiss_current();
                     }
                     self.nl_rx = None;
@@ -658,7 +660,11 @@ impl ApplicationHandler for App {
                         self.nl_mode = false;
                         self.retitle();
                     }
-                    if swallowed || was_nl {
+                    if self.goal_mode {
+                        self.goal_mode = false;
+                        self.retitle();
+                    }
+                    if swallowed || was_nl || was_goal {
                         return;
                     }
                 }
