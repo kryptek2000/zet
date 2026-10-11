@@ -166,13 +166,27 @@ fn valid_base(url: &str) -> bool {
     }
 }
 
-/// Right side of a `local:` split: present, not a bare port number,
+/// Right side of an endpoint split: present, not a bare port number,
 /// no dangling separator, no path slashes (those belong to the endpoint).
 fn valid_model(model: &str) -> bool {
     !model.is_empty()
         && !model.bytes().all(|c| c.is_ascii_digit())
         && !model.ends_with(':')
         && !model.contains('/')
+}
+
+/// Shared endpoint splitter: every ':' right-to-left on the ORIGINAL
+/// rest (a walk that truncates would forget right context). Takes the
+/// first valid split whose model isn't port-headed.
+fn split_endpoint_model(rest: &str) -> Option<(&str, &str)> {
+    let splits: Vec<usize> = rest.match_indices(':').map(|(i, _)| i).collect();
+    for i in splits.into_iter().rev() {
+        let (left, model) = (&rest[..i], &rest[i + 1..]);
+        if valid_base(left) && valid_model(model) && !port_headed(model) {
+            return Some((left, model));
+        }
+    }
+    None
 }
 
 /// A model starting `digits:` was cut inside the endpoint
@@ -205,7 +219,7 @@ pub fn resolve_provider(spec: &str, chains: &[&dyn Keychain]) -> Result<Provider
             rest.to_string(),
         )),
         "compat" => {
-            let (url, model) = rest.rsplit_once(':').ok_or_else(bad)?;
+            let (url, model) = split_endpoint_model(rest).ok_or_else(bad)?;
             if url.is_empty() || model.is_empty() {
                 return Err(bad());
             }
@@ -226,27 +240,13 @@ pub fn resolve_provider(spec: &str, chains: &[&dyn Keychain]) -> Result<Provider
                     endpoint: "http://localhost:11434/v1".to_string(),
                     model: rest.to_string(),
                 }),
-                Some(_) => {
-                    // Every ':' right-to-left on the ORIGINAL rest (a walk
-                    // that truncates would forget right context). Take the
-                    // first valid split whose model isn't port-headed.
-                    let mut candidate: Option<(&str, &str)> = None;
-                    let splits: Vec<usize> = rest.match_indices(':').map(|(i, _)| i).collect();
-                    for i in splits.into_iter().rev() {
-                        let (left, model) = (&rest[..i], &rest[i + 1..]);
-                        if valid_base(left) && valid_model(model) && !port_headed(model) {
-                            candidate = Some((left, model));
-                            break;
-                        }
-                    }
-                    match candidate {
-                        Some((endpoint, model)) => Ok(Provider::Local {
-                            endpoint: endpoint.to_string(),
-                            model: model.to_string(),
-                        }),
-                        None => Err(bad()),
-                    }
-                }
+                Some(_) => match split_endpoint_model(rest) {
+                    Some((endpoint, model)) => Ok(Provider::Local {
+                        endpoint: endpoint.to_string(),
+                        model: model.to_string(),
+                    }),
+                    None => Err(bad()),
+                },
             }
         }
         _ => Err(bad()),

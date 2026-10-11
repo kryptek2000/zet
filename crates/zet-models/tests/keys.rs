@@ -111,6 +111,18 @@ fn resolve_openai_and_compat_and_local_specs() {
         }
         other => panic!("wrong provider: {other:?}"),
     }
+    // Tagged models on pathed endpoints (same splitter as local:).
+    let fake2 = Fake::with(("compat", "sk-c"));
+    let p = resolve_provider("compat:http://h:4000/v1:llama:8b", &chain(&[fake2])).unwrap();
+    match p {
+        zet_models::Provider::OpenAICompat {
+            base_url, model, ..
+        } => {
+            assert_eq!(base_url, "http://h:4000/v1");
+            assert_eq!(model, "llama:8b");
+        }
+        other => panic!("wrong provider: {other:?}"),
+    }
 
     let none: &[&dyn Keychain] = &[];
     let p = resolve_provider("local:http://localhost:11434:qwen3", none).unwrap();
