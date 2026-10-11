@@ -131,3 +131,57 @@ fn record_live_command_as_block() {
     assert!(got.output.contains("hi"), "output was: {:?}", got.output);
     assert_eq!(got.exit_code, 3);
 }
+
+#[test]
+fn append_scrubs_key_material() {
+    let store = Store::open_in_memory().unwrap();
+    let raw_cmd = "export K=sk-or-v1-abcdefghij1234567890";
+    let raw_out = "token ghp_abcdefghij1234567890 here\nbearer Bearer abcdefgh12345678 end";
+    let id = store
+        .append(&Block {
+            id: 0,
+            session: "s".to_string(),
+            command: raw_cmd.to_string(),
+            output: raw_out.to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            duration_ms: 0,
+        })
+        .unwrap();
+    let got = store.get(id).unwrap();
+    assert!(
+        !got.command.contains("sk-or-v1-"),
+        "leaked: {:?}",
+        got.command
+    );
+    assert!(!got.output.contains("ghp_"), "leaked: {:?}", got.output);
+    assert!(
+        !got.output.contains("abcdefgh12345678"),
+        "leaked: {:?}",
+        got.output
+    );
+    assert!(
+        got.command.contains("[REDACTED]"),
+        "marker missing: {:?}",
+        got.command
+    );
+    assert!(
+        got.output.contains("[REDACTED]"),
+        "marker missing: {:?}",
+        got.output
+    );
+    // Innocent dashes and short tokens survive.
+    let id2 = store
+        .append(&Block {
+            id: 0,
+            session: "s".to_string(),
+            command: "ls sk-folders run-09999".to_string(),
+            output: "ok".to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            duration_ms: 0,
+        })
+        .unwrap();
+    let got2 = store.get(id2).unwrap();
+    assert_eq!(got2.command, "ls sk-folders run-09999");
+}

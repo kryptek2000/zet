@@ -7,3 +7,6 @@ license.workspace = true
 [dependencies]
 zet-models = { path = "../zet-models" }
 zet-blocks = { path = "../zet-blocks" }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.28", features = ["term"] }

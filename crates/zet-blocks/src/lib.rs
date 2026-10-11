@@ -57,13 +57,18 @@ impl Store {
     pub fn append(&self, block: &Block) -> Result<i64> {
         let duration_ms = i64::try_from(block.duration_ms)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        // Secrets must never reach the store: pasted keys echo through the
+        // PTY onto recorded rows (seen live with an OpenRouter key). Scrub
+        // command and output at the single write path.
+        let command = scrub_secrets(&block.command);
+        let output = scrub_secrets(&block.output);
         self.conn.execute(
             "INSERT INTO blocks (session, command, output, exit_code, cwd, duration_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 block.session,
-                block.command,
-                block.output,
+                command,
+                output,
                 block.exit_code,
                 block.cwd,
                 duration_ms,
@@ -172,4 +177,61 @@ fn row_to_block(row: &rusqlite::Row<'_>) -> Result<Block> {
         cwd: row.get(5)?,
         duration_ms,
     })
+}
+
+/// Key prefixes scrubbed from stored text, longest first, with the
+/// minimum tail length that counts as a secret (keeps `sk-folders`
+/// and short fragments intact).
+const SECRET_PREFIXES: &[(&str, usize)] = &[
+    ("github_pat_", 16),
+    ("sk-or-", 16),
+    ("sk-ant-", 16),
+    ("sk-proj-", 16),
+    ("xoxb-", 16),
+    ("xoxp-", 16),
+    ("xoxa-", 16),
+    ("xoxo-", 16),
+    ("Bearer ", 8),
+    ("ghp_", 16),
+    ("gho_", 16),
+    ("AKIA", 16),
+    ("sk-", 16),
+];
+
+fn is_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '~' | '+' | '/' | '=' | '.')
+}
+
+/// Replace key-like tokens with [REDACTED]. Runs on every stored
+/// command and output; history search and ghost text see only the
+/// scrubbed form.
+pub fn scrub_secrets(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        let rest = &text[i..];
+        let mut hit: Option<usize> = None;
+        for (prefix, min_tail) in SECRET_PREFIXES {
+            if let Some(tail) = rest.strip_prefix(prefix) {
+                let tail_len: usize = tail.chars().take_while(|c| is_token_char(*c)).count();
+                if tail_len >= *min_tail {
+                    hit =
+                        Some(prefix.len() + tail.chars().take_while(|c| is_token_char(*c)).count());
+                    break;
+                }
+            }
+        }
+        match hit {
+            Some(len) => {
+                out.push_str("[REDACTED]");
+                i += len;
+            }
+            None => {
+                let c = rest.chars().next().unwrap();
+                out.push(c);
+                i += c.len_utf8();
+            }
+        }
+    }
+    out
 }

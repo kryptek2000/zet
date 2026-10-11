@@ -42,11 +42,13 @@ fn auth_add(provider: &str) {
     }
     // First line only: read_to_string blocks to EOF on a terminal and would
     // swallow later input into the key. Stdin::lines is inherent.
+    // Echo off: a pasted key must never echo onto the PTY grid, where the
+    // shell hooks would record it into blocks (seen live, since fixed).
     eprint!("Paste API key for {provider}: ");
     use std::io::Write as _;
     let _ = std::io::stderr().flush();
-    let key = match std::io::stdin().lines().next() {
-        Some(Ok(line)) => line,
+    let key = match read_secret() {
+        Some(line) => line,
         _ => {
             eprintln!("failed to read key from stdin");
             std::process::exit(1);
@@ -63,6 +65,45 @@ fn auth_add(provider: &str) {
             eprintln!("{provider}: not stored: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+/// One secret line from stdin with terminal echo disabled (unix TTY),
+/// restored on drop. Piped stdin skips the termios dance (no echo there).
+fn read_secret() -> Option<String> {
+    #[cfg(unix)]
+    let stdin = std::io::stdin();
+    #[cfg(unix)]
+    let _no_echo = NoEcho::disable(&stdin);
+    let line = std::io::stdin().lines().next()?.ok()?;
+    eprintln!();
+    Some(line)
+}
+
+#[cfg(unix)]
+struct NoEcho<'a> {
+    fd: std::os::fd::BorrowedFd<'a>,
+    orig: nix::sys::termios::Termios,
+}
+
+#[cfg(unix)]
+impl<'a> NoEcho<'a> {
+    fn disable(stdin: &'a std::io::Stdin) -> Option<Self> {
+        use std::os::unix::io::AsFd as _;
+        let fd = stdin.as_fd();
+        let orig = nix::sys::termios::tcgetattr(fd).ok()?;
+        let mut raw = orig.clone();
+        raw.local_flags.remove(nix::sys::termios::LocalFlags::ECHO);
+        nix::sys::termios::tcsetattr(fd, nix::sys::termios::SetArg::TCSANOW, &raw).ok()?;
+        Some(NoEcho { fd, orig })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for NoEcho<'_> {
+    fn drop(&mut self) {
+        let _ =
+            nix::sys::termios::tcsetattr(self.fd, nix::sys::termios::SetArg::TCSANOW, &self.orig);
     }
 }
 

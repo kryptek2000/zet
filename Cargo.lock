@@ -4438,6 +4438,7 @@ dependencies = [
 name = "zet"
 version = "0.1.0"
 dependencies = [
+ "nix",
  "zet-blocks",
  "zet-models",
 ]
