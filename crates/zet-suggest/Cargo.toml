@@ -1,0 +1,9 @@
+[package]
+name = "zet-suggest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zet-blocks = { path = "../zet-blocks" }
+zet-models = { path = "../zet-models" }

@@ -9,6 +9,7 @@ members = [
   "crates/zet-agent",
   "crates/zet-policy",
   "crates/zet-models",
+  "crates/zet-suggest",
   "crates/zet-mcp",
   "crates/zet-daemon",
 ]

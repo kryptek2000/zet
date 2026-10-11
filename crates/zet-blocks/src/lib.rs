@@ -102,6 +102,30 @@ impl Store {
         Ok(rows.into_iter().rev().collect())
     }
 
+    /// Most recent successful command starting with `prefix` (and longer
+    /// than it), across all sessions. LIKE wildcards in the prefix are
+    /// escaped so they match literally. Empty prefix yields nothing.
+    pub fn complete(&self, prefix: &str) -> Result<Option<String>> {
+        if prefix.is_empty() {
+            return Ok(None);
+        }
+        let mut escaped = String::with_capacity(prefix.len());
+        for c in prefix.chars() {
+            if matches!(c, '%' | '_' | '\\') {
+                escaped.push('\\');
+            }
+            escaped.push(c);
+        }
+        let pattern = format!("{escaped}%");
+        let mut stmt = self.conn.prepare(
+            "SELECT command FROM blocks
+             WHERE command LIKE ?1 ESCAPE '\\' AND command != ?2 AND exit_code = 0
+             ORDER BY id DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![pattern, prefix], |row| row.get::<_, String>(0))?;
+        rows.next().transpose()
+    }
+
     /// `~/.zet/blocks.sqlite`, creating `~/.zet` when missing.
     pub fn open_default() -> std::io::Result<Self> {
         let home = std::env::var("HOME").map_err(std::io::Error::other)?;

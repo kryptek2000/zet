@@ -4511,6 +4511,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zet-suggest"
+version = "0.1.0"
+dependencies = [
+ "zet-blocks",
+ "zet-models",
+]
+
+[[package]]
 name = "zet-term"
 version = "0.1.0"
 
