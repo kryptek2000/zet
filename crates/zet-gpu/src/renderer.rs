@@ -140,6 +140,7 @@ pub struct Renderer {
 
 impl Renderer {
     pub async fn new(window: Arc<Window>) -> Result<Self, InitError> {
+        crate::perf_mark("renderer_new");
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance
@@ -158,6 +159,7 @@ impl Renderer {
             .request_device(&wgpu::DeviceDescriptor::default())
             .await
             .map_err(InitError::Device)?;
+        crate::perf_mark("wgpu_device");
         let config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .ok_or(InitError::NoSurfaceConfig)?;
@@ -168,6 +170,7 @@ impl Renderer {
         );
 
         let shaper = Shaper::new(16.0);
+        crate::perf_mark("font_system");
         let (cw, ch) = shaper.cell_px();
         let (cell_w, cell_h) = (cw as f32, ch as f32);
         let atlas_w = ATLAS_COLS * cw;
@@ -298,6 +301,7 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        crate::perf_mark("pipeline");
 
         let mut renderer = Renderer {
             surface,

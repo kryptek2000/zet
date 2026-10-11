@@ -697,10 +697,12 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
+    zet_gpu::perf_mark("main");
     let (prog, hook) = shell_program();
     let shell_name = prog.clone();
     // Guarantee a sane TERM even under GUI launchers.
     let mut session = Session::spawn("env", &["TERM=xterm-256color", &prog, "-i"], 80, 24).unwrap();
+    zet_gpu::perf_mark("shell_spawn");
     if let Some(hook) = hook {
         let _ = session.write_all(format!("source {hook}\nclear\n").as_bytes());
     }
