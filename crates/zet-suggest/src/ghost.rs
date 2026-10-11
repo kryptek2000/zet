@@ -83,6 +83,12 @@ impl Ghost {
             self.shown = None;
             return;
         }
+        // Never ghost scrubbed secrets: typing "[REDACTED]" helps nobody
+        // and implies the store knows more than it shows.
+        if suffix.contains("[REDACTED]") {
+            self.shown = None;
+            return;
+        }
         self.shown = Some(suffix);
         self.can_tab = true;
     }

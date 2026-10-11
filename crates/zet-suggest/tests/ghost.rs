@@ -152,3 +152,14 @@ fn no_command_notice_is_sticky() {
     assert_eq!(g.visible(), Some("(no command)"));
     assert_eq!(g.accept(), None);
 }
+
+#[test]
+fn redacted_suggestions_never_show() {
+    // The store scrubs secrets to [REDACTED]; ghosting the literal
+    // would type a placeholder and imply hidden knowledge.
+    let mut g = Ghost::new(seed(&[("export K=[REDACTED]", 0)]));
+    g.update(input("export K="));
+    assert_eq!(g.visible(), None);
+    assert!(!g.tabbable());
+    assert_eq!(g.accept(), None);
+}

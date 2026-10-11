@@ -59,6 +59,7 @@ struct App {
     exec_res_tx: Option<Sender<ExecRes>>,
     exec_pending: Option<PendingExec>,
     last_journal: Vec<zet_agent::JournalEntry>,
+    undo_rx: Option<Receiver<Result<(), String>>>,
     last_frame: std::time::Instant,
     needs_draw: bool,
     perf_t0: Option<std::time::Instant>,
@@ -179,6 +180,7 @@ impl App {
         }
         self.service_exec();
         self.poll_agent_done();
+        self.poll_undo_done();
         if let Some(code) = self.shell_state.last_exit() {
             if let Some(w) = &self.window {
                 let mode = if self.agent_busy {
@@ -266,30 +268,63 @@ impl App {
         }
     }
 
+    /// Collect a finished F12 undo: sticky notice on the current line.
+    /// A dead worker (panicked thread) clears the channel with a failure
+    /// notice instead of locking F12 forever.
+    fn poll_undo_done(&mut self) {
+        let Some(rx) = &self.undo_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => (),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.undo_rx = None;
+                let input = self.current_text().unwrap_or_default();
+                self.ghost
+                    .notify(input, "(undo failed: worker gone)".to_string());
+            }
+            Ok(res) => {
+                self.undo_rx = None;
+                let input = self.current_text().unwrap_or_default();
+                match res {
+                    Ok(()) => self.ghost.notify(input, "(undone)".to_string()),
+                    Err(e) => self.ghost.notify(input, format!("(undo failed: {e})")),
+                }
+            }
+        }
+    }
+
     /// Refresh the visible ghost suffix from current input. History only
     /// (sync, sub-ms); the model runs solely on NL Enter, in a thread.
     fn update_ghost(&mut self) {
         // NL answer landed: swap the NL line for the command (the preview).
         if let Some(rx) = &self.nl_rx {
-            if let Ok(answer) = rx.try_recv() {
-                self.nl_rx = None;
-                if let Some(cmd) = answer {
-                    // Never strand the shell in a continuation prompt:
-                    // syntactically broken replies notice instead of swap.
-                    if zet_pty::syntax_ok(&self.shell_name, &cmd) {
-                        self.accept_line(&cmd);
-                    } else if let Some(input) = self.current_text() {
-                        let short: String = cmd.chars().take(60).collect();
-                        self.ghost.notify(input, format!("(invalid: {short})"));
-                    }
-                } else if let Some(input) = self.current_text() {
-                    self.ghost.notify(input, "(no command)".to_string());
+            match rx.try_recv() {
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.ghost.waiting();
+                    return;
                 }
-                self.nl_mode = false;
-                self.retitle();
-            } else {
-                self.ghost.waiting();
-                return;
+                // Dead worker: drop back to history instead of "…" forever.
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.nl_rx = None;
+                }
+                Ok(answer) => {
+                    self.nl_rx = None;
+                    if let Some(cmd) = answer {
+                        // Never strand the shell in a continuation prompt:
+                        // syntactically broken replies notice instead of swap.
+                        if zet_pty::syntax_ok(&self.shell_name, &cmd) {
+                            self.accept_line(&cmd);
+                        } else if let Some(input) = self.current_text() {
+                            let short: String = cmd.chars().take(60).collect();
+                            self.ghost.notify(input, format!("(invalid: {short})"));
+                        }
+                    } else if let Some(input) = self.current_text() {
+                        self.ghost.notify(input, "(no command)".to_string());
+                    }
+                    self.nl_mode = false;
+                    self.retitle();
+                }
             }
         }
         let input = self.prompt_input();
@@ -409,43 +444,58 @@ impl App {
     }
 
     /// Collect a finished agent turn: journal kept, summary as a sticky
-    /// notice on the fresh prompt, modes cleared.
+    /// notice on the fresh prompt, modes cleared. A dead worker unlocks
+    /// input with a failure notice instead of holding the lock forever.
     fn poll_agent_done(&mut self) {
         let Some(rx) = &self.agent_rx else {
             return;
         };
-        let Ok(done) = rx.try_recv() else {
-            return;
-        };
-        self.agent_rx = None;
-        self.agent_busy = false;
-        self.exec_req_rx = None;
-        self.exec_res_tx = None;
-        self.exec_pending = None;
-        self.retitle();
-        let (input, text) = match done {
-            Some((summary, journal)) => {
-                // Best effort: the turn survives the window via `zet journal`.
-                let _ = zet_agent::append_journal(&zet_agent::journal_path_default(), &journal);
-                self.last_journal = journal;
-                let first: String = summary
-                    .lines()
-                    .next()
-                    .unwrap_or("done")
-                    .chars()
-                    .take(120)
-                    .collect();
-                (
-                    self.current_text().unwrap_or_default(),
-                    format!("agent: {first}"),
-                )
+        match rx.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => (),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.agent_rx = None;
+                self.agent_busy = false;
+                self.exec_req_rx = None;
+                self.exec_res_tx = None;
+                self.exec_pending = None;
+                self.retitle();
+                let input = self.current_text().unwrap_or_default();
+                self.ghost
+                    .notify(input, "(agent failed: worker gone)".to_string());
             }
-            None => (
-                self.current_text().unwrap_or_default(),
-                "(agent: no model — check spec/key)".to_string(),
-            ),
-        };
-        self.ghost.notify(input, text);
+            Ok(done) => {
+                self.agent_rx = None;
+                self.agent_busy = false;
+                self.exec_req_rx = None;
+                self.exec_res_tx = None;
+                self.exec_pending = None;
+                self.retitle();
+                let (input, text) = match done {
+                    Some((summary, journal)) => {
+                        // Best effort: the turn survives the window via `zet journal`.
+                        let _ =
+                            zet_agent::append_journal(&zet_agent::journal_path_default(), &journal);
+                        self.last_journal = journal;
+                        let first: String = summary
+                            .lines()
+                            .next()
+                            .unwrap_or("done")
+                            .chars()
+                            .take(120)
+                            .collect();
+                        (
+                            self.current_text().unwrap_or_default(),
+                            format!("agent: {first}"),
+                        )
+                    }
+                    None => (
+                        self.current_text().unwrap_or_default(),
+                        "(agent: no model — check spec/key)".to_string(),
+                    ),
+                };
+                self.ghost.notify(input, text);
+            }
+        }
     }
 
     /// Perf probe (ZET_PERF=1 only): first-frame age, key-to-render
@@ -608,7 +658,11 @@ impl ApplicationHandler for App {
                 let is_esc = pressed && matches!(&event.logical_key, Key::Named(NamedKey::Escape));
                 // F12: one-key undo of the last checkpointed agent step.
                 // (While busy the early gate above already swallowed this.)
+                // Runs on a thread: git in a giant repo must not hitch frames.
                 if pressed && matches!(&event.logical_key, Key::Named(NamedKey::F12)) {
+                    if self.undo_rx.is_some() {
+                        return;
+                    }
                     let input = self.current_text().unwrap_or_default();
                     let cp = self
                         .last_journal
@@ -621,17 +675,18 @@ impl ApplicationHandler for App {
                         }
                         Some(cp) => {
                             let cwd = shell_cwd(&self.session);
-                            // Wrong-repo use fails closed: reset --hard with
-                            // an unknown SHA errors instead of touching state.
-                            match zet_agent::undo_checkpoint(std::path::Path::new(&cwd), &Some(cp))
-                            {
-                                Ok(()) => {
-                                    self.ghost.notify(input, "(undone)".to_string());
-                                }
-                                Err(e) => {
-                                    self.ghost.notify(input, format!("(undo failed: {e})"));
-                                }
-                            }
+                            let (tx, rx) = mpsc::channel();
+                            self.undo_rx = Some(rx);
+                            std::thread::spawn(move || {
+                                // Wrong-repo use fails closed: reset --hard
+                                // with an unknown SHA errors, touching nothing.
+                                let res = zet_agent::undo_checkpoint(
+                                    std::path::Path::new(&cwd),
+                                    &Some(cp),
+                                )
+                                .map_err(|e| e.to_string());
+                                let _ = tx.send(res);
+                            });
                         }
                     }
                     return;
@@ -848,6 +903,7 @@ fn main() {
         exec_res_tx: None,
         exec_pending: None,
         last_journal: Vec::new(),
+        undo_rx: None,
         last_frame: std::time::Instant::now(),
         needs_draw: true,
         perf_t0,
