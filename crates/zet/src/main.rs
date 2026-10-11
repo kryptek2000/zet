@@ -16,7 +16,7 @@ fn main() {
         _ => {
             eprintln!("usage:");
             eprintln!("  zet auth show             list providers and key status");
-            eprintln!("  zet auth add <provider>   read key from stdin, store in OS keychain");
+            eprintln!("  zet auth add <provider>   prompt for key, store in OS keychain");
             eprintln!("  zet auth rm <provider>    delete key from OS keychain");
             std::process::exit(2);
         }
