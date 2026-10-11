@@ -155,6 +155,14 @@ impl Renderer {
             })
             .await
             .map_err(|_| InitError::NoAdapter)?;
+        crate::perf_mark("wgpu_adapter");
+        {
+            let info = adapter.get_info();
+            crate::perf_mark("backend");
+            if std::env::var_os("ZET_PERF").is_some() {
+                eprintln!("perf: backend={:?} device={}", info.backend, info.device);
+            }
+        }
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor::default())
             .await
