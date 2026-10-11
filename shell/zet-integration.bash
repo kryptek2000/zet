@@ -13,6 +13,18 @@ __zet_precmd() {
     local code=$?
     printf '\e]133;D;%s\a' "$code"
     printf '\e]133;A\a'
+    # Report aliases/functions (once per change): ZET routes unknown
+    # first words to the model, so it must know shell-defined names.
+    # compgen itself is a builtin; the sort/tr pipeline forks, so this
+    # costs a couple of spawns per prompt — emission stays change-gated.
+    if command -v compgen >/dev/null 2>&1; then
+        local names
+        names=$(compgen -a -A function 2>/dev/null | sort -u | tr '\n' ' ')
+        if [[ "$names" != "${__ZET_CMDS_SENT:-}" ]]; then
+            __ZET_CMDS_SENT="$names"
+            printf '\e]133;X;%s\a' "$names"
+        fi
+    fi
 }
 
 if [[ -z "${PROMPT_COMMAND:-}" ]]; then

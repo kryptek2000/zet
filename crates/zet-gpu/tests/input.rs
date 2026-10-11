@@ -98,17 +98,6 @@ fn paste_normalizes_newlines_to_cr() {
 }
 
 #[test]
-fn ctrl_semicolon_toggles_nl_not_types() {
-    use zet_gpu::input::is_nl_toggle;
-    // Real Ctrl+; arrives as ";" with Control held (no shift: shift would
-    // make it ":"). It must toggle, not type ESC (0x1b) via translate.
-    assert!(is_nl_toggle(&Key::Character(";".into()), true, &ctrl()));
-    assert!(!is_nl_toggle(&Key::Character(";".into()), true, &plain()));
-    assert!(!is_nl_toggle(&Key::Character(";".into()), false, &ctrl()));
-    assert!(!is_nl_toggle(&Key::Character(":".into()), true, &ctrl()));
-}
-
-#[test]
 fn ctrl_g_toggles_agent_not_bell() {
     use zet_gpu::input::is_agent_toggle;
     // Ctrl+G would type BEL (0x07) via translate; in the shell it must

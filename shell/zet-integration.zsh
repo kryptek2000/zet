@@ -12,6 +12,15 @@ __zet_precmd() {
     local code=$?
     printf '\e]133;D;%s\a' "$code"
     printf '\e]133;A\a'
+    # Report aliases/functions (once per change): ZET routes unknown
+    # first words to the model, so it must know shell-defined names.
+    # Parameter expansion only: no fork. Change-gated: silent prompt.
+    local names
+    names="${(j: :)${(k)aliases}} ${(j: :)${(k)functions}}"
+    if [[ "$names" != "${__ZET_CMDS_SENT:-}" ]]; then
+        __ZET_CMDS_SENT="$names"
+        printf '\e]133;X;%s\a' "$names"
+    fi
 }
 
 __zet_preexec() {

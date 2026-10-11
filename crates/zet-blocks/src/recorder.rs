@@ -21,6 +21,9 @@ pub struct Recorder {
     cmd: Option<(usize, usize)>,
     pending: Option<(String, String)>,
     t0: Option<Instant>,
+    /// Shell-reported command names (133;X markers), drained by the
+    /// window into its KnownCommands set.
+    cmd_names: Vec<String>,
 }
 
 impl Recorder {
@@ -31,7 +34,13 @@ impl Recorder {
             cmd: None,
             pending: None,
             t0: None,
+            cmd_names: Vec::new(),
         }
+    }
+
+    /// Shell-reported names since the last call (aliases/functions).
+    pub fn drain_cmd_names(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.cmd_names)
     }
 
     pub fn blocks(&self) -> rusqlite::Result<Vec<Block>> {
@@ -113,6 +122,11 @@ impl Recorder {
                     self.t0 = Some(Instant::now());
                 }
                 MarkerKind::Done => self.finish(term, cwd, &m),
+                // X: shell-reported names; never a block, just vocab.
+                MarkerKind::Cmds => {
+                    self.cmd_names
+                        .extend(m.line.split_whitespace().map(str::to_string));
+                }
             }
         }
     }

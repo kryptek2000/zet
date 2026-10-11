@@ -13,6 +13,19 @@ fn recorder() -> (Terminal, Recorder) {
 }
 
 #[test]
+fn x_markers_feed_vocab_not_blocks() {
+    let (mut t, mut rec) = recorder();
+    feed_pump(&mut t, &mut rec, b"\x1b]133;X;ll gco\x07");
+    assert_eq!(
+        rec.drain_cmd_names(),
+        vec!["ll".to_string(), "gco".to_string()]
+    );
+    // Drained once; and no block was recorded.
+    assert!(rec.drain_cmd_names().is_empty());
+    assert!(rec.blocks().unwrap().is_empty());
+}
+
+#[test]
 fn records_command_with_output_and_exit() {
     let (mut t, mut rec) = recorder();
     feed_pump(&mut t, &mut rec, b"$ ");

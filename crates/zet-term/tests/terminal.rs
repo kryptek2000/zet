@@ -362,6 +362,22 @@ fn osc133_markers_snapshot_position_and_exit() {
 }
 
 #[test]
+fn osc133_x_carries_shell_command_names() {
+    use zet_term::{MarkerKind, Terminal};
+    let mut t = Terminal::new(40, 10);
+    t.feed(b"\x1b]133;X;ll gco myfunc\x07");
+    let marks = t.drain_markers();
+    assert_eq!(marks.len(), 1);
+    assert_eq!(marks[0].kind, MarkerKind::Cmds);
+    assert_eq!(marks[0].line, "ll gco myfunc");
+    // Empty payload still marks (window just learns nothing).
+    t.feed(b"\x1b]133;X;\x07");
+    let marks = t.drain_markers();
+    assert_eq!(marks.len(), 1);
+    assert_eq!(marks[0].line, "");
+}
+
+#[test]
 fn osc133_ignored_on_alt_screen() {
     use zet_term::Terminal;
     let mut t = Terminal::new(40, 10);

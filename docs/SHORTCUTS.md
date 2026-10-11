@@ -8,8 +8,8 @@ Everything below describes the built window (`cargo run -p zet-gpu
 | Keys | Does |
 |---|---|
 | `Tab` | Accept the dimmed ghost suffix (history completion). With no ghost, plain Tab reaches the shell (its own completion). Notices and hints are never Tab-typed. |
-| `Esc` | Dismiss ghost / cancel NL / exit goal mode. Swallowed only when it dismissed something; otherwise passes to the shell. |
-| `Enter` | Run the line. In NL/goal mode, submits to the model instead. While an answer is in flight, Enter waits. |
+| `Esc` | Dismiss ghost / cancel an in-flight answer / exit goal mode. Swallowed only when it did something; otherwise passes to the shell. |
+| `Enter` | Known commands run. Anything else translates via the model (preview swaps in). In goal mode, starts the turn. While an answer is in flight, Enter waits. |
 | `Ctrl+Shift+V`, `Shift+Ins` | Paste (newlines become Enter). |
 | `Backspace` | Erase via the shell's own VERASE — works in every line discipline. |
 | `Del` | Forward-delete (`ESC[3~`), handled by the shell natively. |
@@ -19,11 +19,15 @@ Ghost text is instant history (`Store::complete`, exit-0, most-recent);
 single-row input only, cursor-at-end only, multi-line history truncates
 to its first line.
 
-## NL mode (`Ctrl+;`)
+## Talking to ZET (no modes, no chords)
 
-Type intent, `Enter`; the model translates to one command and the line
-swaps to it (preview — review, then `Enter` to run). Title shows `(nl)`.
+Just type — command or plain words — and press `Enter`:
 
+- A known command (`ls`, `cd`, your aliases) runs instantly. The fast
+  path never touches the model: zero added latency.
+- Anything else (`hello`, `update`, `list files in detail`) goes to the
+  model, and the line swaps to its answer as a preview — review, then
+  `Enter` to run. Title never changes; there is no mode to enter or leave.
 - Needs a model, resolved per request: `ZET_INLINE_SPEC` first, then the
   `zet inline <spec>` choice, then the window's startup default, then a
   fresh local probe. Set it from inside any window with e.g.
@@ -33,6 +37,12 @@ swaps to it (preview — review, then `Enter` to run). Title shows `(nl)`.
 - Broken replies never swap: `(invalid: …)` / `(no command)` notice instead.
 - Greetings and smalltalk get an `agent: …` reply on the prompt line
   instead of a command — `hello` gets answered, not exit 127.
+- If the model fails, your original line runs untouched — ZET never
+  blocks your input; worst case is the shell's own error.
+- Two honest limits: new installs mid-window aren't in the command set
+  until restart (their first use translates to a preview — safe, just
+  surprising once); multi-line pastes translate as one joined line, so
+  review the preview before running.
 
 ## Agent mode (`Ctrl+G`)
 
@@ -54,8 +64,9 @@ while a turn runs.
 
 ## Window chrome
 
-- Title carries `(nl)` / `(agent)` / `(agent…)` mode flags and the last
-  `(exit N)`. `exit` (or `Ctrl+D`) closes the window.
+- Title carries `(agent)` / `(agent…)` while a turn runs, plus the last
+  `(exit N)`. There are no input modes left to flag. `exit` (or `Ctrl+D`)
+  closes the window.
 - Every command is recorded: `zet blocks` lists, `zet journal` shows
   agent turns. The store scrubs known key material (`sk-*`, `ghp_*`,
   `AKIA…`, `Bearer …`); anything else pasted persists — rotate it if

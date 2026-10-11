@@ -91,6 +91,9 @@ pub enum MarkerKind {
     Exec,
     /// D: finished; exit_code set.
     Done,
+    /// X: shell-reported command names (aliases/functions); the payload
+    /// (space-separated) rides in `line`.
+    Cmds,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -374,6 +377,7 @@ impl Terminal {
             Some('B') => MarkerKind::Input,
             Some('C') => MarkerKind::Exec,
             Some('D') => MarkerKind::Done,
+            Some('X') => MarkerKind::Cmds,
             _ => return,
         };
         let exit_code = if kind == MarkerKind::Done {
@@ -387,6 +391,8 @@ impl Terminal {
         };
         let line = match kind {
             MarkerKind::Exec | MarkerKind::Done => self.line_text(self.cy),
+            // X payload is `X;<space-separated names>`.
+            MarkerKind::Cmds => body.split(';').nth(1).unwrap_or("").to_string(),
             _ => String::new(),
         };
         self.markers.push(Marker {

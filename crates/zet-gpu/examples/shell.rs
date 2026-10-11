@@ -9,7 +9,7 @@ use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::Window;
-use zet_gpu::input::{is_agent_toggle, is_nl_toggle, is_paste, paste_bytes, translate};
+use zet_gpu::input::{is_agent_toggle, is_paste, paste_bytes, translate};
 use zet_gpu::Renderer;
 use zet_pty::shell::ShellState;
 use zet_pty::Session;
@@ -51,8 +51,11 @@ struct App {
     env_spec: Option<String>,
     startup_spec: Option<String>,
     ghost: zet_suggest::Ghost,
-    nl_mode: bool,
     nl_rx: Option<Receiver<Option<String>>>,
+    /// Commands that run without translation (PATH at startup +
+    /// shell-reported aliases/functions). Unknown first words route
+    /// to the model instead — no modes, no chords.
+    known: zet_pty::KnownCommands,
     goal_mode: bool,
     agent_busy: bool,
     agent_rx: Option<Receiver<Option<AgentDone>>>,
@@ -163,6 +166,8 @@ impl App {
         }
         if let Some(rec) = &mut self.recorder {
             rec.pump(&mut self.term, &shell_cwd(&self.session));
+            // Shell-reported aliases/functions feed the router.
+            self.known.insert_names(rec.drain_cmd_names());
         }
         // Settle probe (ZET_PERF=1 only): Enter-to-block with a fully
         // drained channel. Parsed + recorded; pixels ≤1 frame behind
@@ -188,8 +193,6 @@ impl App {
                     " (agent…)"
                 } else if self.goal_mode {
                     " (agent)"
-                } else if self.nl_mode {
-                    " (nl)"
                 } else {
                     ""
                 };
@@ -330,7 +333,6 @@ impl App {
                     } else if let Some(input) = self.current_text() {
                         self.ghost.notify(input, "(no command)".to_string());
                     }
-                    self.nl_mode = false;
                     self.retitle();
                 }
             }
@@ -375,8 +377,6 @@ impl App {
                 " (agent…)"
             } else if self.goal_mode {
                 " (agent)"
-            } else if self.nl_mode {
-                " (nl)"
             } else {
                 ""
             };
@@ -400,6 +400,16 @@ impl App {
         zet_models::keys::autodetect_local().inspect(|s| eprintln!("zet: inline model {s}"))
     }
 
+    /// Auto-route: known first words run instantly; anything else goes
+    /// to the model (translate → preview). Empty/assignment-only lines
+    /// run (they're shell business, not language).
+    fn route_direct(&self, line: &str) -> bool {
+        match zet_pty::first_word(line) {
+            None => true,
+            Some(w) => self.known.contains(&w) || zet_pty::is_shell_word(&w),
+        }
+    }
+
     /// Kick off an NL-to-command request on a thread; the answer swaps the
     /// line when it lands (polled in update_ghost). Returns false with no
     /// model configured.
@@ -407,8 +417,6 @@ impl App {
         let spec = match self.resolve_spec() {
             Some(s) => s,
             None => {
-                self.nl_mode = false;
-                self.retitle();
                 self.ghost.notify(
                     nl,
                     "(no model: `zet inline <spec>` or ZET_INLINE_SPEC)".to_string(),
@@ -663,19 +671,9 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
-                // NL mode toggle: Ctrl+; would otherwise type ESC (0x1b).
-                if is_nl_toggle(&event.logical_key, pressed, &self.mods) {
-                    self.nl_mode = !self.nl_mode;
-                    self.goal_mode = false;
-                    self.ghost.reset();
-                    self.nl_rx = None;
-                    self.retitle();
-                    return;
-                }
                 // Agent goal mode toggle: Ctrl+G would otherwise type BEL.
                 if is_agent_toggle(&event.logical_key, pressed, &self.mods) {
                     self.goal_mode = !self.goal_mode;
-                    self.nl_mode = false;
                     self.ghost.reset();
                     self.nl_rx = None;
                     self.retitle();
@@ -729,35 +727,23 @@ impl ApplicationHandler for App {
                         return;
                     }
                 }
-                // Escape clears ghost / cancels NL / exits goal mode;
-                // swallowed only when it did something.
+                // Escape clears ghost / cancels an in-flight answer / exits
+                // goal mode; swallowed only when it did something.
                 if is_esc {
-                    let was_nl = self.nl_mode || self.nl_rx.is_some();
+                    let was_pending = self.nl_rx.is_some();
                     let was_goal = self.goal_mode;
                     let swallowed = self.ghost.cancel();
-                    if was_nl || was_goal {
+                    if was_pending || was_goal {
                         self.ghost.dismiss_current();
                     }
                     self.nl_rx = None;
-                    if self.nl_mode {
-                        self.nl_mode = false;
-                        self.retitle();
-                    }
                     if self.goal_mode {
                         self.goal_mode = false;
                         self.retitle();
                     }
-                    if swallowed || was_nl || was_goal {
+                    if swallowed || was_pending || was_goal {
                         return;
                     }
-                }
-                // Enter in NL mode sends the line to the model, not the shell.
-                if is_enter && self.nl_mode && self.nl_rx.is_none() {
-                    let input = self.current_text().unwrap_or_default();
-                    if !input.trim().is_empty() {
-                        self.start_nl_request(input);
-                    }
-                    return;
                 }
                 // Enter in goal mode starts an agent turn on the line.
                 if is_enter && self.goal_mode {
@@ -766,6 +752,16 @@ impl ApplicationHandler for App {
                         self.start_agent(input);
                     }
                     return;
+                }
+                // Modeless routing: known commands run; unknown first
+                // words translate (preview swaps in, never runs blind).
+                // The line stays put when there's no model (notice shown).
+                if is_enter && self.nl_rx.is_none() {
+                    let input = self.current_text().unwrap_or_default();
+                    if !input.trim().is_empty() && !self.route_direct(&input) {
+                        self.start_nl_request(input);
+                        return;
+                    }
                 }
                 // Enter while an NL answer is in flight: wait for it.
                 if is_enter && self.nl_rx.is_some() {
@@ -893,7 +889,7 @@ fn main() {
             .or_else(|_| zet_blocks::Store::open_in_memory())
             .expect("in-memory store"),
     );
-    // NL model for Ctrl+; mode: explicit ZET_INLINE_SPEC (launch config)
+    // Model for plain-language input: explicit ZET_INLINE_SPEC (launch config)
     // wins; else the persisted `zet inline` choice re-read per request;
     // else zero-config local when ollama serves a preferred model.
     let env_spec = std::env::var("ZET_INLINE_SPEC").ok();
@@ -923,7 +919,7 @@ fn main() {
         env_spec,
         startup_spec,
         ghost,
-        nl_mode: false,
+        known: zet_pty::KnownCommands::from_env(),
         nl_rx: None,
         goal_mode: false,
         agent_busy: false,

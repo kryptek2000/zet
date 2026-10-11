@@ -124,3 +124,154 @@ impl Session {
             .map_err(std::io::Error::other)
     }
 }
+
+/// The command position of a line: first token past `VAR=value`
+/// assignments, quotes stripped. None for empty / assignment-only
+/// lines (those run — they set vars — they just name no command).
+pub fn first_word(line: &str) -> Option<String> {
+    let mut text = line.trim_start();
+    loop {
+        // Quoted first token: the command itself has spaces.
+        if let Some(rest) = text.strip_prefix('"').or_else(|| text.strip_prefix('\'')) {
+            let quote = text.chars().next().unwrap();
+            let end = rest.find(quote)?;
+            return Some(rest[..end].to_string());
+        }
+        let tok = text.split_whitespace().next()?;
+        // VAR=value prefix (no spaces, valid name before =): skip it.
+        if let Some(eq) = tok.find('=') {
+            let name = &tok[..eq];
+            if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                text = text[tok.len()..].trim_start();
+                if text.is_empty() {
+                    return None;
+                }
+                continue;
+            }
+        }
+        return Some(tok.to_string());
+    }
+}
+
+/// Shell builtins + keywords: always run directly, never translated.
+/// Union of bash/zsh everyday words (not exhaustive — PATH covers the
+/// rest; an unknown builtin just takes the model path, still safe).
+pub fn is_shell_word(name: &str) -> bool {
+    matches!(
+        name,
+        "alias"
+            | "bg"
+            | "bind"
+            | "break"
+            | "builtin"
+            | "caller"
+            | "case"
+            | "cd"
+            | "command"
+            | "compgen"
+            | "complete"
+            | "continue"
+            | "coproc"
+            | "declare"
+            | "dirs"
+            | "disown"
+            | "do"
+            | "done"
+            | "echo"
+            | "elif"
+            | "else"
+            | "enable"
+            | "esac"
+            | "eval"
+            | "exec"
+            | "exit"
+            | "export"
+            | "false"
+            | "fc"
+            | "fi"
+            | "for"
+            | "function"
+            | "getopts"
+            | "hash"
+            | "help"
+            | "history"
+            | "if"
+            | "jobs"
+            | "kill"
+            | "let"
+            | "local"
+            | "logout"
+            | "popd"
+            | "printf"
+            | "pushd"
+            | "pwd"
+            | "read"
+            | "readonly"
+            | "return"
+            | "select"
+            | "set"
+            | "shift"
+            | "source"
+            | "suspend"
+            | "test"
+            | "then"
+            | "time"
+            | "times"
+            | "trap"
+            | "true"
+            | "type"
+            | "typeset"
+            | "ulimit"
+            | "umask"
+            | "unalias"
+            | "unset"
+            | "until"
+            | "wait"
+            | "while"
+            | "whence"
+            | "zmodload"
+    )
+}
+
+/// Commands known runnable without translation: PATH binaries at
+/// startup plus shell-reported aliases/functions (via 133;X markers).
+pub struct KnownCommands {
+    set: std::collections::HashSet<String>,
+}
+
+impl KnownCommands {
+    pub fn from_env() -> Self {
+        let mut set = std::collections::HashSet::new();
+        if let Some(path) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&path) {
+                let Ok(entries) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        set.insert(name.to_string());
+                    }
+                }
+            }
+        }
+        Self { set }
+    }
+
+    /// Shell-reported names (aliases/functions from integration hooks).
+    pub fn insert_names<I, S>(&mut self, names: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        for n in names {
+            let n = n.as_ref().trim();
+            if !n.is_empty() {
+                self.set.insert(n.to_string());
+            }
+        }
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.set.contains(name)
+    }
+}
