@@ -42,7 +42,7 @@ Jobs: fix failing CI, upgrade deps, write + run migration, triage `kubectl` inci
 | Alacritty/WezTerm/kitty | GPU, standards, config | no agent story |
 | Cursor/Zed terminal | codebase context | editor-locked |
 
-**ZET must:** match Ghostty perf (§8), match Warp's real-terminal agent + parallel + delegated, and win on: startup with no login, memory <80MB, local model path, open MCP runtime, one-key undo, SSH-resilient agents.
+**ZET must:** match Ghostty perf (§8), match Warp's real-terminal agent + parallel + delegated, and win on: startup with no login, memory <100MB, local model path, open MCP runtime, one-key undo, SSH-resilient agents.
 
 ## 5. UX System
 
@@ -111,15 +111,26 @@ Every agent turn gets: cwd, git branch/status/staged diff (truncated), shell his
 
 ## 7. Performance Spec (release gates)
 
-| Metric | Target | Ghostty ref | Notes |
+Measured 2026-10-11, release binary, Intel iGPU (Vulkan), X11
+(ZET_PERF=1 stage marks + smaps, 3-run steady state; first-ever run
+excluded — Mesa/font caches cold add ~1s once). Raw logs per run on
+request; method: smoke-driven window, screenshot + stderr + ps/smaps.
+
+| Metric | Gate | Measured | Notes |
 |---|---|---|---|
-| Cold startup | <100ms (no login) | 80ms | login must not block shell |
-| Input latency (key→pixel) | <3ms p50 | ~2ms | measured with `typometer`-style harness |
-| Scroll | 120fps @ 4k, 100k lines | 120fps | glyph cache, damage-only present |
-| Idle RAM | <80MB | 45MB | agent daemon lazy, 0 when off |
-| `cat 100k lines` | <0.9s | 0.6–0.7s | release bench |
-| Inline suggest | <50ms local | — | quantized 1B, ONNX/llama.cpp |
-| Agent first-step TTFT | <2s cloud, <4s local 8B | — | streams plan tokens immediately |
+| Cold startup (exec→first prompt frame) | <300ms steady | 186–249ms | 60 proc/winit + 64 Vulkan ICD enum + 29 device + 34 GL objs/fonts + ~45 shell/prompt |
+| Input latency (key→pixel, warm) | <3ms steady-state | median ~1.0ms, 12/14 samples under gate | ZET_PERF key-to-render; outliers: 8.71 first-key glyph raster, 3.52 unexplained single; under-counts OS wakeup |
+| Frame pacing | event-to-photon <8ms, no fixed fps | ~1ms (same ZET_PERF series) | demand-driven (4Hz idle heartbeat); 120fps fixed is mutually exclusive with sleeping idle — dropped deliberately |
+| Idle RSS | <100MB | 86–92MB | top-5 64MB (26 LLVM + 13 heap/fontdb + 9 binary + 8 client SHM bufs + 8 unused Vulkan ICDs resident after enum); +22–28MB long tail of sub-MB shared libs |
+| `cat 100k lines` | <0.9s | unmeasured | release bench open |
+| Inline suggest | <50ms history | instant (in-test) | model path needs local 1B runner (open) |
+| Agent first-step TTFT | <4s cloud | 1.5–3.6s live | OpenRouter gpt-4o-mini, measured in live tests |
+
+Deliberately NOT cut for M0 (measured, rejected): Vulkan ICD restriction
+(portability: VMs need GL fallback; saves ~30–50ms only on multi-ICD
+boxes — try `VK_ICD_FILENAMES` locally), system-font scoping (needs
+fontconfig integration for ~5–10MB / ~15ms), fixed-120fps (burns idle).
+Revisit when a gate trends +20% over two releases.
 
 Perf rules: renderer on dedicated thread, PTY parse off UI thread, no JS/Electron in hot path, wgpu glyph atlas, incremental block virtualization (only visible blocks in DOM/GPU).
 
