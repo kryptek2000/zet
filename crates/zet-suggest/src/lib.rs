@@ -107,6 +107,16 @@ impl<H: Suggest, M: ChatModel> Suggest for ChainSuggester<H, M> {
 }
 
 fn first_line(text: &str) -> Option<String> {
+    // Reasoning models (qwen3, deepseek-r1) wrap chain-of-thought in
+    // <think> blocks, sometimes unclosed when cut off: drop everything
+    // from the opener before looking for the command.
+    let text = match text.find("<think>") {
+        Some(i) => match text[i..].find("</think>") {
+            Some(j) => format!("{}{}", &text[..i], &text[i + j + "</think>".len()..]),
+            None => text[..i].to_string(),
+        },
+        None => text.to_string(),
+    };
     for raw in text.lines() {
         let line = raw.trim();
         if line.is_empty() {
@@ -136,11 +146,14 @@ fn first_line(text: &str) -> Option<String> {
             }
             continue;
         }
-        let clean = line
-            .trim_start_matches(['$', '>', '-', '*'])
-            .trim()
-            .trim_end_matches('`')
-            .trim();
+        // One pair of inline-code backticks (`ls -a`), not command
+        // substitution (echo `date` keeps its backticks).
+        let clean = line.trim_start_matches(['$', '>', '-', '*']).trim();
+        let clean = match clean.strip_prefix('`') {
+            Some(inner) => inner.strip_suffix('`').unwrap_or(inner),
+            None => clean,
+        }
+        .trim();
         if clean.is_empty() {
             continue;
         }

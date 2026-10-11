@@ -125,7 +125,7 @@ fn resolve_openai_and_compat_and_local_specs() {
     let p = resolve_provider("local:qwen3:1.7b", none).unwrap();
     match p {
         zet_models::Provider::Local { endpoint, model } => {
-            assert_eq!(endpoint, "http://localhost:11434");
+            assert_eq!(endpoint, "http://localhost:11434/v1");
             assert_eq!(model, "qwen3:1.7b");
         }
         other => panic!("wrong provider: {other:?}"),
@@ -141,7 +141,7 @@ fn resolve_openai_and_compat_and_local_specs() {
     let p = resolve_provider("local:qwen3", none).unwrap();
     match p {
         zet_models::Provider::Local { endpoint, model } => {
-            assert_eq!(endpoint, "http://localhost:11434");
+            assert_eq!(endpoint, "http://localhost:11434/v1");
             assert_eq!(model, "qwen3");
         }
         other => panic!("wrong provider: {other:?}"),
@@ -156,6 +156,15 @@ fn resolve_openai_and_compat_and_local_specs() {
             resolve_provider(spec, none).is_err(),
             "{spec} should not parse"
         );
+    }
+    // Endpoints may carry a path (LiteLLM-style gateways).
+    let p = resolve_provider("local:http://h:4000/v1:llama:8b", none).unwrap();
+    match p {
+        zet_models::Provider::Local { endpoint, model } => {
+            assert_eq!(endpoint, "http://h:4000/v1");
+            assert_eq!(model, "llama:8b");
+        }
+        other => panic!("wrong provider: {other:?}"),
     }
 }
 

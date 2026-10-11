@@ -132,6 +132,8 @@ fn model_strips_fences_and_bullets() {
     for (reply, want) in [
         ("```sh\ngit status\n```", "git status"),
         ("```git stash```", "git stash"),
+        ("`ls -a`", "ls -a"),
+        ("echo `date`", "echo `date`"),
         ("- kubectl get pods", "kubectl get pods"),
         ("$ ls -la", "ls -la"),
         ("```\n```", ""),
@@ -156,4 +158,23 @@ fn ghost_suffix_truncates_multiline_suggestions() {
     assert_eq!(ghost_suffix("foo\n", "foo\nbar"), None);
     assert_eq!(ghost_suffix("", "foo"), Some("foo"));
     assert_eq!(ghost_suffix("foo", ""), None);
+}
+
+#[test]
+fn model_skips_think_blocks() {
+    // Reasoning models wrap chain-of-thought; the command follows.
+    // Unclosed (cut off by max tokens) drops to the opener.
+    for (reply, want) in [
+        ("<think>list files means ls</think>\nls -la", "ls -la"),
+        ("<think>unclosed thinking\nls", ""),
+        ("Sure:\n<think>hmm</think>\n```sh\ndf -h\n```", "df -h"),
+    ] {
+        let (m, _) = script(reply);
+        let s = ModelSuggester::new(m);
+        assert_eq!(
+            s.suggest_nl("x").as_deref(),
+            if want.is_empty() { None } else { Some(want) },
+            "{reply:?}"
+        );
+    }
 }

@@ -123,7 +123,7 @@ request; method: smoke-driven window, screenshot + stderr + ps/smaps.
 | Frame pacing | event-to-photon <8ms, no fixed fps | ~1ms (same ZET_PERF series) | demand-driven (4Hz idle heartbeat); 120fps fixed is mutually exclusive with sleeping idle — dropped deliberately |
 | Idle RSS | <100MB | 86–92MB | top-5 64MB (26 LLVM + 13 heap/fontdb + 9 binary + 8 client SHM bufs + 8 unused Vulkan ICDs resident after enum); +22–28MB long tail of sub-MB shared libs |
 | `cat 100k lines` | <0.9s | 192ms | Enter-to-recorded-block (589KB output), release, X11 |
-| Inline suggest | <50ms history | instant (in-test) | model path needs local 1B runner (open) |
+| Inline suggest | <50ms history | instant (in-test) | model path live via local ollama (llama3.2:1b, ~3s); history stays the instant default |
 | Agent first-step TTFT | <4s cloud | 1.5–3.6s live | OpenRouter gpt-4o-mini, measured in live tests |
 
 Deliberately NOT cut for M0 (measured, rejected): Vulkan ICD restriction
@@ -185,7 +185,7 @@ font = "JetBrainsMono Nerd Font"; font_size = 13; opacity = 0.96
 [shell]
 default = "zsh"; scrollback = 500_000
 [models]
-default = "anthropic:claude-sonnet"; inline = "local:qwen3-1.7b-q4"
+default = "anthropic:claude-sonnet"; inline = "local:llama3.2:1b"  # proven live via ollama; qwen3:1.7b reasons (~100s on CPU) — quality runs only
 # BYOK examples (keys live in OS keychain via `zet auth add <provider>`):
 # agent_alt = "openrouter:anthropic/claude-sonnet"
 # cheap = "openrouter:deepseek/deepseek-chat"

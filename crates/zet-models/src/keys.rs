@@ -132,6 +132,58 @@ fn need_key(provider: &str, chains: &[&dyn Keychain]) -> Result<String, ResolveE
     })
 }
 
+/// Left side of a `local:` split: scheme://host[:port][/path], no
+/// brackets, numeric port, colon-free path.
+fn valid_base(url: &str) -> bool {
+    let Some(tail) = url.split_once("://").map(|(_, t)| t) else {
+        return false;
+    };
+    if tail.is_empty() {
+        return false;
+    }
+    let (authority, path) = match tail.split_once('/') {
+        Some((a, p)) => (a, Some(p)),
+        None => (tail, None),
+    };
+    let mut parts = authority.split(':');
+    let host = parts.next().unwrap_or("");
+    if host.is_empty() || host.contains(['[', ']']) {
+        return false;
+    }
+    match parts.next() {
+        None => {}
+        Some(port) if port.is_empty() || !port.bytes().all(|c| c.is_ascii_digit()) => {
+            return false;
+        }
+        Some(_) => {}
+    }
+    if parts.next().is_some() {
+        return false;
+    }
+    match path {
+        None => true,
+        Some(p) => !p.contains(':'),
+    }
+}
+
+/// Right side of a `local:` split: present, not a bare port number,
+/// no dangling separator, no path slashes (those belong to the endpoint).
+fn valid_model(model: &str) -> bool {
+    !model.is_empty()
+        && !model.bytes().all(|c| c.is_ascii_digit())
+        && !model.ends_with(':')
+        && !model.contains('/')
+}
+
+/// A model starting `digits:` was cut inside the endpoint
+/// (`http://h:11434` + `:qwen3`, not endpoint `http://h`).
+fn port_headed(model: &str) -> bool {
+    match model.split_once(':') {
+        Some((p, _)) => !p.is_empty() && p.bytes().all(|c| c.is_ascii_digit()),
+        None => false,
+    }
+}
+
 /// Build a [`Provider`] from a config spec, fetching the key from `chains`:
 /// `openai:MODEL`, `openrouter:VENDOR/MODEL`, `compat:BASE_URL:MODEL`
 /// (split on the last `:` so URLs survive), `local:MODEL` or
@@ -165,45 +217,35 @@ pub fn resolve_provider(spec: &str, chains: &[&dyn Keychain]) -> Result<Provider
         }
         "local" => {
             // Bare model on the default endpoint (tags may contain
-            // colons), or ENDPOINT:MODEL where the endpoint carries a
-            // scheme: the port, when numeric, separates endpoint from
-            // model; otherwise the whole tail after host is the model.
+            // colons), or ENDPOINT:MODEL with an explicit base URL:
+            // the rightmost split whose left side is a valid base URL
+            // (scheme://host[:port][/path]) and whose model is non-empty,
+            // non-numeric, and colon-clean at the edges.
             match rest.split_once("://") {
                 None => Ok(Provider::Local {
-                    endpoint: "http://localhost:11434".to_string(),
+                    endpoint: "http://localhost:11434/v1".to_string(),
                     model: rest.to_string(),
                 }),
-                Some((scheme, tail)) => {
-                    let (host, after_host) = tail.split_once(':').ok_or_else(bad)?;
-                    if host.is_empty() || host.contains(['[', ']']) {
-                        return Err(bad());
+                Some(_) => {
+                    // Every ':' right-to-left on the ORIGINAL rest (a walk
+                    // that truncates would forget right context). Take the
+                    // first valid split whose model isn't port-headed.
+                    let mut candidate: Option<(&str, &str)> = None;
+                    let splits: Vec<usize> = rest.match_indices(':').map(|(i, _)| i).collect();
+                    for i in splits.into_iter().rev() {
+                        let (left, model) = (&rest[..i], &rest[i + 1..]);
+                        if valid_base(left) && valid_model(model) && !port_headed(model) {
+                            candidate = Some((left, model));
+                            break;
+                        }
                     }
-                    let (port, model) = match after_host.split_once(':') {
-                        Some((p, m))
-                            if !p.is_empty()
-                                && p.bytes().all(|c| c.is_ascii_digit())
-                                && !m.is_empty() =>
-                        {
-                            (format!(":{p}"), m)
-                        }
-                        _ if after_host.bytes().all(|c| c.is_ascii_digit())
-                            && !after_host.is_empty() =>
-                        {
-                            return Err(bad());
-                        }
-                        // Dangling separator: port present, model missing.
-                        _ if after_host.ends_with(':') => {
-                            return Err(bad());
-                        }
-                        _ => (String::new(), after_host),
-                    };
-                    if model.is_empty() {
-                        return Err(bad());
+                    match candidate {
+                        Some((endpoint, model)) => Ok(Provider::Local {
+                            endpoint: endpoint.to_string(),
+                            model: model.to_string(),
+                        }),
+                        None => Err(bad()),
                     }
-                    Ok(Provider::Local {
-                        endpoint: format!("{scheme}://{host}{port}"),
-                        model: model.to_string(),
-                    })
                 }
             }
         }
