@@ -786,7 +786,14 @@ fn main() {
     );
     // NL model for Ctrl+; mode: spec like "local:qwen3-1.7b-q4" or
     // "openrouter:openai/gpt-4o-mini" (key from env/OS keychain).
-    let inline_spec = std::env::var("ZET_INLINE_SPEC").ok();
+    // Unset: zero-config local default when ollama serves a
+    // preferred model (fast TCP probe, localhost only).
+    let inline_spec = match std::env::var("ZET_INLINE_SPEC").ok() {
+        Some(s) => Some(s),
+        None => {
+            zet_models::keys::autodetect_local().inspect(|s| eprintln!("zet: inline model {s}"))
+        }
+    };
     let perf_t0 = std::env::var("ZET_PERF")
         .ok()
         .map(|_| std::time::Instant::now());

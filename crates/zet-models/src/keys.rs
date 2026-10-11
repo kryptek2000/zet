@@ -132,6 +132,47 @@ fn need_key(provider: &str, chains: &[&dyn Keychain]) -> Result<String, ResolveE
     })
 }
 
+/// Models preferred for inline use, fastest first. Skips embedding and
+/// unlisted models (a wrong pick here means garbage suggestions).
+const LOCAL_PREFERRED: &[&str] = &["llama3.2:1b", "qwen3:1.7b", "llama3.2:3b", "qwen2.5:1.5b"];
+
+/// Zero-config local default: `local:<model>` when a preferred model is
+/// serving on localhost:11434 (ollama convention), else None. Fast fail:
+/// 100ms TCP probe, 2s tags fetch. No key, localhost only.
+pub fn autodetect_local() -> Option<String> {
+    autodetect_local_at("127.0.0.1", 11434)
+}
+
+pub fn autodetect_local_at(host: &str, port: u16) -> Option<String> {
+    // Loopback only: a future caller can't aim this elsewhere.
+    let ip: std::net::IpAddr = host.parse().ok()?;
+    if !ip.is_loopback() {
+        return None;
+    }
+    let addr = format!("{host}:{port}");
+    let sock: std::net::SocketAddr = addr.parse().ok()?;
+    std::net::TcpStream::connect_timeout(&sock, std::time::Duration::from_millis(100)).ok()?;
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(std::time::Duration::from_secs(2)))
+            .build(),
+    );
+    let mut body = agent.get(format!("http://{addr}/api/tags")).call().ok()?;
+    let text = body.body_mut().read_to_string().ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let names: Vec<&str> = json
+        .get("models")?
+        .as_array()?
+        .iter()
+        .filter_map(|m| m.get("name")?.as_str())
+        .collect();
+    LOCAL_PREFERRED
+        .iter()
+        .find(|p| names.iter().any(|n| n == *p))
+        .map(|s| format!("local:{s}"))
+}
+
 /// Left side of a `local:` split: scheme://host[:port][/path], no
 /// brackets, numeric port, colon-free path.
 fn valid_base(url: &str) -> bool {
