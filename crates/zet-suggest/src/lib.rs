@@ -6,6 +6,9 @@
 use zet_blocks::Store;
 use zet_models::{ChatModel, ChatRequest, Message, Role};
 
+pub mod ghost;
+pub use ghost::{Ghost, PromptInput};
+
 pub trait Suggest {
     /// Complete `prefix`, or None when nothing fits.
     fn suggest(&self, prefix: &str) -> Option<String>;

@@ -48,19 +48,12 @@ struct App {
     dead: bool,
     erase: u8,
     recorder: Option<zet_blocks::Recorder>,
-    history_store: Option<zet_blocks::Store>,
     inline_spec: Option<String>,
-    ghost: Option<String>,
-    dismissed: Option<String>,
-    last_prefix: String,
-    cached_suggestion: Option<String>,
+    ghost: zet_suggest::Ghost,
     nl_mode: bool,
     nl_rx: Option<Receiver<Option<String>>>,
     last_frame: std::time::Instant,
     needs_draw: bool,
-    notice_for: Option<String>,
-    notice_text: Option<String>,
-    ghost_tabbable: bool,
 }
 
 /// Redraw at most every 16ms (~60fps). Input/resize set needs_draw for an
@@ -117,80 +110,50 @@ impl App {
     /// Refresh the visible ghost suffix from current input. History only
     /// (sync, sub-ms); the model runs solely on NL Enter, in a thread.
     fn update_ghost(&mut self) {
-        // Only history suffixes are Tab-completable. Notices ("…",
-        // "(no command)", no-model hint) display but never type.
-        self.ghost_tabbable = false;
         // NL answer landed: swap the NL line for the command (the preview).
         if let Some(rx) = &self.nl_rx {
             if let Ok(answer) = rx.try_recv() {
                 self.nl_rx = None;
                 if let Some(cmd) = answer {
                     self.accept_line(&cmd);
-                } else {
-                    self.ghost = Some("(no command)".to_string());
+                } else if let Some(input) = self.current_text() {
+                    self.ghost.notify(input, "(no command)".to_string());
                 }
                 self.nl_mode = false;
                 self.retitle();
             } else {
-                self.ghost = Some("…".to_string());
+                self.ghost.waiting();
                 return;
             }
         }
-        let Some(rec) = &self.recorder else {
-            self.ghost = None;
-            return;
-        };
-        let Some((input, bcol, brows_abs)) = rec.current_input(&self.term) else {
-            self.ghost = None;
-            return;
-        };
-        // Sticky notice (e.g. no NL model configured): survives redraws
-        // while the input matches, cleared the moment it differs so it
-        // can never resurrect over a later history ghost for same text.
-        if self.notice_for.as_deref() == Some(&input) {
-            self.ghost = self.notice_text.clone();
-            return;
-        }
-        self.notice_for = None;
-        self.notice_text = None;
-        if input.is_empty() || self.dismissed.as_deref() == Some(&input) {
-            self.ghost = None;
-            return;
-        }
-        if input != self.last_prefix {
-            self.last_prefix = input.clone();
-            self.cached_suggestion = self.history_store.as_ref().and_then(|s| {
-                use zet_suggest::Suggest;
-                zet_suggest::HistorySuggester::new(s).suggest(&input)
-            });
-        }
-        let suffix = match &self.cached_suggestion {
-            Some(full) => match zet_suggest::ghost_suffix(&input, full) {
-                Some(suffix) => suffix.to_string(),
-                None => {
-                    self.ghost = None;
-                    return;
-                }
-            },
-            None => {
-                self.ghost = None;
-                return;
-            }
-        };
-        // Cursor at input end only (single-row input; wrapped gets none).
+        let input = self.prompt_input();
+        self.ghost.update(input);
+    }
+
+    fn current_text(&self) -> Option<String> {
+        self.recorder
+            .as_ref()
+            .and_then(|rec| rec.current_input(&self.term))
+            .map(|(text, _, _)| text)
+    }
+
+    fn prompt_input(&self) -> Option<zet_suggest::PromptInput> {
+        let (text, col, abs) = self
+            .recorder
+            .as_ref()
+            .and_then(|rec| rec.current_input(&self.term))?;
         let (cx, cy) = self.term.cursor();
-        if self.term.scrollback_len() + cy != brows_abs || cx != bcol + input.chars().count() {
-            self.ghost = None;
-            return;
-        }
-        self.ghost = Some(suffix);
-        self.ghost_tabbable = true;
+        Some(zet_suggest::PromptInput {
+            text,
+            prompt_col: col,
+            prompt_row: abs,
+            cursor: (cx, self.term.scrollback_len() + cy),
+        })
     }
 
     /// Replace the current line with `cmd` (Ctrl+U then type).
     fn accept_line(&mut self, cmd: &str) {
-        self.ghost = None;
-        self.dismissed = None;
+        self.ghost.reset();
         if let Some(s) = &mut self.session {
             let _ = s.write_all(&[0x15]);
             let _ = s.write_all(cmd.as_bytes());
@@ -213,9 +176,8 @@ impl App {
             None => {
                 self.nl_mode = false;
                 self.retitle();
-                self.notice_for = Some(nl);
-                self.notice_text = Some("(set ZET_INLINE_SPEC for NL)".to_string());
-                self.ghost = self.notice_text.clone();
+                self.ghost
+                    .notify(nl, "(set ZET_INLINE_SPEC for NL)".to_string());
                 return false;
             }
         };
@@ -323,8 +285,7 @@ impl ApplicationHandler for App {
                 // NL mode toggle: Ctrl+; would otherwise type ESC (0x1b).
                 if is_nl_toggle(&event.logical_key, pressed, &self.mods) {
                     self.nl_mode = !self.nl_mode;
-                    self.ghost = None;
-                    self.dismissed = None;
+                    self.ghost.reset();
                     self.nl_rx = None;
                     self.retitle();
                     return;
@@ -334,10 +295,8 @@ impl ApplicationHandler for App {
                 let is_esc = pressed && matches!(&event.logical_key, Key::Named(NamedKey::Escape));
                 // Tab accepts only a completable history ghost; notices
                 // ("…", hints) fall through to the shell untouched.
-                if is_tab && self.ghost_tabbable {
-                    if let Some(suffix) = self.ghost.take() {
-                        self.dismissed = None;
-                        self.ghost_tabbable = false;
+                if is_tab {
+                    if let Some(suffix) = self.ghost.accept() {
                         if let Some(s) = &mut self.session {
                             let _ = s.write_all(suffix.as_bytes());
                         }
@@ -346,28 +305,23 @@ impl ApplicationHandler for App {
                 }
                 // Escape clears ghost / cancels NL; swallowed only when it did.
                 if is_esc {
-                    let active = self.ghost.is_some() || self.nl_mode || self.nl_rx.is_some();
-                    self.ghost = None;
-                    if active {
-                        self.dismissed = Some(self.last_prefix.clone());
-                        self.nl_rx = None;
-                        self.notice_for = None;
-                        self.notice_text = None;
-                        if self.nl_mode {
-                            self.nl_mode = false;
-                            self.retitle();
-                        }
+                    let was_nl = self.nl_mode || self.nl_rx.is_some();
+                    let swallowed = self.ghost.cancel();
+                    if was_nl {
+                        self.ghost.dismiss_current();
+                    }
+                    self.nl_rx = None;
+                    if self.nl_mode {
+                        self.nl_mode = false;
+                        self.retitle();
+                    }
+                    if swallowed || was_nl {
                         return;
                     }
                 }
                 // Enter in NL mode sends the line to the model, not the shell.
                 if is_enter && self.nl_mode && self.nl_rx.is_none() {
-                    let input = self
-                        .recorder
-                        .as_ref()
-                        .and_then(|rec| rec.current_input(&self.term))
-                        .map(|(text, _, _)| text)
-                        .unwrap_or_default();
+                    let input = self.current_text().unwrap_or_default();
                     if !input.trim().is_empty() {
                         self.start_nl_request(input);
                     }
@@ -415,7 +369,7 @@ impl ApplicationHandler for App {
                 }
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
                     r.draw_terminal(&self.term, self.cols, self.rows);
-                    if let Some(g) = &self.ghost {
+                    if let Some(g) = self.ghost.visible() {
                         let (cx, cy) = self.term.cursor();
                         r.draw_ghost(cy, cx, g, self.cols);
                     }
@@ -470,8 +424,14 @@ fn main() {
         .map(|store| zet_blocks::Recorder::new(store, &session_id))
         .ok();
     // Second handle on the same store for instant history suggestions
-    // (borrows would fight the recorder's &mut pump).
-    let history_store = zet_blocks::Store::open_default().ok();
+    // (owned by the ghost controller; borrows would fight the
+    // recorder's &mut pump). In-memory fallback: ghost degrades to
+    // empty suggestions instead of disabling the shell.
+    let ghost = zet_suggest::Ghost::new(
+        zet_blocks::Store::open_default()
+            .or_else(|_| zet_blocks::Store::open_in_memory())
+            .expect("in-memory store"),
+    );
     // NL model for Ctrl+; mode: spec like "local:qwen3-1.7b-q4" or
     // "openrouter:openai/gpt-4o-mini" (key from env/OS keychain).
     let inline_spec = std::env::var("ZET_INLINE_SPEC").ok();
@@ -489,19 +449,12 @@ fn main() {
         dead: false,
         erase: 0x7f,
         recorder,
-        history_store,
         inline_spec,
-        ghost: None,
-        dismissed: None,
-        last_prefix: String::new(),
-        cached_suggestion: None,
+        ghost,
         nl_mode: false,
         nl_rx: None,
         last_frame: std::time::Instant::now(),
         needs_draw: true,
-        notice_for: None,
-        notice_text: None,
-        ghost_tabbable: false,
     };
     if let Some(s) = &app.session {
         app.erase = s.erase_char();

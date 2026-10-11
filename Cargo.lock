@@ -4518,6 +4518,8 @@ version = "0.1.0"
 dependencies = [
  "zet-blocks",
  "zet-models",
+ "zet-pty",
+ "zet-term",
 ]
 
 [[package]]
