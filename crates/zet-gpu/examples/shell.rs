@@ -47,6 +47,20 @@ struct App {
     shell_name: String,
     dead: bool,
     erase: u8,
+    recorder: Option<zet_blocks::Recorder>,
+}
+
+/// Shell's current directory via /proc (unix). Best effort: "" when unknown.
+fn shell_cwd(session: &Option<Session>) -> String {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = session.as_ref().and_then(|s| s.child_id()) {
+            if let Ok(link) = std::fs::read_link(format!("/proc/{pid}/cwd")) {
+                return link.to_string_lossy().into_owned();
+            }
+        }
+    }
+    String::new()
 }
 
 impl App {
@@ -70,6 +84,9 @@ impl App {
         }
         for event in self.term.drain_events() {
             self.shell_state.observe(&event);
+        }
+        if let Some(rec) = &mut self.recorder {
+            rec.pump(&mut self.term, &shell_cwd(&self.session));
         }
         if let Some(code) = self.shell_state.last_exit() {
             if let Some(w) = &self.window {
@@ -200,6 +217,17 @@ fn main() {
     });
 
     let event_loop = EventLoop::new().unwrap();
+    let session_id = format!(
+        "{}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        std::process::id()
+    );
+    let recorder = zet_blocks::Store::open_default()
+        .map(|store| zet_blocks::Recorder::new(store, &session_id))
+        .ok();
     let mut app = App {
         window: None,
         renderer: None,
@@ -213,6 +241,7 @@ fn main() {
         shell_name,
         dead: false,
         erase: 0x7f,
+        recorder,
     };
     if let Some(s) = &app.session {
         app.erase = s.erase_char();

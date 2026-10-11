@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 rusqlite = { version = "0.40", features = ["bundled"] }
+zet-term = { path = "../zet-term" }
 
 [dev-dependencies]
 zet-pty = { path = "../zet-pty" }

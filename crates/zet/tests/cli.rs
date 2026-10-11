@@ -23,6 +23,57 @@ fn auth_bad_usage_fails_loudly() {
     }
 }
 
+#[test]
+fn blocks_missing_flag_values_fail_loudly() {
+    for args in [
+        &["blocks", "--db"][..],
+        &["blocks", "--limit"][..],
+        &["blocks", "--limit", "abc"][..],
+        &["blocks", "--session"][..],
+        &["blocks", "--nope"][..],
+    ] {
+        let out = zet().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+    }
+}
+
+#[test]
+fn blocks_lists_seeded_db() {
+    let dir = std::env::temp_dir().join(format!(
+        "zet_blocks_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("b.sqlite");
+    let store = zet_blocks::Store::open(db.to_str().unwrap()).unwrap();
+    for (i, cmd) in ["echo alpha", "echo beta"].iter().enumerate() {
+        store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "s".to_string(),
+                command: cmd.to_string(),
+                output: format!("out{i}"),
+                exit_code: i as i32,
+                cwd: "/tmp".to_string(),
+                duration_ms: 1,
+            })
+            .unwrap();
+    }
+    let out = zet()
+        .args(["blocks", "--db", db.to_str().unwrap(), "--limit", "10"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("echo alpha"), "{text}");
+    assert!(text.contains("echo beta"), "{text}");
+    assert!(text.contains("[exit 1]"), "{text}");
+}
+
 // Live: piped stdin must store exactly the first line (not block to EOF,
 // not swallow following lines). Needs a keychain; CI skips.
 #[test]

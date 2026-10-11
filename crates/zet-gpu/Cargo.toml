@@ -15,3 +15,4 @@ zet-pty = { path = "../zet-pty" }
 [dev-dependencies]
 pollster = "1"
 arboard = "3"
+zet-blocks = { path = "../zet-blocks" }

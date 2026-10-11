@@ -6,3 +6,4 @@ license.workspace = true
 
 [dependencies]
 zet-models = { path = "../zet-models" }
+zet-blocks = { path = "../zet-blocks" }

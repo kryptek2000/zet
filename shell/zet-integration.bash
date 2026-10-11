@@ -32,3 +32,23 @@ fi
 if [[ "${PS0:-}" != *"]133;C"* ]]; then
     PS0+='\e]133;C\a'
 fi
+
+# Repair markers every prompt. Frameworks like starship rebuild PS1 (and
+# sometimes PROMPT_COMMAND/PS0) on each render, wiping statically appended
+# text. This runs LAST so it fixes what they rebuilt; it preserves $?.
+__zet_fix_markers() {
+    local code=$?
+    if [[ "$PS1" != *"]133;B"* ]]; then
+        PS1+='\[\e]133;B\a\]'
+    fi
+    if [[ "${PS0:-}" != *"]133;C"* ]]; then
+        PS0+='\e]133;C\a'
+    fi
+    return "$code"
+}
+
+if [[ -z "${PROMPT_COMMAND:-}" ]]; then
+    PROMPT_COMMAND="__zet_fix_markers"
+elif [[ "$PROMPT_COMMAND" != *"__zet_fix_markers"* ]]; then
+    PROMPT_COMMAND="$PROMPT_COMMAND; __zet_fix_markers"
+fi

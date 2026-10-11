@@ -67,6 +67,32 @@ pub enum Event {
     Osc { code: u16, body: String },
 }
 
+/// Shell-integration marker (OSC 133, FinalTerm-style), snapshotted with
+/// grid position AT PARSE TIME so consumers can drain lazily without
+/// positions going stale across scrolls. Only recorded on the main grid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Marker {
+    pub kind: MarkerKind,
+    pub abs_row: usize,
+    pub col: usize,
+    pub exit_code: i32,
+    /// Grid row text at parse time (Exec/Done only). The Done row later
+    /// gains the next prompt, so lazy reads would leak it into output;
+    /// the snapshot predates the prompt. The Exec snapshot lets same-row
+    /// output strip the exact prompt+command prefix (wide-char safe).
+    pub line: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkerKind {
+    /// B: command input starts (cursor = prompt end).
+    Input,
+    /// C: pre-exec (command runs next).
+    Exec,
+    /// D: finished; exit_code set.
+    Done,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     Ground,
@@ -102,6 +128,7 @@ pub struct Terminal {
     state: State,
     osc_buf: Vec<u8>,
     events: Vec<Event>,
+    markers: Vec<Marker>,
     utf8_buf: [u8; 4],
     utf8_need: u8,
     utf8_have: u8,
@@ -135,6 +162,7 @@ impl Terminal {
             state: State::Ground,
             osc_buf: Vec::new(),
             events: Vec::new(),
+            markers: Vec::new(),
             utf8_buf: [0; 4],
             utf8_need: 0,
             utf8_have: 0,
@@ -329,8 +357,45 @@ impl Terminal {
             Some((c, rest)) => (c.parse::<u16>().unwrap_or(0), rest.to_string()),
             None => (0, text.into_owned()),
         };
-        self.events.push(Event::Osc { code, body });
+        self.events.push(Event::Osc {
+            code,
+            body: body.clone(),
+        });
+        self.record_marker(code, &body);
         self.osc_buf.clear();
+    }
+
+    /// Snapshot a 133 marker with exact grid position, main grid only.
+    fn record_marker(&mut self, code: u16, body: &str) {
+        if code != 133 || self.alt_active {
+            return;
+        }
+        let kind = match body.chars().next() {
+            Some('B') => MarkerKind::Input,
+            Some('C') => MarkerKind::Exec,
+            Some('D') => MarkerKind::Done,
+            _ => return,
+        };
+        let exit_code = if kind == MarkerKind::Done {
+            body.split(';')
+                .nth(1)
+                .unwrap_or("0")
+                .parse::<i32>()
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let line = match kind {
+            MarkerKind::Exec | MarkerKind::Done => self.line_text(self.cy),
+            _ => String::new(),
+        };
+        self.markers.push(Marker {
+            kind,
+            abs_row: self.scrollback.len() + self.cy,
+            col: self.cx,
+            exit_code,
+            line,
+        });
     }
 
     fn dispatch_csi(&mut self, final_byte: u8, params: &[u16], private: Option<u8>) {
@@ -520,6 +585,14 @@ impl Terminal {
         (self.cx, self.cy)
     }
 
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
     pub fn cursor_visible(&self) -> bool {
         self.cursor_visible
     }
@@ -578,5 +651,9 @@ impl Terminal {
 
     pub fn drain_events(&mut self) -> Vec<Event> {
         std::mem::take(&mut self.events)
+    }
+
+    pub fn drain_markers(&mut self) -> Vec<Marker> {
+        std::mem::take(&mut self.markers)
     }
 }

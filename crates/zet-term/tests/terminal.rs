@@ -343,3 +343,28 @@ fn scroll_region_constrains_scrolling() {
     t.feed(b"\x1b[6;1H\n");
     assert_eq!(t.line_text(4).trim_end(), "F");
 }
+
+#[test]
+fn osc133_markers_snapshot_position_and_exit() {
+    use zet_term::{MarkerKind, Terminal};
+    let mut t = Terminal::new(40, 10);
+    t.feed(b"$ \x1b]133;B\x07cmd\x1b]133;C\x07\r\nout\r\n\x1b]133;D;3\x07");
+    let marks = t.drain_markers();
+    assert_eq!(marks.len(), 3);
+    assert_eq!(marks[0].kind, MarkerKind::Input);
+    assert_eq!((marks[0].abs_row, marks[0].col), (0, 2));
+    assert_eq!(marks[1].kind, MarkerKind::Exec);
+    assert_eq!(marks[2].kind, MarkerKind::Done);
+    assert_eq!(marks[2].exit_code, 3);
+    // Drained: second call is empty, Osc events still flow separately.
+    assert!(t.drain_markers().is_empty());
+    assert_eq!(t.drain_events().len(), 3);
+}
+
+#[test]
+fn osc133_ignored_on_alt_screen() {
+    use zet_term::Terminal;
+    let mut t = Terminal::new(40, 10);
+    t.feed(b"\x1b[?1049h\x1b]133;B\x07\x1b]133;D;0\x07\x1b[?1049l");
+    assert!(t.drain_markers().is_empty());
+}

@@ -1,0 +1,129 @@
+// Block recorder: FinalTerm OSC 133 markers (emitted by shell/zet-integration
+// scripts) become Store blocks. Markers carry absolute grid positions
+// snapshotted at parse time, so pump timing is free: one pump per frame is
+// fine, and positions survive scrolls between feed and pump (up to scrollback
+// cap eviction, which shifts absolute rows and is out of scope).
+//
+// Markers: B = command input starts (cursor = prompt end), C = pre-exec
+// (command = prompt row from B column), D;<code> = done (output = absolute
+// lines after the command row through D's row, edge-trimmed). D without a
+// preceding C (aborted prompt) records nothing.
+
+use std::time::Instant;
+
+use zet_term::{MarkerKind, Terminal};
+
+use crate::{Block, Store};
+
+pub struct Recorder {
+    store: Store,
+    session: String,
+    cmd: Option<(usize, usize)>,
+    pending: Option<(String, String)>,
+    t0: Option<Instant>,
+}
+
+impl Recorder {
+    pub fn new(store: Store, session: &str) -> Self {
+        Recorder {
+            store,
+            session: session.to_string(),
+            cmd: None,
+            pending: None,
+            t0: None,
+        }
+    }
+
+    pub fn blocks(&self) -> rusqlite::Result<Vec<Block>> {
+        self.store.list(&self.session)
+    }
+
+    pub fn pump(&mut self, term: &mut Terminal, cwd: &str) {
+        for m in term.drain_markers() {
+            match m.kind {
+                MarkerKind::Input => {
+                    self.cmd = Some((m.abs_row, m.col));
+                    self.pending = None;
+                    self.t0 = None;
+                }
+                MarkerKind::Exec => {
+                    let Some((_, col)) = self.cmd else {
+                        continue;
+                    };
+                    // Command from C's parse-time snapshot: output and the
+                    // next prompt may share this row by pump time.
+                    let command: String = m
+                        .line
+                        .chars()
+                        .skip(col)
+                        .collect::<String>()
+                        .trim_end()
+                        .to_string();
+                    if command.is_empty() {
+                        self.cmd = None;
+                        continue;
+                    }
+                    self.pending = Some((command, m.line.clone()));
+                    self.t0 = Some(Instant::now());
+                }
+                MarkerKind::Done => self.finish(term, cwd, &m),
+            }
+        }
+    }
+
+    fn finish(&mut self, term: &Terminal, cwd: &str, done: &zet_term::Marker) {
+        let (command, c_line) = self.pending.take().unwrap_or_default();
+        let (abs, t0) = match (self.cmd.take(), self.t0.take()) {
+            (Some((abs, _)), Some(t0)) => (abs, t0),
+            _ => return,
+        };
+        if command.is_empty() {
+            return;
+        }
+        // Rows strictly between command and Done come from the grid (they
+        // predate any later prompt). Done's own row uses its parse-time
+        // snapshot: the next prompt lands there after D fires, and a lazy
+        // read would leak it into output.
+        let mut lines: Vec<String> = ((abs + 1)..done.abs_row)
+            .map(|r| abs_line_text(term, r))
+            .collect();
+        let tail = if done.abs_row == abs {
+            // Same row: strip the exact prompt+command prefix.
+            done.line
+                .trim_end()
+                .strip_prefix(c_line.trim_end())
+                .unwrap_or("")
+                .trim_end()
+                .to_string()
+        } else {
+            done.line.trim_end().to_string()
+        };
+        lines.push(tail);
+        while lines.first().is_some_and(|l| l.is_empty()) {
+            lines.remove(0);
+        }
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        let block = Block {
+            id: 0,
+            session: self.session.clone(),
+            command,
+            output: lines.join("\n"),
+            exit_code: done.exit_code,
+            cwd: cwd.to_string(),
+            duration_ms: t0.elapsed().as_millis() as u64,
+        };
+        let _ = self.store.append(&block);
+    }
+}
+
+fn abs_line_text(term: &Terminal, abs: usize) -> String {
+    let sb = term.scrollback_len();
+    let raw = if abs < sb {
+        term.scrollback_line(abs).unwrap_or_default()
+    } else {
+        term.line_text(abs - sb)
+    };
+    raw.trim_end().to_string()
+}

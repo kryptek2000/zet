@@ -4438,6 +4438,7 @@ dependencies = [
 name = "zet"
 version = "0.1.0"
 dependencies = [
+ "zet-blocks",
  "zet-models",
 ]
 
@@ -4456,6 +4457,7 @@ version = "0.1.0"
 dependencies = [
  "rusqlite",
  "zet-pty",
+ "zet-term",
 ]
 
 [[package]]
@@ -4476,6 +4478,7 @@ dependencies = [
  "pollster",
  "wgpu",
  "winit",
+ "zet-blocks",
  "zet-pty",
  "zet-term",
 ]

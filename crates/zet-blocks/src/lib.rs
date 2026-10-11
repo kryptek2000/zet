@@ -1,5 +1,9 @@
 use rusqlite::{params, Connection, Result};
 
+pub mod recorder;
+
+pub use recorder::Recorder;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     pub id: i64,
@@ -84,6 +88,31 @@ impl Store {
         )?;
         let rows = stmt.query_map(params![session], row_to_block)?;
         rows.collect()
+    }
+
+    /// Newest blocks across sessions, most recent last (display order).
+    pub fn recent(&self, limit: usize) -> Result<Vec<Block>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session, command, output, exit_code, cwd, duration_ms
+             FROM blocks ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows: Vec<Block> = stmt
+            .query_map(params![limit as i64], row_to_block)?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows.into_iter().rev().collect())
+    }
+
+    /// `~/.zet/blocks.sqlite`, creating `~/.zet` when missing.
+    pub fn open_default() -> std::io::Result<Self> {
+        let home = std::env::var("HOME").map_err(std::io::Error::other)?;
+        let dir = std::path::Path::new(&home).join(".zet");
+        std::fs::create_dir_all(&dir)?;
+        Self::open(
+            dir.join("blocks.sqlite")
+                .to_str()
+                .ok_or_else(|| std::io::Error::other("non-UTF8 HOME"))?,
+        )
+        .map_err(std::io::Error::other)
     }
 
     pub fn replay(&self, session: &str) -> Result<String> {

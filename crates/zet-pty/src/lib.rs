@@ -61,6 +61,11 @@ impl Session {
         Ok(self.child.try_wait()?.map(|s| s.exit_code()))
     }
 
+    /// Shell child pid, for /proc/cwd lookup and supervision.
+    pub fn child_id(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
     /// The line discipline's erase character (termios VERASE), for Backspace.
     /// Falls back to DEL when unreadable or disabled.
     #[cfg(unix)]
