@@ -364,3 +364,32 @@ fn undo_of_a_dropped_stash_surfaces_not_found() {
         other => panic!("expected NotFound, got {other:?}"),
     }
 }
+
+struct FakeExec {
+    seen: RefCell<Vec<String>>,
+}
+
+impl zet_agent::Executor for FakeExec {
+    fn exec(&mut self, command: &str, _workdir: &std::path::Path) -> (Option<i32>, String) {
+        self.seen.borrow_mut().push(command.to_string());
+        (Some(0), format!("faked: {command}"))
+    }
+}
+
+#[test]
+fn executor_seam_routes_step_output() {
+    let model = Script::new(vec![
+        Script::shell_call("c1", "echo hello"),
+        Script::final_text("said it"),
+    ]);
+    let fake = FakeExec {
+        seen: RefCell::new(Vec::new()),
+    };
+    // with_executor does not exist yet: RED.
+    let mut agent = Agent::new(model, AllowAll, false, 4).with_executor(fake);
+    let out = agent.run("say hi via shell").unwrap();
+    assert_eq!(out, "said it");
+    let entry = agent.journal.iter().find(|e| e.executed).expect("ran");
+    assert_eq!(entry.output, "faked: echo hello");
+    assert_eq!(entry.exit_code, Some(0));
+}

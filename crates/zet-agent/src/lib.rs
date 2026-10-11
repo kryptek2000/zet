@@ -22,6 +22,36 @@ pub fn shell_tool_def() -> ToolDef {
     }
 }
 
+/// Runs an approved shell step. Returns (exit code, output text).
+/// DirectExec spawns hidden `sh -c` (default); window shells inject a
+/// PTY executor so every agent action is typed visibly and recorded.
+pub trait Executor: Send {
+    fn exec(&mut self, command: &str, workdir: &Path) -> (Option<i32>, String);
+}
+
+pub struct DirectExec;
+
+impl Executor for DirectExec {
+    fn exec(&mut self, command: &str, workdir: &Path) -> (Option<i32>, String) {
+        let out = std::process::Command::new("sh")
+            .current_dir(workdir)
+            .args(["-c", command])
+            .output();
+        match out {
+            Ok(o) => {
+                let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
+                let err = String::from_utf8_lossy(&o.stderr);
+                if !err.is_empty() {
+                    text.push_str(&err);
+                }
+                text.push_str(&format!("[exit {}]", o.status.code().unwrap_or(-1)));
+                (o.status.code(), text)
+            }
+            Err(e) => (None, format!("exec failed: {e}")),
+        }
+    }
+}
+
 pub trait Approver {
     /// Called for Ask / ConfirmType steps. Return true to proceed.
     fn approve(&self, tier: Tier, command: &str) -> bool;
@@ -83,6 +113,7 @@ pub struct Agent<M: ChatModel, A: Approver> {
     in_repo: bool,
     max_iters: usize,
     workdir: PathBuf,
+    executor: Box<dyn Executor>,
     pub journal: Vec<JournalEntry>,
 }
 
@@ -94,8 +125,14 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
             in_repo,
             max_iters,
             workdir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            executor: Box::new(DirectExec),
             journal: Vec::new(),
         }
+    }
+
+    pub fn with_executor<E: Executor + 'static>(mut self, executor: E) -> Self {
+        self.executor = Box::new(executor);
+        self
     }
 
     pub fn with_workdir(mut self, dir: PathBuf) -> Self {
@@ -271,22 +308,7 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
         } else {
             None
         };
-        let out = std::process::Command::new("sh")
-            .current_dir(&self.workdir)
-            .args(["-c", &command])
-            .output();
-        let (exit_code, output) = match out {
-            Ok(o) => {
-                let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
-                let err = String::from_utf8_lossy(&o.stderr);
-                if !err.is_empty() {
-                    text.push_str(&err);
-                }
-                text.push_str(&format!("[exit {}]", o.status.code().unwrap_or(-1)));
-                (o.status.code(), text)
-            }
-            Err(e) => (None, format!("exec failed: {e}")),
-        };
+        let (exit_code, output) = self.executor.exec(&command, &self.workdir);
         self.journal.push(JournalEntry {
             command: command.clone(),
             tier,

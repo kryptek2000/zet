@@ -107,3 +107,22 @@ fn ctrl_semicolon_toggles_nl_not_types() {
     assert!(!is_nl_toggle(&Key::Character(";".into()), false, &ctrl()));
     assert!(!is_nl_toggle(&Key::Character(":".into()), true, &ctrl()));
 }
+
+#[test]
+fn ctrl_g_toggles_agent_not_bell() {
+    use zet_gpu::input::is_agent_toggle;
+    // Ctrl+G would type BEL (0x07) via translate; in the shell it must
+    // open goal mode instead. Plain g types; releases never toggle.
+    assert!(is_agent_toggle(&Key::Character("g".into()), true, &ctrl()));
+    assert!(is_agent_toggle(&Key::Character("G".into()), true, &ctrl()));
+    assert!(!is_agent_toggle(
+        &Key::Character("g".into()),
+        true,
+        &plain()
+    ));
+    assert!(!is_agent_toggle(
+        &Key::Character("g".into()),
+        false,
+        &ctrl()
+    ));
+}

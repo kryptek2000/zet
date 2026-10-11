@@ -39,6 +39,18 @@ pub fn is_nl_toggle(logical: &Key, pressed: bool, mods: &ModifiersState) -> bool
     matches!(logical, Key::Character(s) if &**s == ";")
 }
 
+/// True when this press toggles agent goal mode (Ctrl+G). Check before
+/// [`translate`]: Ctrl+G would otherwise become a BEL byte (0x07).
+pub fn is_agent_toggle(logical: &Key, pressed: bool, mods: &ModifiersState) -> bool {
+    if !pressed {
+        return false;
+    }
+    if !mods.contains(ModifiersState::CONTROL) {
+        return false;
+    }
+    matches!(logical, Key::Character(s) if s.eq_ignore_ascii_case("g"))
+}
+
 /// Translate a key press into bytes for the PTY.
 /// Returns None for releases and unmapped keys.
 pub fn translate(

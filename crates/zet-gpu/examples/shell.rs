@@ -2,14 +2,14 @@
 // Usage: cargo run -p zet-gpu --example shell
 // This is the human smoke test (launcher points here).
 
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::Window;
-use zet_gpu::input::{is_nl_toggle, is_paste, paste_bytes, translate};
+use zet_gpu::input::{is_agent_toggle, is_nl_toggle, is_paste, paste_bytes, translate};
 use zet_gpu::Renderer;
 use zet_pty::shell::ShellState;
 use zet_pty::Session;
@@ -52,8 +52,55 @@ struct App {
     ghost: zet_suggest::Ghost,
     nl_mode: bool,
     nl_rx: Option<Receiver<Option<String>>>,
+    goal_mode: bool,
+    agent_busy: bool,
+    agent_rx: Option<Receiver<Option<AgentDone>>>,
+    exec_req_rx: Option<Receiver<String>>,
+    exec_res_tx: Option<Sender<ExecRes>>,
+    exec_pending: Option<PendingExec>,
+    last_journal: Vec<zet_agent::JournalEntry>,
     last_frame: std::time::Instant,
     needs_draw: bool,
+}
+
+/// One approved agent step, serviced by the main loop: typed visibly into
+/// the PTY (Ctrl+U, command, Enter) so hooks record it as a normal block,
+/// then completed from the recorded block (output + exit code).
+struct PendingExec {
+    cmd: String,
+    typed: bool,
+    blocks_before: usize,
+    deadline: std::time::Instant,
+}
+
+type ExecRes = (Option<i32>, String);
+type AgentDone = (String, Vec<zet_agent::JournalEntry>);
+
+/// Executor that runs agent steps in the visible shell: sends the command
+/// to the window (main loop types it) and blocks for the recorded result.
+struct PtyExec {
+    req: Sender<String>,
+    res: Receiver<ExecRes>,
+}
+
+impl zet_agent::Executor for PtyExec {
+    fn exec(&mut self, command: &str, _workdir: &std::path::Path) -> ExecRes {
+        if self.req.send(command.to_string()).is_err() {
+            return (None, "window gone".to_string());
+        }
+        self.res.recv().unwrap_or((None, "window gone".to_string()))
+    }
+}
+
+/// Agent-mode approver: entering agent mode pre-consents T0-T2 (Ask);
+/// T3 (ConfirmType) is never approved — the model sees a denial and adapts.
+/// Every step is journaled; repos get pre-mutation checkpoints + undo.
+struct AgentMode;
+
+impl zet_agent::Approver for AgentMode {
+    fn approve(&self, tier: zet_policy::Tier, _command: &str) -> bool {
+        !matches!(tier, zet_policy::Tier::T3)
+    }
 }
 
 /// Heartbeat for the NL-answer poll and missed-wake safety net. PTY
@@ -99,13 +146,90 @@ impl App {
         if let Some(rec) = &mut self.recorder {
             rec.pump(&mut self.term, &shell_cwd(&self.session));
         }
+        self.service_exec();
+        self.poll_agent_done();
         if let Some(code) = self.shell_state.last_exit() {
             if let Some(w) = &self.window {
-                let nl = if self.nl_mode { " (nl)" } else { "" };
-                w.set_title(&format!("ZET — {} (exit {code}){nl}", self.shell_name));
+                let mode = if self.agent_busy {
+                    " (agent…)"
+                } else if self.goal_mode {
+                    " (agent)"
+                } else if self.nl_mode {
+                    " (nl)"
+                } else {
+                    ""
+                };
+                w.set_title(&format!("ZET — {} (exit {code}){mode}", self.shell_name));
             }
         }
         self.update_ghost();
+    }
+
+    /// Type one pending agent step visibly, then complete it from the
+    /// recorded block. Single-lane: the agent waits, input is locked, so
+    /// the newest block past `blocks_before` is our step's.
+    fn service_exec(&mut self) {
+        if self.exec_pending.is_none() {
+            if let Some(rx) = &self.exec_req_rx {
+                if let Ok(cmd) = rx.try_recv() {
+                    let before = self
+                        .recorder
+                        .as_ref()
+                        .and_then(|r| r.blocks().ok())
+                        .map(|b| b.len())
+                        .unwrap_or(0);
+                    self.exec_pending = Some(PendingExec {
+                        cmd,
+                        typed: false,
+                        blocks_before: before,
+                        deadline: std::time::Instant::now() + std::time::Duration::from_secs(120),
+                    });
+                }
+            }
+        }
+        let res: Option<ExecRes> = {
+            let Some(st) = &mut self.exec_pending else {
+                return;
+            };
+            if !st.typed {
+                if let Some(s) = &mut self.session {
+                    let _ = s.write_all(&[0x15]);
+                    let _ = s.write_all(st.cmd.as_bytes());
+                    let _ = s.write_all(b"\r");
+                }
+                st.typed = true;
+                return;
+            }
+            if self.dead {
+                Some((None, "shell exited".to_string()))
+            } else if self.recorder.is_none() {
+                Some((None, "block recorder unavailable".to_string()))
+            } else {
+                let blocks = self
+                    .recorder
+                    .as_ref()
+                    .and_then(|r| r.blocks().ok())
+                    .unwrap_or_default();
+                if blocks.len() > st.blocks_before {
+                    blocks.last().map(|b| {
+                        (
+                            Some(b.exit_code),
+                            format!("{}\n[exit {}]", b.output, b.exit_code),
+                        )
+                    })
+                } else if std::time::Instant::now() > st.deadline {
+                    Some((None, "exec timed out waiting for the prompt".to_string()))
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(res) = res {
+            if let Some(tx) = &self.exec_res_tx {
+                let _ = tx.send(res);
+            }
+            self.exec_pending = None;
+        }
     }
 
     /// Refresh the visible ghost suffix from current input. History only
@@ -163,8 +287,16 @@ impl App {
 
     fn retitle(&self) {
         if let Some(w) = &self.window {
-            let nl = if self.nl_mode { " (nl)" } else { "" };
-            w.set_title(&format!("ZET — {}{nl}", self.shell_name));
+            let mode = if self.agent_busy {
+                " (agent…)"
+            } else if self.goal_mode {
+                " (agent)"
+            } else if self.nl_mode {
+                " (nl)"
+            } else {
+                ""
+            };
+            w.set_title(&format!("ZET — {}{mode}", self.shell_name));
         }
     }
 
@@ -190,12 +322,97 @@ impl App {
         });
         true
     }
+
+    /// Start an agent turn on a thread: each approved step is typed
+    /// visibly into the PTY and completed from its recorded block.
+    /// Entering agent mode pre-consents T0-T2; T3 is never approved.
+    fn start_agent(&mut self, goal: String) {
+        let spec = match &self.inline_spec {
+            Some(s) => s.clone(),
+            None => {
+                self.goal_mode = false;
+                self.retitle();
+                self.ghost
+                    .notify(goal, "(set ZET_INLINE_SPEC for agent)".to_string());
+                return;
+            }
+        };
+        let cwd = shell_cwd(&self.session);
+        let in_repo = zet_agent::detect_repo(std::path::Path::new(&cwd));
+        let (req_tx, req_rx) = mpsc::channel::<String>();
+        let (res_tx, res_rx) = mpsc::channel::<ExecRes>();
+        let (done_tx, done_rx) = mpsc::channel::<Option<AgentDone>>();
+        self.exec_req_rx = Some(req_rx);
+        self.exec_res_tx = Some(res_tx);
+        self.agent_rx = Some(done_rx);
+        self.goal_mode = false;
+        self.agent_busy = true;
+        self.retitle();
+        std::thread::spawn(move || {
+            let done = build_client(&spec).map(|client| {
+                let mut agent = zet_agent::Agent::new(client, AgentMode, in_repo, 8)
+                    .with_workdir(cwd.clone().into())
+                    .with_executor(PtyExec {
+                        req: req_tx,
+                        res: res_rx,
+                    });
+                let summary = agent
+                    .run(&goal)
+                    .unwrap_or_else(|e| format!("agent error: {e}"));
+                (summary, agent.journal)
+            });
+            let _ = done_tx.send(done);
+        });
+    }
+
+    /// Collect a finished agent turn: journal kept, summary as a sticky
+    /// notice on the fresh prompt, modes cleared.
+    fn poll_agent_done(&mut self) {
+        let Some(rx) = &self.agent_rx else {
+            return;
+        };
+        let Ok(done) = rx.try_recv() else {
+            return;
+        };
+        self.agent_rx = None;
+        self.agent_busy = false;
+        self.exec_req_rx = None;
+        self.exec_res_tx = None;
+        self.exec_pending = None;
+        self.retitle();
+        let (input, text) = match done {
+            Some((summary, journal)) => {
+                self.last_journal = journal;
+                let first: String = summary
+                    .lines()
+                    .next()
+                    .unwrap_or("done")
+                    .chars()
+                    .take(120)
+                    .collect();
+                (
+                    self.current_text().unwrap_or_default(),
+                    format!("agent: {first}"),
+                )
+            }
+            None => (
+                self.current_text().unwrap_or_default(),
+                "(agent: no model — check spec/key)".to_string(),
+            ),
+        };
+        self.ghost.notify(input, text);
+    }
 }
 
 /// Build a concrete (Send) model suggester from a spec string.
 fn build_suggester(
     spec: &str,
 ) -> Option<zet_suggest::ModelSuggester<zet_models::openai::OpenAICompat>> {
+    build_client(spec).map(zet_suggest::ModelSuggester::new)
+}
+
+/// Concrete model client for agent turns (Send; built per request).
+fn build_client(spec: &str) -> Option<zet_models::openai::OpenAICompat> {
     use zet_models::keys::{resolve_provider, EnvKeychain, Keychain, SystemKeychain};
     use zet_models::Provider;
     let env = EnvKeychain;
@@ -210,8 +427,8 @@ fn build_suggester(
         } => (base_url, api_key, model),
         Provider::Local { endpoint, model } => (endpoint, String::new(), model),
     };
-    Some(zet_suggest::ModelSuggester::new(
-        zet_models::openai::OpenAICompat::new(base_url, api_key, model),
+    Some(zet_models::openai::OpenAICompat::new(
+        base_url, api_key, model,
     ))
 }
 
@@ -273,6 +490,24 @@ impl ApplicationHandler for App {
                 let pressed = event.state == ElementState::Pressed;
                 // Any key gets a prompt frame; the heartbeat covers the rest.
                 self.needs_draw = true;
+                // Agent running: input locked (its steps own the line).
+                // Ctrl+C still reaches the shell: the emergency brake that
+                // cancels the agent's running command (D fires, step ends).
+                if self.agent_busy {
+                    if let Some(bytes) = translate(
+                        &event.logical_key,
+                        event.text.as_deref(),
+                        pressed,
+                        &self.mods,
+                    ) {
+                        if bytes == [0x03] {
+                            if let Some(s) = &mut self.session {
+                                let _ = s.write_all(&bytes);
+                            }
+                        }
+                    }
+                    return;
+                }
                 // Paste first: Ctrl+Shift+V would otherwise type a SYN byte.
                 if is_paste(&event.logical_key, pressed, &self.mods) {
                     if let Ok(mut clip) = arboard::Clipboard::new() {
@@ -287,6 +522,16 @@ impl ApplicationHandler for App {
                 // NL mode toggle: Ctrl+; would otherwise type ESC (0x1b).
                 if is_nl_toggle(&event.logical_key, pressed, &self.mods) {
                     self.nl_mode = !self.nl_mode;
+                    self.goal_mode = false;
+                    self.ghost.reset();
+                    self.nl_rx = None;
+                    self.retitle();
+                    return;
+                }
+                // Agent goal mode toggle: Ctrl+G would otherwise type BEL.
+                if is_agent_toggle(&event.logical_key, pressed, &self.mods) {
+                    self.goal_mode = !self.goal_mode;
+                    self.nl_mode = false;
                     self.ghost.reset();
                     self.nl_rx = None;
                     self.retitle();
@@ -326,6 +571,14 @@ impl ApplicationHandler for App {
                     let input = self.current_text().unwrap_or_default();
                     if !input.trim().is_empty() {
                         self.start_nl_request(input);
+                    }
+                    return;
+                }
+                // Enter in goal mode starts an agent turn on the line.
+                if is_enter && self.goal_mode {
+                    let input = self.current_text().unwrap_or_default();
+                    if !input.trim().is_empty() {
+                        self.start_agent(input);
                     }
                     return;
                 }
@@ -459,6 +712,13 @@ fn main() {
         ghost,
         nl_mode: false,
         nl_rx: None,
+        goal_mode: false,
+        agent_busy: false,
+        agent_rx: None,
+        exec_req_rx: None,
+        exec_res_tx: None,
+        exec_pending: None,
+        last_journal: Vec::new(),
         last_frame: std::time::Instant::now(),
         needs_draw: true,
     };
