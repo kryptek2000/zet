@@ -175,21 +175,7 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
     /// then pops the stash when the tree was dirty at checkpoint time.
     /// Assumes the user hasn't hand-edited files between step and undo.
     pub fn undo(&self, cp: &Option<Checkpoint>) -> Result<(), UndoError> {
-        let Some(cp) = cp else {
-            return Ok(());
-        };
-        git(&self.workdir, &["reset", "--hard", "--quiet", &cp.head])?;
-        git(&self.workdir, &["clean", "-fd", "--quiet"])?;
-        if let Some(message) = &cp.stash {
-            let list = git(&self.workdir, &["stash", "list", "--format=%gd %s"])?;
-            let entry = list
-                .lines()
-                .find(|l| l.contains(message))
-                .ok_or_else(|| UndoError::NotFound(message.clone()))?;
-            let rev = entry.split_whitespace().next().unwrap_or("stash@{0}");
-            git(&self.workdir, &["stash", "pop", "--quiet", rev])?;
-        }
-        Ok(())
+        undo_checkpoint(&self.workdir, cp)
     }
 
     pub fn run(&mut self, goal: &str) -> Result<String, AgentError> {
@@ -326,11 +312,30 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
     }
 }
 
+/// One-key undo without an Agent (the window's F12 path): restore a
+/// checkpoint into `workdir`. `None` is a no-op.
+pub fn undo_checkpoint(workdir: &Path, cp: &Option<Checkpoint>) -> Result<(), UndoError> {
+    let Some(cp) = cp else {
+        return Ok(());
+    };
+    git(workdir, &["reset", "--hard", "--quiet", &cp.head])?;
+    git(workdir, &["clean", "-fd", "--quiet"])?;
+    if let Some(message) = &cp.stash {
+        let list = git(workdir, &["stash", "list", "--format=%gd %s"])?;
+        let entry = list
+            .lines()
+            .find(|l| l.contains(message))
+            .ok_or_else(|| UndoError::NotFound(message.clone()))?;
+        let rev = entry.split_whitespace().next().unwrap_or("stash@{0}");
+        git(workdir, &["stash", "pop", "--quiet", rev])?;
+    }
+    Ok(())
+}
 /// Pre-mutation snapshot: the repo HEAD plus a `git stash` entry when the
 /// tree was dirty (`stash -u` covers untracked). Clean trees record HEAD
-/// only. Restored by [`Agent::undo`], which the user invokes explicitly —
-/// undo of a clean-tree checkpoint runs `reset --hard` + `clean -fd`
-/// scoped to the workdir.
+/// only. Restored by [`Agent::undo`] / [`undo_checkpoint`], which the user
+/// invokes explicitly — undo of a clean-tree checkpoint runs `reset --hard`
+/// + `clean -fd` scoped to the workdir.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Checkpoint {
     head: String,

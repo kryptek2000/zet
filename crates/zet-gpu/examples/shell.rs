@@ -542,6 +542,36 @@ impl ApplicationHandler for App {
                 let is_tab = pressed && matches!(&event.logical_key, Key::Named(NamedKey::Tab));
                 let is_enter = pressed && matches!(&event.logical_key, Key::Named(NamedKey::Enter));
                 let is_esc = pressed && matches!(&event.logical_key, Key::Named(NamedKey::Escape));
+                // F12: one-key undo of the last checkpointed agent step.
+                // (While busy the early gate above already swallowed this.)
+                if pressed && matches!(&event.logical_key, Key::Named(NamedKey::F12)) {
+                    let input = self.current_text().unwrap_or_default();
+                    let cp = self
+                        .last_journal
+                        .iter()
+                        .rev()
+                        .find_map(|e| e.checkpoint.clone());
+                    match cp {
+                        None => {
+                            self.ghost.notify(input, "(nothing to undo)".to_string());
+                        }
+                        Some(cp) => {
+                            let cwd = shell_cwd(&self.session);
+                            // Wrong-repo use fails closed: reset --hard with
+                            // an unknown SHA errors instead of touching state.
+                            match zet_agent::undo_checkpoint(std::path::Path::new(&cwd), &Some(cp))
+                            {
+                                Ok(()) => {
+                                    self.ghost.notify(input, "(undone)".to_string());
+                                }
+                                Err(e) => {
+                                    self.ghost.notify(input, format!("(undo failed: {e})"));
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
                 // Tab accepts only a completable history ghost; notices
                 // ("…", hints) fall through to the shell untouched.
                 if is_tab {
