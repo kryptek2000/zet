@@ -122,7 +122,7 @@ request; method: smoke-driven window, screenshot + stderr + ps/smaps.
 | Input latency (key→pixel, warm) | <3ms steady-state | median ~1.0ms, 12/14 samples under gate | ZET_PERF key-to-render; outliers: 8.71 first-key glyph raster, 3.52 unexplained single; under-counts OS wakeup |
 | Frame pacing | event-to-photon <8ms, no fixed fps | ~1ms (same ZET_PERF series) | demand-driven (4Hz idle heartbeat); 120fps fixed is mutually exclusive with sleeping idle — dropped deliberately |
 | Idle RSS | <100MB | 86–92MB | top-5 64MB (26 LLVM + 13 heap/fontdb + 9 binary + 8 client SHM bufs + 8 unused Vulkan ICDs resident after enum); +22–28MB long tail of sub-MB shared libs |
-| `cat 100k lines` | <0.9s | unmeasured | release bench open |
+| `cat 100k lines` | <0.9s | 192ms | Enter-to-recorded-block (589KB output), release, X11 |
 | Inline suggest | <50ms history | instant (in-test) | model path needs local 1B runner (open) |
 | Agent first-step TTFT | <4s cloud | 1.5–3.6s live | OpenRouter gpt-4o-mini, measured in live tests |
 
