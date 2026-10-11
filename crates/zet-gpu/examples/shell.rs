@@ -56,7 +56,16 @@ struct App {
     cached_suggestion: Option<String>,
     nl_mode: bool,
     nl_rx: Option<Receiver<Option<String>>>,
+    last_frame: std::time::Instant,
+    needs_draw: bool,
+    notice_for: Option<String>,
+    notice_text: Option<String>,
+    ghost_tabbable: bool,
 }
+
+/// Redraw at most every 16ms (~60fps). Input/resize set needs_draw for an
+/// immediate frame; the deadline heartbeat covers PTY output and NL polls.
+const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 
 /// Shell's current directory via /proc (unix). Best effort: "" when unknown.
 fn shell_cwd(session: &Option<Session>) -> String {
@@ -108,6 +117,9 @@ impl App {
     /// Refresh the visible ghost suffix from current input. History only
     /// (sync, sub-ms); the model runs solely on NL Enter, in a thread.
     fn update_ghost(&mut self) {
+        // Only history suffixes are Tab-completable. Notices ("…",
+        // "(no command)", no-model hint) display but never type.
+        self.ghost_tabbable = false;
         // NL answer landed: swap the NL line for the command (the preview).
         if let Some(rx) = &self.nl_rx {
             if let Ok(answer) = rx.try_recv() {
@@ -132,6 +144,15 @@ impl App {
             self.ghost = None;
             return;
         };
+        // Sticky notice (e.g. no NL model configured): survives redraws
+        // while the input matches, cleared the moment it differs so it
+        // can never resurrect over a later history ghost for same text.
+        if self.notice_for.as_deref() == Some(&input) {
+            self.ghost = self.notice_text.clone();
+            return;
+        }
+        self.notice_for = None;
+        self.notice_text = None;
         if input.is_empty() || self.dismissed.as_deref() == Some(&input) {
             self.ghost = None;
             return;
@@ -163,6 +184,7 @@ impl App {
             return;
         }
         self.ghost = Some(suffix);
+        self.ghost_tabbable = true;
     }
 
     /// Replace the current line with `cmd` (Ctrl+U then type).
@@ -189,7 +211,11 @@ impl App {
         let spec = match &self.inline_spec {
             Some(s) => s.clone(),
             None => {
-                self.ghost = Some("(set ZET_INLINE_SPEC for NL)".to_string());
+                self.nl_mode = false;
+                self.retitle();
+                self.notice_for = Some(nl);
+                self.notice_text = Some("(set ZET_INLINE_SPEC for NL)".to_string());
+                self.ghost = self.notice_text.clone();
                 return false;
             }
         };
@@ -248,7 +274,24 @@ impl ApplicationHandler for App {
         self.rows = rows;
         self.window = Some(window);
         self.renderer = Some(renderer);
-        event_loop.set_control_flow(ControlFlow::Poll);
+        // Capped frame rate: uncapped Poll redraws burned 100% CPU and
+        // starved input. Events (keys, resize) still wake the loop
+        // immediately; the deadline is only an idle heartbeat (which the
+        // NL-answer poll rides on).
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            std::time::Instant::now() + std::time::Duration::from_millis(16),
+        ));
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Requesting unconditionally here would keep a redraw permanently
+        // pending and the loop would never sleep — the original spin.
+        if self.needs_draw || std::time::Instant::now() >= self.last_frame + FRAME {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.last_frame + FRAME));
     }
 
     fn window_event(
@@ -264,6 +307,8 @@ impl ApplicationHandler for App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
+                // Any key gets a prompt frame; the heartbeat covers the rest.
+                self.needs_draw = true;
                 // Paste first: Ctrl+Shift+V would otherwise type a SYN byte.
                 if is_paste(&event.logical_key, pressed, &self.mods) {
                     if let Ok(mut clip) = arboard::Clipboard::new() {
@@ -287,10 +332,12 @@ impl ApplicationHandler for App {
                 let is_tab = pressed && matches!(&event.logical_key, Key::Named(NamedKey::Tab));
                 let is_enter = pressed && matches!(&event.logical_key, Key::Named(NamedKey::Enter));
                 let is_esc = pressed && matches!(&event.logical_key, Key::Named(NamedKey::Escape));
-                // Tab accepts the visible ghost suffix.
-                if is_tab {
+                // Tab accepts only a completable history ghost; notices
+                // ("…", hints) fall through to the shell untouched.
+                if is_tab && self.ghost_tabbable {
                     if let Some(suffix) = self.ghost.take() {
                         self.dismissed = None;
+                        self.ghost_tabbable = false;
                         if let Some(s) = &mut self.session {
                             let _ = s.write_all(suffix.as_bytes());
                         }
@@ -304,6 +351,8 @@ impl ApplicationHandler for App {
                     if active {
                         self.dismissed = Some(self.last_prefix.clone());
                         self.nl_rx = None;
+                        self.notice_for = None;
+                        self.notice_text = None;
                         if self.nl_mode {
                             self.nl_mode = false;
                             self.retitle();
@@ -344,6 +393,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Resized(size) => {
+                self.needs_draw = true;
                 if let Some(r) = &mut self.renderer {
                     let (cw, ch) = r.cell_px();
                     r.resize(size.width, size.height);
@@ -370,10 +420,10 @@ impl ApplicationHandler for App {
                         r.draw_ghost(cy, cx, g, self.cols);
                     }
                     r.render();
+                    self.last_frame = std::time::Instant::now();
+                    self.needs_draw = false;
                 }
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
+                // No re-arm here: about_to_wait drives the heartbeat.
             }
             _ => {}
         }
@@ -447,6 +497,11 @@ fn main() {
         cached_suggestion: None,
         nl_mode: false,
         nl_rx: None,
+        last_frame: std::time::Instant::now(),
+        needs_draw: true,
+        notice_for: None,
+        notice_text: None,
+        ghost_tabbable: false,
     };
     if let Some(s) = &app.session {
         app.erase = s.erase_char();
