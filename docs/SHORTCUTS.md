@@ -24,10 +24,15 @@ to its first line.
 Type intent, `Enter`; the model translates to one command and the line
 swaps to it (preview — review, then `Enter` to run). Title shows `(nl)`.
 
-- Needs a model: `ZET_INLINE_SPEC` (e.g. `openrouter:openai/gpt-4o-mini`,
-  key from `zet auth add`), else the autodetected local one, else a
-  sticky `(set ZET_INLINE_SPEC …)` hint and nothing runs.
+- Needs a model, resolved per request: `ZET_INLINE_SPEC` first, then the
+  `zet inline <spec>` choice, then the window's startup default, then a
+  fresh local probe. Set it from inside any window with e.g.
+  `zet inline openrouter:openai/gpt-4o-mini` (or `zet inline off`) —
+  windows pick it up with no restart. `zet inline` shows the current one.
+  With nothing configured: sticky `(no model: …)` hint, nothing runs.
 - Broken replies never swap: `(invalid: …)` / `(no command)` notice instead.
+- Greetings and smalltalk get an `agent: …` reply on the prompt line
+  instead of a command — `hello` gets answered, not exit 127.
 
 ## Agent mode (`Ctrl+G`)
 

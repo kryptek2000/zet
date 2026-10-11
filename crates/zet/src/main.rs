@@ -9,6 +9,9 @@ fn main() {
         ["auth", "show"] => auth_show(),
         ["auth", "add", provider] => auth_add(provider),
         ["auth", "rm", provider] => auth_rm(provider),
+        ["inline"] => inline_show(),
+        ["inline", "off"] => inline_clear(),
+        ["inline", spec] => inline_set(spec),
         ["blocks", rest @ ..] => blocks(rest),
         ["journal", rest @ ..] => journal(rest),
         _ => {
@@ -16,6 +19,8 @@ fn main() {
             eprintln!("  zet auth show             list providers and key status");
             eprintln!("  zet auth add <provider>   prompt for key, store in OS keychain");
             eprintln!("  zet auth rm <provider>    delete key from OS keychain");
+            eprintln!("  zet inline [SPEC|off]     show/set/clear the NL/agent model");
+            eprintln!("                            (e.g. openrouter:openai/gpt-4o-mini, local:llama3.2:1b)");
             eprintln!("  zet blocks [--db PATH] [--limit N] [--session S]");
             eprintln!("                            list recorded command blocks");
             eprintln!("  zet journal [--limit N]   list agent turn journal entries");
@@ -173,6 +178,46 @@ fn auth_rm(provider: &str) {
         Ok(()) => println!("{provider}: deleted"),
         Err(e) => {
             eprintln!("{provider}: not deleted: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn inline_show() {
+    let path = zet_models::keys::inline_spec_path();
+    if let Ok(spec) = std::env::var("ZET_INLINE_SPEC") {
+        println!("{spec} (env)");
+    } else if let Some(spec) = zet_models::keys::read_inline_spec_at(&path) {
+        println!("{spec} (set via `zet inline`)");
+    } else if let Some(spec) = zet_models::keys::autodetect_local() {
+        println!("{spec} (autodetected local)");
+    } else {
+        println!("unset (no ZET_INLINE_SPEC, no `zet inline` spec, no local model)");
+    }
+}
+
+fn inline_set(spec: &str) {
+    // Shape provider:model — a bare model name is meaningless without one.
+    if !spec.contains(':') {
+        eprintln!("bad spec {spec:?}: want PROVIDER:MODEL, e.g. openrouter:openai/gpt-4o-mini");
+        std::process::exit(2);
+    }
+    let path = zet_models::keys::inline_spec_path();
+    match zet_models::keys::write_inline_spec_at(&path, spec) {
+        Ok(()) => println!("inline model: {spec} (windows pick it up, no restart)"),
+        Err(e) => {
+            eprintln!("failed to write {}: {e}", path.display());
+            std::process::exit(1);
+        }
+    }
+}
+
+fn inline_clear() {
+    let path = zet_models::keys::inline_spec_path();
+    match zet_models::keys::clear_inline_spec_at(&path) {
+        Ok(()) => println!("inline model cleared (falls back to env, then local autodetect)"),
+        Err(e) => {
+            eprintln!("failed to clear {}: {e}", path.display());
             std::process::exit(1);
         }
     }

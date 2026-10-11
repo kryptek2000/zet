@@ -143,6 +143,53 @@ pub fn autodetect_local() -> Option<String> {
     autodetect_local_at("127.0.0.1", 11434)
 }
 
+/// Home for the persisted NL/agent model choice (`zet inline <spec>`):
+/// same ~/.zet state dir as the journal. A child shell can never change
+/// its parent window's env, so the window re-reads this file on every
+/// NL/agent request — no restart needed after `zet inline`.
+pub fn inline_spec_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    std::path::Path::new(&home).join(".zet").join("inline_spec")
+}
+
+/// First line, trimmed. Blank/missing reads as unset, never empty spec.
+pub fn read_inline_spec_at(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let first = text.lines().next().unwrap_or("").trim();
+    if first.is_empty() {
+        None
+    } else {
+        Some(first.to_string())
+    }
+}
+
+pub fn write_inline_spec_at(path: &std::path::Path, spec: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, format!("{}\n", spec.trim()))
+}
+
+/// Removing a missing file is fine (already off).
+pub fn clear_inline_spec_at(path: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Precedence: explicit env (launch config) > persisted file > the
+/// window's startup value. None everywhere means the caller should try
+/// a fresh autodetect (server may have started since launch).
+pub fn resolve_inline_spec(
+    env: Option<String>,
+    path: &std::path::Path,
+    startup: Option<String>,
+) -> Option<String> {
+    env.or_else(|| read_inline_spec_at(path)).or(startup)
+}
+
 pub fn autodetect_local_at(host: &str, port: u16) -> Option<String> {
     // Loopback only: a future caller can't aim this elsewhere.
     let ip: std::net::IpAddr = host.parse().ok()?;

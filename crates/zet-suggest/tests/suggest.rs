@@ -2,7 +2,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 use zet_blocks::{Block, Store};
 use zet_models::{ChatModel, ChatRequest, ChatResponse, ModelError};
-use zet_suggest::{ghost_suffix, ChainSuggester, HistorySuggester, ModelSuggester, Suggest};
+use zet_suggest::{
+    chat_reply, ghost_suffix, ChainSuggester, HistorySuggester, ModelSuggester, Suggest,
+};
 
 fn seed(cmds: &[(&str, i32)]) -> Store {
     let store = Store::open_in_memory().unwrap();
@@ -109,6 +111,28 @@ fn model_empty_is_none() {
     let (m, _) = script("\n  \n");
     let s = ModelSuggester::new(m);
     assert_eq!(s.suggest_nl("anything"), None);
+}
+
+#[test]
+fn chat_prefix_passes_through_first_line() {
+    // Greeting answers survive first_line (no skipped trailing !/?/:,
+    // no fences) and classify as conversation, never as commands.
+    let (m, _) = script("CHAT: Hey! Tell me what to run.");
+    let s = ModelSuggester::new(m);
+    let answer = s.suggest_nl("hello").expect("chat answer");
+    assert_eq!(
+        chat_reply(&answer),
+        Some("Hey! Tell me what to run.".to_string())
+    );
+}
+
+#[test]
+fn chat_reply_rejects_non_chat() {
+    assert_eq!(chat_reply("ls -la"), None);
+    assert_eq!(chat_reply("CHAT:   "), None);
+    assert_eq!(chat_reply("CHAT:"), None);
+    // History-shaped lines are commands, not chat.
+    assert_eq!(chat_reply("git status"), None);
 }
 
 #[test]

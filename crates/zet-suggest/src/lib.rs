@@ -56,10 +56,11 @@ impl<M: ChatModel> ModelSuggester<M> {
         first_line(&res.text)
     }
 
-    /// Natural language to shell command. Replies with only the command.
+    /// Natural language to shell command. Replies with only the command —
+    /// or CHAT: + one liner when there is no command (greeting/smalltalk).
     pub fn suggest_nl(&self, nl: &str) -> Option<String> {
         self.ask(
-            "Translate the request to a single shell command. Reply with ONLY the command, no prose, no fences. Examples: 'list files' -> ls -la; 'disk usage' -> df -h; 'find todos' -> grep -rn TODO .",
+            "Translate the request to a single shell command. Reply with ONLY the command, no prose, no fences. Examples: 'list files' -> ls -la; 'disk usage' -> df -h; 'find todos' -> grep -rn TODO . If the request is greeting, smalltalk, or has no shell command (e.g. 'hello'), reply with CHAT: followed by a friendly one-liner, e.g. 'CHAT: Hey! Tell me what to run.'",
             nl,
         )
     }
@@ -160,6 +161,20 @@ fn first_line(text: &str) -> Option<String> {
         return Some(clean.to_string());
     }
     None
+}
+
+/// A model reply that is conversation, not a command: "CHAT: <text>".
+/// The window shows it as an `agent:` notice instead of swapping the
+/// line — so `hello` gets answered, not exit 127. Passes through
+/// first_line untouched (ends with `.`, no fences).
+pub fn chat_reply(answer: &str) -> Option<String> {
+    let rest = answer.strip_prefix("CHAT:")?;
+    let text: String = rest.trim().chars().take(120).collect();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 /// Visible ghost suffix: first line of `suggestion` after `prefix`.

@@ -108,3 +108,28 @@ fn auth_add_stores_first_stdin_line_only() {
     assert_eq!(stored.as_deref(), Some("line1-key"));
     zet_models::keys::SystemKeychain.delete("compat").unwrap();
 }
+
+#[test]
+fn inline_show_is_read_only_and_names_a_source() {
+    // No fs writes: safe against the real ~/.zet. ZET_INLINE_SPEC may or
+    // may not be set in this env — either way a source is named.
+    let out = zet().arg("inline").output().unwrap();
+    assert!(out.status.success(), "{:?}", out.status);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("(env)")
+            || text.contains("`zet inline`")
+            || text.contains("(autodetected local)")
+            || text.contains("unset"),
+        "{text}"
+    );
+}
+
+#[test]
+fn inline_bad_spec_fails_loudly_without_writing() {
+    // No colon: rejected before any fs touch.
+    let out = zet().args(["inline", "gpt-4o-mini"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2), "{:?}", out.status);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("bad spec"), "{err}");
+}

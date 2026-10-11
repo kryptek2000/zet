@@ -48,7 +48,8 @@ struct App {
     dead: bool,
     erase: u8,
     recorder: Option<zet_blocks::Recorder>,
-    inline_spec: Option<String>,
+    env_spec: Option<String>,
+    startup_spec: Option<String>,
     ghost: zet_suggest::Ghost,
     nl_mode: bool,
     nl_rx: Option<Receiver<Option<String>>>,
@@ -311,9 +312,16 @@ impl App {
                 Ok(answer) => {
                     self.nl_rx = None;
                     if let Some(cmd) = answer {
+                        // Conversation, not a command: answer it on the
+                        // prompt line instead of swapping. `hello` gets a
+                        // reply, not an exit 127.
+                        if let Some(chat) = zet_suggest::chat_reply(&cmd) {
+                            if let Some(input) = self.current_text() {
+                                self.ghost.notify(input, format!("agent: {chat}"));
+                            }
                         // Never strand the shell in a continuation prompt:
                         // syntactically broken replies notice instead of swap.
-                        if zet_pty::syntax_ok(&self.shell_name, &cmd) {
+                        } else if zet_pty::syntax_ok(&self.shell_name, &cmd) {
                             self.accept_line(&cmd);
                         } else if let Some(input) = self.current_text() {
                             let short: String = cmd.chars().take(60).collect();
@@ -376,17 +384,35 @@ impl App {
         }
     }
 
+    /// Model spec for this NL/agent request: explicit env (launch config)
+    /// first, then the persisted `zet inline` choice (re-read every time
+    /// so no restart is needed), then the startup value, then a fresh
+    /// local probe in case the server started since launch.
+    fn resolve_spec(&self) -> Option<String> {
+        let path = zet_models::keys::inline_spec_path();
+        if let Some(spec) = zet_models::keys::resolve_inline_spec(
+            self.env_spec.clone(),
+            &path,
+            self.startup_spec.clone(),
+        ) {
+            return Some(spec);
+        }
+        zet_models::keys::autodetect_local().inspect(|s| eprintln!("zet: inline model {s}"))
+    }
+
     /// Kick off an NL-to-command request on a thread; the answer swaps the
     /// line when it lands (polled in update_ghost). Returns false with no
     /// model configured.
     fn start_nl_request(&mut self, nl: String) -> bool {
-        let spec = match &self.inline_spec {
-            Some(s) => s.clone(),
+        let spec = match self.resolve_spec() {
+            Some(s) => s,
             None => {
                 self.nl_mode = false;
                 self.retitle();
-                self.ghost
-                    .notify(nl, "(set ZET_INLINE_SPEC for NL)".to_string());
+                self.ghost.notify(
+                    nl,
+                    "(no model: `zet inline <spec>` or ZET_INLINE_SPEC)".to_string(),
+                );
                 return false;
             }
         };
@@ -403,13 +429,15 @@ impl App {
     /// visibly into the PTY and completed from its recorded block.
     /// Entering agent mode pre-consents T0-T2; T3 is never approved.
     fn start_agent(&mut self, goal: String) {
-        let spec = match &self.inline_spec {
-            Some(s) => s.clone(),
+        let spec = match self.resolve_spec() {
+            Some(s) => s,
             None => {
                 self.goal_mode = false;
                 self.retitle();
-                self.ghost
-                    .notify(goal, "(set ZET_INLINE_SPEC for agent)".to_string());
+                self.ghost.notify(
+                    goal,
+                    "(no model: `zet inline <spec>` or ZET_INLINE_SPEC)".to_string(),
+                );
                 return;
             }
         };
@@ -865,12 +893,12 @@ fn main() {
             .or_else(|_| zet_blocks::Store::open_in_memory())
             .expect("in-memory store"),
     );
-    // NL model for Ctrl+; mode: spec like "local:qwen3-1.7b-q4" or
-    // "openrouter:openai/gpt-4o-mini" (key from env/OS keychain).
-    // Unset: zero-config local default when ollama serves a
-    // preferred model (fast TCP probe, localhost only).
-    let inline_spec = match std::env::var("ZET_INLINE_SPEC").ok() {
-        Some(s) => Some(s),
+    // NL model for Ctrl+; mode: explicit ZET_INLINE_SPEC (launch config)
+    // wins; else the persisted `zet inline` choice re-read per request;
+    // else zero-config local when ollama serves a preferred model.
+    let env_spec = std::env::var("ZET_INLINE_SPEC").ok();
+    let startup_spec = match &env_spec {
+        Some(_) => None,
         None => {
             zet_models::keys::autodetect_local().inspect(|s| eprintln!("zet: inline model {s}"))
         }
@@ -892,7 +920,8 @@ fn main() {
         dead: false,
         erase: 0x7f,
         recorder,
-        inline_spec,
+        env_spec,
+        startup_spec,
         ghost,
         nl_mode: false,
         nl_rx: None,
