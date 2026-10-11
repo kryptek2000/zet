@@ -47,18 +47,37 @@ impl Recorder {
                     self.t0 = None;
                 }
                 MarkerKind::Exec => {
-                    let Some((_, col)) = self.cmd else {
+                    let Some((b_abs, b_col)) = self.cmd else {
                         continue;
                     };
-                    // Command from C's parse-time snapshot: output and the
-                    // next prompt may share this row by pump time.
-                    let command: String = m
-                        .line
-                        .chars()
-                        .skip(col)
-                        .collect::<String>()
-                        .trim_end()
-                        .to_string();
+                    // Real shells put C on the row after the command (the
+                    // Enter echo moves down first): the command spans rows
+                    // B..C, output never lands there. Join them (wrapped and
+                    // PS2-continuation rows alike, newline-joined).
+                    // Degenerate C-on-command-row falls back to the snapshot.
+                    let command = if m.abs_row == b_abs {
+                        m.line
+                            .chars()
+                            .skip(b_col)
+                            .collect::<String>()
+                            .trim_end()
+                            .to_string()
+                    } else {
+                        let mut text = String::new();
+                        for r in b_abs..m.abs_row {
+                            let line = abs_line_text(term, r);
+                            let part = if r == b_abs {
+                                line.chars().skip(b_col).collect::<String>()
+                            } else {
+                                line
+                            };
+                            if !text.is_empty() {
+                                text.push('\n');
+                            }
+                            text.push_str(&part);
+                        }
+                        text.trim_end().to_string()
+                    };
                     if command.is_empty() {
                         self.cmd = None;
                         continue;
