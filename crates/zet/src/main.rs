@@ -10,6 +10,7 @@ fn main() {
         ["auth", "add", provider] => auth_add(provider),
         ["auth", "rm", provider] => auth_rm(provider),
         ["blocks", rest @ ..] => blocks(rest),
+        ["journal", rest @ ..] => journal(rest),
         _ => {
             eprintln!("usage:");
             eprintln!("  zet auth show             list providers and key status");
@@ -17,6 +18,7 @@ fn main() {
             eprintln!("  zet auth rm <provider>    delete key from OS keychain");
             eprintln!("  zet blocks [--db PATH] [--limit N] [--session S]");
             eprintln!("                            list recorded command blocks");
+            eprintln!("  zet journal [--limit N]   list agent turn journal entries");
             std::process::exit(2);
         }
     }
@@ -70,20 +72,57 @@ fn auth_add(provider: &str) {
 
 /// One secret line from stdin with terminal echo disabled (unix TTY),
 /// restored on drop. Piped stdin skips the termios dance (no echo there).
+/// Ctrl+C aborts via EINTR (std's line reader would retry it forever).
 fn read_secret() -> Option<String> {
     #[cfg(unix)]
-    let stdin = std::io::stdin();
-    #[cfg(unix)]
-    let _no_echo = NoEcho::disable(&stdin);
+    {
+        let stdin = std::io::stdin();
+        // Bound, not inline: a temporary would drop (restoring echo)
+        // before the read below.
+        let _guard = NoEcho::disable(&stdin);
+        if _guard.is_some() {
+            let line = read_line_raw(&stdin)?;
+            eprintln!();
+            return Some(line);
+        }
+    }
     let line = std::io::stdin().lines().next()?.ok()?;
     eprintln!();
     Some(line)
+}
+
+/// Byte-at-a-time first line; EINTR (our Ctrl+C handler, no SA_RESTART)
+/// aborts to None instead of retrying. Strips one trailing CR for CRLF
+/// pastes; empty/EOF yields Some("") and the caller reports it.
+#[cfg(unix)]
+fn read_line_raw(stdin: &std::io::Stdin) -> Option<String> {
+    use std::os::unix::io::{AsFd as _, AsRawFd as _};
+    let fd = stdin.as_fd().as_raw_fd();
+    let mut buf = Vec::new();
+    let mut one = [0u8; 1];
+    loop {
+        match nix::unistd::read(fd, &mut one) {
+            Ok(0) => break,
+            Ok(_) => {
+                if one[0] == b'\n' {
+                    break;
+                }
+                buf.push(one[0]);
+            }
+            Err(_) => return None,
+        }
+    }
+    if buf.last() == Some(&b'\r') {
+        buf.pop();
+    }
+    String::from_utf8(buf).ok()
 }
 
 #[cfg(unix)]
 struct NoEcho<'a> {
     fd: std::os::fd::BorrowedFd<'a>,
     orig: nix::sys::termios::Termios,
+    old_sigint: nix::sys::signal::SigAction,
 }
 
 #[cfg(unix)]
@@ -95,15 +134,37 @@ impl<'a> NoEcho<'a> {
         let mut raw = orig.clone();
         raw.local_flags.remove(nix::sys::termios::LocalFlags::ECHO);
         nix::sys::termios::tcsetattr(fd, nix::sys::termios::SetArg::TCSANOW, &raw).ok()?;
-        Some(NoEcho { fd, orig })
+        // Ctrl+C during the read must abort via EINTR (restoring echo in
+        // Drop), not kill with echo left off. No SA_RESTART on purpose.
+        let act = nix::sys::signal::SigAction::new(
+            nix::sys::signal::SigHandler::Handler(eintr_abort),
+            nix::sys::signal::SaFlags::empty(),
+            nix::sys::signal::SigSet::empty(),
+        );
+        let old_sigint =
+            unsafe { nix::sys::signal::sigaction(nix::sys::signal::Signal::SIGINT, &act).ok()? };
+        Some(NoEcho {
+            fd,
+            orig,
+            old_sigint,
+        })
     }
 }
+
+/// Empty on purpose: its existence (without SA_RESTART) turns Ctrl+C
+/// into EINTR on the blocked stdin read, which read_secret maps to
+/// failure so the guard drops, echo restores, and we exit cleanly.
+#[cfg(unix)]
+extern "C" fn eintr_abort(_: nix::libc::c_int) {}
 
 #[cfg(unix)]
 impl Drop for NoEcho<'_> {
     fn drop(&mut self) {
         let _ =
             nix::sys::termios::tcsetattr(self.fd, nix::sys::termios::SetArg::TCSANOW, &self.orig);
+        unsafe {
+            let _ = nix::sys::signal::sigaction(nix::sys::signal::Signal::SIGINT, &self.old_sigint);
+        }
     }
 }
 
@@ -196,6 +257,64 @@ fn blocks(argv: &[&str]) {
         );
         for line in b.output.lines() {
             println!("  {line}");
+        }
+    }
+}
+
+fn journal(argv: &[&str]) {
+    let mut limit = 20;
+    let mut i = 0;
+    while i < argv.len() {
+        match argv[i] {
+            "--limit" => {
+                i += 1;
+                limit = match argv.get(i) {
+                    Some(v) => v.parse().unwrap_or_else(|_| {
+                        eprintln!("--limit needs a number");
+                        std::process::exit(2);
+                    }),
+                    None => {
+                        eprintln!("--limit needs a value");
+                        std::process::exit(2);
+                    }
+                };
+            }
+            other => {
+                eprintln!("unknown journal flag {other:?}");
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+    let entries = zet_agent::read_journal(&zet_agent::journal_path_default()).unwrap_or_else(|e| {
+        eprintln!("cannot read journal: {e}");
+        std::process::exit(1);
+    });
+    if entries.is_empty() {
+        println!("no agent turns recorded");
+        return;
+    }
+    let start = entries.len().saturating_sub(limit);
+    for (k, e) in entries[start..].iter().enumerate() {
+        let verdict = if !e.approved {
+            "denied".to_string()
+        } else if e.executed {
+            format!(
+                "exit {}",
+                e.exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "?".to_string())
+            )
+        } else {
+            "not run".to_string()
+        };
+        println!("#{} [{:?} {}] {}", start + k, e.tier, verdict, e.command);
+        let shown: String = e.output.chars().take(800).collect();
+        for line in shown.lines() {
+            println!("  {line}");
+        }
+        if e.output.chars().count() > 800 {
+            println!("  … ({} chars total)", e.output.chars().count());
         }
     }
 }

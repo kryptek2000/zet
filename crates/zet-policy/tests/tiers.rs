@@ -181,8 +181,29 @@ fn issue8_wrappers_and_chains() {
     ] {
         assert_eq!(classify(cmd), Tier::T3, "{cmd}");
     }
-    // Altered-root/namespace runners always ask.
+    // Altered-root/namespace runners resolve the inner command (floor T2:
+    // crossing the boundary always asks, but `su` inside stays critical).
     for cmd in ["chroot /jail su -c id", "nsenter -t 1 -m su"] {
+        assert_eq!(classify(cmd), Tier::T3, "{cmd}");
+    }
+    // Space-separated tool values must not misalign the inner command.
+    for cmd in [
+        "chroot --userspec u:g /jail su",
+        "chroot --groups g1,g2 /jail su -c id",
+        "nsenter --target 1 su",
+        "nsenter -t 1 --mount=/x su -c id",
+        "nsenter -r /jail -w /tmp su",
+    ] {
+        assert_eq!(classify(cmd), Tier::T3, "{cmd}");
+    }
+    for cmd in [
+        "chroot /jail ls",
+        "chroot --userspec=u:g /jail id",
+        "chroot",
+        "chroot /jail",
+        "nsenter",
+        "nsenter -a -t 1 ls",
+    ] {
         assert_eq!(classify(cmd), Tier::T2, "{cmd}");
     }
     // Dispatchers re-classify the real command.

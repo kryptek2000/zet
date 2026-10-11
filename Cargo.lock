@@ -4439,6 +4439,7 @@ name = "zet"
 version = "0.1.0"
 dependencies = [
  "nix",
+ "zet-agent",
  "zet-blocks",
  "zet-models",
 ]
@@ -4447,6 +4448,7 @@ dependencies = [
 name = "zet-agent"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "zet-models",
  "zet-policy",
@@ -4505,6 +4507,9 @@ dependencies = [
 [[package]]
 name = "zet-policy"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "zet-pty"

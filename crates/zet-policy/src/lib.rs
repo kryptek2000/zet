@@ -2,7 +2,9 @@
 // approval decisions. Pure function of (command, in_repo) — no IO, so the
 // red-team suite can pin every attack to a tier.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum Tier {
     /// Read-only: auto-approved.
     T0,
@@ -14,7 +16,7 @@ pub enum Tier {
     T3,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Approval {
     Auto,
     Ask,
@@ -217,7 +219,13 @@ const VALUE_FLAGS: &[&str] = &[
 /// Skip flag (`-x`), value-flag pairs (`-I REPL`), and bare-number (`10`)
 /// argument tokens.
 fn skip_flag_args(s: &str) -> &str {
-    let mut s = s;
+    skip_flag_args_with(s, &[])
+}
+
+/// Flag/arg skipper with tool-scoped extra value flags. Scoped on
+/// purpose: bare `-t` is valueless for xargs (trace) but takes a pid
+/// for nsenter — sharing one list would mis-skip one of them.
+fn skip_flag_args_with<'a>(mut s: &'a str, extra_values: &[&str]) -> &'a str {
     let mut value_next = false;
     loop {
         let a = s.split_whitespace().next().unwrap_or("");
@@ -227,7 +235,7 @@ fn skip_flag_args(s: &str) -> &str {
         if value_next {
             // Previous token was a value-taking flag: this is its value.
             value_next = false;
-        } else if VALUE_FLAGS.contains(&a) {
+        } else if VALUE_FLAGS.contains(&a) || extra_values.contains(&a) {
             value_next = true;
         } else if !(a.starts_with('-') || a.chars().all(|c| c.is_ascii_digit())) {
             break;
@@ -277,11 +285,29 @@ pub fn classify(cmd: &str) -> Tier {
         }
         return classify(rest);
     }
-    // Altered roots/namespaces take opaque args (dir, pid, flags); the inner
-    // command can't be resolved cheaply, so always ask. Known gap for the
-    // sandbox milestone: `chroot /jail su` is T2, not T3.
+    // Altered roots/namespaces: resolve the inner command past flags and
+    // the root/pid target, floor at T2 (crossing the boundary always asks,
+    // but `su` inside stays critical). Fails closed: unparseable shapes
+    // and bare entry (interactive jail shell) stay T2.
     if matches!(first, "chroot" | "nsenter") {
-        return Tier::T2;
+        let extra = if first == "chroot" {
+            &["--userspec", "--groups"][..]
+        } else {
+            &[
+                "-t", "--target", "-r", "--root", "-w", "--wd", "-S", "--setuid", "-G", "--setgid",
+            ][..]
+        };
+        let stripped = strip_wrappers(core);
+        let tok = stripped.split_whitespace().next().unwrap_or("");
+        let mut rest = skip_flag_args_with(stripped[tok.len()..].trim_start(), extra);
+        if first == "chroot" {
+            let root = rest.split_whitespace().next().unwrap_or("");
+            rest = rest[root.len()..].trim_start();
+        }
+        if rest.is_empty() {
+            return Tier::T2;
+        }
+        return classify(rest).max(Tier::T2);
     }
 
     // --- T3: critical. Checked first; nothing below may downgrade these. ---

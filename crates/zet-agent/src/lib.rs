@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use zet_models::{ChatModel, ChatRequest, Message, ModelError, Role, ToolDef};
 use zet_policy::{classify, decide, Approval, Tier};
 
+pub mod journal;
+pub use journal::{append_journal, journal_path_default, read_journal};
+
 pub const SYSTEM_PROMPT: &str = "You are ZET, a terminal agent. Single lane: \
     request exactly ONE run_shell call per turn. Smallest step that advances \
     the goal. Read before writing. Never repeat a denied command.";
@@ -75,7 +78,7 @@ impl Approver for DenyNonRead {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct JournalEntry {
     pub command: String,
     pub tier: Tier,
@@ -328,7 +331,7 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
 /// only. Restored by [`Agent::undo`], which the user invokes explicitly —
 /// undo of a clean-tree checkpoint runs `reset --hard` + `clean -fd`
 /// scoped to the workdir.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Checkpoint {
     head: String,
     stash: Option<String>,

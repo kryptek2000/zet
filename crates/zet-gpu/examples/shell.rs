@@ -382,6 +382,8 @@ impl App {
         self.retitle();
         let (input, text) = match done {
             Some((summary, journal)) => {
+                // Best effort: the turn survives the window via `zet journal`.
+                let _ = zet_agent::append_journal(&zet_agent::journal_path_default(), &journal);
                 self.last_journal = journal;
                 let first: String = summary
                     .lines()

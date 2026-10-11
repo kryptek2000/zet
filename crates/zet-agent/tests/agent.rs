@@ -393,3 +393,28 @@ fn executor_seam_routes_step_output() {
     assert_eq!(entry.output, "faked: echo hello");
     assert_eq!(entry.exit_code, Some(0));
 }
+
+#[test]
+fn journal_jsonl_roundtrips() {
+    use zet_agent::{journal_path_default, read_journal};
+    let dir = std::env::temp_dir().join(format!("zet-jrnl-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("journal.jsonl");
+    let model = Script::new(vec![
+        Script::shell_call("c1", "echo hello"),
+        Script::final_text("said it"),
+    ]);
+    let mut agent = Agent::new(model, AllowAll, false, 4);
+    agent.run("say hi via shell").unwrap();
+    assert!(!agent.journal.is_empty());
+    zet_agent::append_journal(&path, &agent.journal).unwrap();
+    // Turns accumulate: a second turn appends again.
+    zet_agent::append_journal(&path, &agent.journal).unwrap();
+    let back = read_journal(&path).unwrap();
+    assert_eq!(back.len(), agent.journal.len() * 2);
+    assert_eq!(back[0].command, agent.journal[0].command);
+    assert_eq!(back[0].output, agent.journal[0].output);
+    assert_eq!(back[0].exit_code, agent.journal[0].exit_code);
+    let _ = journal_path_default();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
