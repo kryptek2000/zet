@@ -164,16 +164,48 @@ pub fn resolve_provider(spec: &str, chains: &[&dyn Keychain]) -> Result<Provider
             })
         }
         "local" => {
-            // Bare model on the default endpoint, or ENDPOINT:MODEL where
-            // the endpoint carries a scheme (split on the last ':').
-            let (endpoint, model) = match rest.rsplit_once(':') {
-                Some((ep, m)) if !m.is_empty() && ep.contains("://") => {
-                    (ep.to_string(), m.to_string())
+            // Bare model on the default endpoint (tags may contain
+            // colons), or ENDPOINT:MODEL where the endpoint carries a
+            // scheme: the port, when numeric, separates endpoint from
+            // model; otherwise the whole tail after host is the model.
+            match rest.split_once("://") {
+                None => Ok(Provider::Local {
+                    endpoint: "http://localhost:11434".to_string(),
+                    model: rest.to_string(),
+                }),
+                Some((scheme, tail)) => {
+                    let (host, after_host) = tail.split_once(':').ok_or_else(bad)?;
+                    if host.is_empty() || host.contains(['[', ']']) {
+                        return Err(bad());
+                    }
+                    let (port, model) = match after_host.split_once(':') {
+                        Some((p, m))
+                            if !p.is_empty()
+                                && p.bytes().all(|c| c.is_ascii_digit())
+                                && !m.is_empty() =>
+                        {
+                            (format!(":{p}"), m)
+                        }
+                        _ if after_host.bytes().all(|c| c.is_ascii_digit())
+                            && !after_host.is_empty() =>
+                        {
+                            return Err(bad());
+                        }
+                        // Dangling separator: port present, model missing.
+                        _ if after_host.ends_with(':') => {
+                            return Err(bad());
+                        }
+                        _ => (String::new(), after_host),
+                    };
+                    if model.is_empty() {
+                        return Err(bad());
+                    }
+                    Ok(Provider::Local {
+                        endpoint: format!("{scheme}://{host}{port}"),
+                        model: model.to_string(),
+                    })
                 }
-                None => ("http://localhost:11434".to_string(), rest.to_string()),
-                _ => return Err(bad()),
-            };
-            Ok(Provider::Local { endpoint, model })
+            }
         }
         _ => Err(bad()),
     }

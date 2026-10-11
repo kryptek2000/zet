@@ -121,6 +121,42 @@ fn resolve_openai_and_compat_and_local_specs() {
         }
         other => panic!("wrong provider: {other:?}"),
     }
+    // Tagged models: default endpoint and explicit endpoint alike.
+    let p = resolve_provider("local:qwen3:1.7b", none).unwrap();
+    match p {
+        zet_models::Provider::Local { endpoint, model } => {
+            assert_eq!(endpoint, "http://localhost:11434");
+            assert_eq!(model, "qwen3:1.7b");
+        }
+        other => panic!("wrong provider: {other:?}"),
+    }
+    let p = resolve_provider("local:http://localhost:11434:qwen3:1.7b", none).unwrap();
+    match p {
+        zet_models::Provider::Local { endpoint, model } => {
+            assert_eq!(endpoint, "http://localhost:11434");
+            assert_eq!(model, "qwen3:1.7b");
+        }
+        other => panic!("wrong provider: {other:?}"),
+    }
+    let p = resolve_provider("local:qwen3", none).unwrap();
+    match p {
+        zet_models::Provider::Local { endpoint, model } => {
+            assert_eq!(endpoint, "http://localhost:11434");
+            assert_eq!(model, "qwen3");
+        }
+        other => panic!("wrong provider: {other:?}"),
+    }
+    // Malformed locals stay errors: port without model, IPv6, dangling colon.
+    for spec in [
+        "local:http://h:11434",
+        "local:http://[::1]:11434:x",
+        "local:http://h:11434:",
+    ] {
+        assert!(
+            resolve_provider(spec, none).is_err(),
+            "{spec} should not parse"
+        );
+    }
 }
 
 #[test]
