@@ -4452,6 +4452,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "zet-context",
  "zet-models",
  "zet-policy",
 ]

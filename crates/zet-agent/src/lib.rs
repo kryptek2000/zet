@@ -7,6 +7,7 @@ use zet_models::{ChatModel, ChatRequest, Message, ModelError, Role, ToolDef};
 use zet_policy::{classify, decide, Approval, Tier};
 
 pub mod journal;
+pub mod tools;
 pub use journal::{append_journal, journal_path_default, read_journal};
 
 pub const SYSTEM_PROMPT: &str = "You are ZET, a terminal agent. Single lane: \
@@ -213,7 +214,12 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
                 model: String::new(),
                 system: Some(system),
                 messages: messages.clone(),
-                tools: vec![shell_tool_def()],
+                tools: vec![
+                    shell_tool_def(),
+                    tools::read_tool_def(),
+                    tools::glob_tool_def(),
+                    tools::grep_tool_def(),
+                ],
                 max_tokens: 1024,
             };
             let res = self.model.chat(&req).map_err(AgentError::Model)?;
@@ -252,7 +258,89 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
         Err(AgentError::MaxIters(self.max_iters))
     }
 
+    /// Native read-only tool call: parsed, confined, executed, journaled.
+    /// Results are scrubbed before the model sees them (the journal keeps
+    /// the raw local record). Tier T0: reads auto-approve.
+    fn step_read(&mut self, call: &zet_models::ToolCall) -> (String, String) {
+        let args: serde_json::Value = match serde_json::from_str(&call.arguments) {
+            Ok(v) => v,
+            Err(_) => {
+                return (call.id.clone(), "error: arguments are not JSON".to_string());
+            }
+        };
+        let str_arg = |name: &str| args.get(name).and_then(|v| v.as_str()).map(str::to_string);
+        let label = match call.name.as_str() {
+            "read_file" => {
+                let Some(path) = str_arg("path") else {
+                    return (call.id.clone(), "error: missing 'path' string".to_string());
+                };
+                format!("read_file {path}")
+            }
+            "glob" => {
+                let Some(pattern) = str_arg("pattern") else {
+                    return (
+                        call.id.clone(),
+                        "error: missing 'pattern' string".to_string(),
+                    );
+                };
+                format!("glob {pattern}")
+            }
+            "grep" => {
+                let Some(pattern) = str_arg("pattern") else {
+                    return (
+                        call.id.clone(),
+                        "error: missing 'pattern' string".to_string(),
+                    );
+                };
+                format!("grep {pattern}")
+            }
+            _ => {
+                return (
+                    call.id.clone(),
+                    format!("error: unknown tool '{}'", call.name),
+                )
+            }
+        };
+        let raw = match call.name.as_str() {
+            "read_file" => {
+                let path = str_arg("path").unwrap_or_default();
+                let max_bytes = args.get("max_bytes").and_then(|v| v.as_u64());
+                tools::read_file(&self.workdir, &path, max_bytes)
+            }
+            "glob" => {
+                let pattern = str_arg("pattern").unwrap_or_default();
+                tools::glob(&self.workdir, &pattern)
+            }
+            _ => {
+                let pattern = str_arg("pattern").unwrap_or_default();
+                let include = str_arg("include");
+                tools::grep(&self.workdir, &pattern, include.as_deref())
+            }
+        };
+        let (executed, output) = match raw {
+            Ok(text) => (true, text),
+            Err(problem) => (false, format!("error: {problem}")),
+        };
+        self.journal.push(JournalEntry {
+            command: label.clone(),
+            tier: Tier::T0,
+            approval: Approval::Auto,
+            approved: true,
+            executed,
+            exit_code: if executed { Some(0) } else { None },
+            output: output.clone(),
+            checkpoint: None,
+        });
+        // The model sees scrubbed text; the journal above keeps raw.
+        (call.id.clone(), zet_context::scrub(&output))
+    }
+
     fn step(&mut self, call: &zet_models::ToolCall) -> (String, String) {
+        // Native read-only tools run in-process (no shell, no aliases),
+        // confined to the workdir, results scrubbed before the model.
+        if matches!(call.name.as_str(), "read_file" | "glob" | "grep") {
+            return self.step_read(call);
+        }
         if call.name != "run_shell" {
             return (
                 call.id.clone(),
@@ -347,7 +435,8 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
             output: output.clone(),
             checkpoint,
         });
-        (call.id.clone(), output)
+        // Secrets in command output stay local: the model sees scrubbed.
+        (call.id.clone(), zet_context::scrub(&output))
     }
 }
 

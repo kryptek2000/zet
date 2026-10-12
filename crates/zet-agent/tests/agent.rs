@@ -63,9 +63,9 @@ fn live_echo_hello_end_to_end() {
     let out = agent.run("say hi").unwrap();
     assert_eq!(out, "said it");
 
-    // Model was offered exactly the run_shell tool.
+    // Model was offered the shell + read-only tools.
     let first_req = &agent.model.seen.borrow()[0];
-    assert_eq!(first_req.tools.len(), 1);
+    assert_eq!(first_req.tools.len(), 4);
     assert_eq!(first_req.tools[0].name, "run_shell");
 
     // One step executed, output captured live.
@@ -467,4 +467,115 @@ fn no_context_leaves_system_prompt_bare() {
     agent.run("hi").unwrap();
     let system = agent.model.seen.borrow()[0].system.clone().unwrap();
     assert!(!system.contains("Terminal context"), "{system}");
+}
+
+fn tool_call(id: &str, name: &str, arguments: &str) -> ChatResponse {
+    ChatResponse {
+        text: String::new(),
+        tool_calls: vec![ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments: arguments.to_string(),
+        }],
+    }
+}
+
+fn temp_workdir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "zet_tools_{tag}_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn agent_offers_read_tools_alongside_shell() {
+    let model = Script::new(vec![Script::final_text("done")]);
+    let mut agent = Agent::new(model, AllowAll, true, 8);
+    agent.run("hi").unwrap();
+    let names: Vec<String> = agent.model.seen.borrow()[0]
+        .tools
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+    for want in ["run_shell", "read_file", "glob", "grep"] {
+        assert!(names.contains(&want.to_string()), "{names:?}");
+    }
+}
+
+#[test]
+fn read_file_tool_reads_inside_workdir() {
+    let dir = temp_workdir("read");
+    std::fs::write(dir.join("note.txt"), "hello-file").unwrap();
+    let model = Script::new(vec![
+        tool_call("c1", "read_file", r#"{"path":"note.txt"}"#),
+        Script::final_text("saw it"),
+    ]);
+    let mut agent = Agent::new(model, AllowAll, true, 8).with_workdir(dir);
+    assert_eq!(agent.run("read it").unwrap(), "saw it");
+    assert!(agent.journal[0].executed);
+    assert!(agent.journal[0].output.contains("hello-file"));
+}
+
+#[test]
+fn read_file_denied_outside_workdir() {
+    let dir = temp_workdir("jail");
+    let model = Script::new(vec![
+        tool_call("c1", "read_file", r#"{"path":"/etc/hostname"}"#),
+        Script::final_text("done"),
+    ]);
+    let mut agent = Agent::new(model, AllowAll, true, 8).with_workdir(dir);
+    agent.run("read it").unwrap();
+    assert!(!agent.journal[0].executed);
+    assert!(
+        agent.journal[0].output.contains("escapes"),
+        "{:?}",
+        agent.journal[0].output
+    );
+}
+
+#[test]
+fn glob_and_grep_find_files() {
+    let dir = temp_workdir("find");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(dir.join("src").join("lib.rs"), "pub fn help() {}\n").unwrap();
+    let model = Script::new(vec![
+        tool_call("c1", "glob", r#"{"pattern":"src/*.rs"}"#),
+        tool_call("c2", "grep", r#"{"pattern":"pub fn"}"#),
+        Script::final_text("found"),
+    ]);
+    let mut agent = Agent::new(model, AllowAll, true, 8).with_workdir(dir);
+    assert_eq!(agent.run("find it").unwrap(), "found");
+    assert!(
+        agent.journal[0].output.contains("main.rs"),
+        "{:?}",
+        agent.journal[0].output
+    );
+    assert!(
+        agent.journal[1].output.contains("lib.rs"),
+        "{:?}",
+        agent.journal[1].output
+    );
+}
+
+#[test]
+fn tool_results_reach_model_scrubbed() {
+    let dir = temp_workdir("scrub");
+    std::fs::write(dir.join("env.txt"), "KEY=sk-abc123XYZ4567890qrs\n").unwrap();
+    let model = Script::new(vec![
+        tool_call("c1", "read_file", r#"{"path":"env.txt"}"#),
+        Script::final_text("done"),
+    ]);
+    let mut agent = Agent::new(model, AllowAll, true, 8).with_workdir(dir);
+    agent.run("read it").unwrap();
+    let second = &agent.model.seen.borrow()[1];
+    let dumped = format!("{second:?}");
+    assert!(!dumped.contains("sk-abc123XYZ4567890qrs"), "{dumped}");
+    assert!(dumped.contains("[REDACTED]"), "{dumped}");
 }
