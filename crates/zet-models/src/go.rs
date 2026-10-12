@@ -239,50 +239,135 @@ impl GoClient {
     /// Reasoning effort stays minimal (NL answers are one-liners; the
     /// model would otherwise burn the token budget thinking) with a 512
     /// floor so thinking never starves the answer.
+    ///
+    /// With tools (agent turns) the input becomes an item array carrying
+    /// `function_call` / `function_call_output` linkage instead of flat
+    /// text — verified live against the Go gateway, which returns
+    /// `call_id` (not `id`) on its function_call items.
     fn responses_body(&self, req: &ChatRequest) -> Value {
-        let mut parts = Vec::new();
-        if let Some(system) = &req.system {
-            parts.push(system.clone());
-        }
-        for m in &req.messages {
-            parts.push(format!("{}: {}", Self::role(m.role), m.text));
-        }
-        json!({
+        let tools: Vec<Value> = req
+            .tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                })
+            })
+            .collect();
+        let mut body = json!({
             "model": self.model,
-            "input": parts.join("\n"),
             "max_output_tokens": req.max_tokens.max(512),
             "reasoning": {"effort": "minimal"},
-        })
+        });
+        if !tools.is_empty() {
+            body["tools"] = Value::Array(tools);
+        }
+        let needs_items = !req.tools.is_empty()
+            || req
+                .messages
+                .iter()
+                .any(|m| !m.tool_calls.is_empty() || m.tool_call_id.is_some());
+        if needs_items {
+            let mut items = Vec::new();
+            if let Some(system) = &req.system {
+                items.push(json!({"role": "system", "content": system}));
+            }
+            for m in &req.messages {
+                match m.role {
+                    Role::Tool => {
+                        items.push(json!({
+                            "type": "function_call_output",
+                            "call_id": m.tool_call_id,
+                            "output": m.text,
+                        }));
+                    }
+                    _ => {
+                        if !m.text.is_empty() {
+                            items.push(json!({"role": Self::role(m.role), "content": m.text}));
+                        }
+                        for c in &m.tool_calls {
+                            items.push(json!({
+                                "type": "function_call",
+                                "call_id": c.id,
+                                "name": c.name,
+                                "arguments": c.arguments,
+                            }));
+                        }
+                    }
+                }
+            }
+            body["input"] = Value::Array(items);
+        } else {
+            let mut parts = Vec::new();
+            if let Some(system) = &req.system {
+                parts.push(system.clone());
+            }
+            for m in &req.messages {
+                parts.push(format!("{}: {}", Self::role(m.role), m.text));
+            }
+            body["input"] = Value::String(parts.join("\n"));
+        }
+        body
     }
 
     fn responses_try(&self, req: &ChatRequest) -> Result<ChatResponse, ModelError> {
-        if !req.tools.is_empty() {
-            return Err(ModelError::Protocol(format!(
-                "model {} needs /responses, which has no function calling: agent turns cannot run on it",
-                self.model
-            )));
-        }
         let (status, text) = self.post("/responses", self.responses_body(req))?;
         if status != 200 {
             return Err(Self::fail(status, &text));
         }
         let payload: Value = serde_json::from_str(&text)
             .map_err(|e| ModelError::Protocol(format!("bad response JSON: {e}")))?;
-        let mut text = String::new();
+        let mut out_text = String::new();
+        let mut tool_calls = Vec::new();
         if let Some(items) = payload.get("output").and_then(|o| o.as_array()) {
             for item in items {
-                if let Some(contents) = item.get("content").and_then(|c| c.as_array()) {
-                    for part in contents {
-                        if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
-                            text.push_str(t);
+                match item.get("type").and_then(|t| t.as_str()) {
+                    Some("function_call") => {
+                        let id = item
+                            .get("call_id")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| item.get("id").and_then(|v| v.as_str()))
+                            .unwrap_or_default()
+                            .to_string();
+                        let name = item
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        let arguments = item
+                            .get("arguments")
+                            .map(|v| {
+                                if let Some(s) = v.as_str() {
+                                    s.to_string()
+                                } else {
+                                    v.to_string()
+                                }
+                            })
+                            .unwrap_or_default();
+                        tool_calls.push(crate::ToolCall {
+                            id,
+                            name,
+                            arguments,
+                        });
+                    }
+                    _ => {
+                        if let Some(contents) = item.get("content").and_then(|c| c.as_array()) {
+                            for part in contents {
+                                if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                                    out_text.push_str(t);
+                                }
+                            }
                         }
                     }
                 }
             }
         }
         Ok(ChatResponse {
-            text,
-            tool_calls: Vec::new(),
+            text: out_text,
+            tool_calls,
         })
     }
 }

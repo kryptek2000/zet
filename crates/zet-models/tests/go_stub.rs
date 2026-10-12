@@ -191,18 +191,14 @@ fn chat_leg_carries_tools_and_parses_calls() {
 }
 
 #[test]
-fn responses_leg_refuses_tools_loudly() {
-    // No stub: must fail before any POST (agent turns never run blind).
-    let c = GoClient::new(
-        "http://127.0.0.1:9".to_string(),
-        "test-key".to_string(),
-        "responses-tools-model".to_string(),
-    );
-    // Force the responses leg by pre-caching the protocol... cache is
-    // process-global keyed by model: first trigger fallback via stub.
+fn responses_leg_runs_function_calls() {
+    // Agent turn on a responses-model: tools sent in Responses shape,
+    // function_call items parsed (gateway uses call_id, not id).
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let h = std::thread::spawn(move || {
+        // Turn 1: chat 400s (protocol fallback), then responses with
+        // tools returns a function_call.
         let (mut stream, _) = listener.accept().unwrap();
         let (_, _) = read_request(&mut stream);
         reply(
@@ -210,16 +206,84 @@ fn responses_leg_refuses_tools_loudly() {
             400,
             r#"{"error":{"type":"ModelProtocolUnsupported","message":"nope"}}"#,
         );
+        let (mut stream, _) = listener.accept().unwrap();
+        let (head, body) = read_request(&mut stream);
+        assert!(head.contains("POST /responses"), "{head}");
+        assert_session(&head);
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["tools"][0]["name"], "run_shell");
+        assert_eq!(payload["tools"][0]["type"], "function");
+        reply(
+            &mut stream,
+            200,
+            r#"{"output":[{"type":"function_call","call_id":"call_1","name":"run_shell","arguments":"{\"command\":\"ls\"}"}]}"#,
+        );
+        // Turn 2 (cached protocol: straight to responses): input is an
+        // item array linking the call to its output.
+        let (mut stream, _) = listener.accept().unwrap();
+        let (head, body) = read_request(&mut stream);
+        assert!(head.contains("POST /responses"), "{head}");
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let input = payload["input"].as_array().expect("item array");
+        assert!(
+            input
+                .iter()
+                .any(|i| i["type"] == "function_call" && i["call_id"] == "call_1"),
+            "{payload}"
+        );
+        assert!(
+            input.iter().any(|i| i["type"] == "function_call_output"
+                && i["call_id"] == "call_1"
+                && i["output"] == "done"),
+            "{payload}"
+        );
+        reply(
+            &mut stream,
+            200,
+            r#"{"output":[{"type":"message","content":[{"text":"listed"}]}]}"#,
+        );
     });
-    let c2 = GoClient::new(
+    let c = GoClient::new(
         format!("http://127.0.0.1:{port}"),
         "test-key".to_string(),
-        "responses-tools-model".to_string(),
+        "responses-fn-model".to_string(),
     );
-    // Chat 400 with unsupported type: falls to responses leg, which
-    // refuses tools loudly (no second connection needed).
-    let err = c2.chat(&agent_req()).unwrap_err().to_string();
-    assert!(err.contains("no function calling"), "{err}");
+    let res = c.chat(&agent_req()).unwrap();
+    assert_eq!(res.tool_calls.len(), 1);
+    assert_eq!(res.tool_calls[0].id, "call_1");
+    assert_eq!(res.tool_calls[0].name, "run_shell");
+    // Turn 2: assistant call + tool result round-trip as items.
+    let follow = ChatRequest {
+        model: String::new(),
+        system: None,
+        messages: vec![
+            Message {
+                role: Role::User,
+                text: "list".to_string(),
+                tool_call_id: None,
+                tool_calls: vec![],
+            },
+            Message {
+                role: Role::Assistant,
+                text: String::new(),
+                tool_call_id: None,
+                tool_calls: res.tool_calls.clone(),
+            },
+            Message {
+                role: Role::Tool,
+                text: "done".to_string(),
+                tool_call_id: Some("call_1".to_string()),
+                tool_calls: vec![],
+            },
+        ],
+        tools: vec![zet_models::ToolDef {
+            name: "run_shell".to_string(),
+            description: "run".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        }],
+        max_tokens: 16,
+    };
+    let res2 = c.chat(&follow).unwrap();
+    assert_eq!(res2.text, "listed");
     h.join().unwrap();
-    let _ = c;
 }
