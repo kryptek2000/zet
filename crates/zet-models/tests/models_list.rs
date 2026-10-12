@@ -62,6 +62,23 @@ fn auth_failure_surfaces_not_silence() {
 }
 
 #[test]
+fn json_envelope_collapses_to_message() {
+    // OpenRouter-style bodies: the notice must carry the diagnosis,
+    // not the envelope.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port_base = base(&listener);
+    let h = stub_models(
+        listener,
+        r#"{"error":{"message":"thinkingmachines/inkling-small:free is not available","code":401}}"#,
+        401,
+    );
+    let err = list_models(&port_base, "test-key").unwrap_err().to_string();
+    assert!(err.contains("not available"), "{err}");
+    assert!(!err.contains("\"code\""), "{err}");
+    h.join().unwrap();
+}
+
+#[test]
 fn free_filter_is_suffix_match() {
     assert!(zet_models::is_free_model("poolside/laguna-s-2.1:free"));
     assert!(!zet_models::is_free_model("kimi-k2.7-code"));
