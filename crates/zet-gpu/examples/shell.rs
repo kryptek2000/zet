@@ -5,7 +5,7 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::Window;
@@ -423,7 +423,7 @@ impl App {
             ch,
             self.cols,
             self.rows,
-            self.term.abs_base(),
+            self.term.visible_base(),
         ))
     }
 
@@ -774,6 +774,10 @@ impl ApplicationHandler for App {
                 let pressed = event.state == ElementState::Pressed;
                 // Any key gets a prompt frame; the heartbeat covers the rest.
                 self.needs_draw = true;
+                // Typing returns to live (the cursor is there, not in history).
+                if pressed {
+                    self.term.snap_to_bottom();
+                }
                 if pressed && self.perf_t0.is_some() {
                     self.perf_input = Some(std::time::Instant::now());
                 }
@@ -1013,6 +1017,33 @@ impl ApplicationHandler for App {
                         self.copy_selection();
                     }
                     _ => {}
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.needs_draw = true;
+                // Wheel notch: 3 lines (LineDelta) or ~1 line per 20px.
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => (y * 3.0).round() as isize,
+                    MouseScrollDelta::PixelDelta(p) => (p.y / 20.0).round() as isize,
+                };
+                if self.term.alt_active() {
+                    // App owns the screen (vim/helix): wheel becomes
+                    // arrow keys, the xterm alternateScroll convention.
+                    if let Some(s) = &mut self.session {
+                        let seq = if lines >= 0 { b"\x1b[A" } else { b"\x1b[B" };
+                        for _ in 0..lines.abs().min(10) {
+                            let _ = s.write_all(seq);
+                        }
+                    }
+                    return;
+                }
+                // Scrolling drops the selection (it belongs to the old view).
+                self.selection = None;
+                self.selecting = false;
+                if lines >= 0 {
+                    self.term.scroll_view_up(lines as usize);
+                } else {
+                    self.term.scroll_view_down((-lines) as usize);
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {

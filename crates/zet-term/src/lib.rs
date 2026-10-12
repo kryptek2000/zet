@@ -119,6 +119,9 @@ pub struct Terminal {
     grid: Vec<Vec<Cell>>,
     scrollback: VecDeque<Vec<Cell>>,
     scrollback_cap: usize,
+    /// Wheel position: 0 = live bottom, N = N lines back into history.
+    /// Typing snaps to 0; new output keeps the viewed content stable.
+    view_offset: usize,
     cx: usize,
     cy: usize,
     cursor_visible: bool,
@@ -154,6 +157,7 @@ impl Terminal {
             grid: vec![vec![Cell::blank(); cols]; rows],
             scrollback: VecDeque::new(),
             scrollback_cap,
+            view_offset: 0,
             cx: 0,
             cy: 0,
             cursor_visible: true,
@@ -583,6 +587,11 @@ impl Terminal {
             while self.scrollback.len() > self.scrollback_cap {
                 self.scrollback.pop_front();
             }
+            // View stays on the same content while scrolled (the history
+            // grew under it); clamped since the cap may eat the top.
+            if self.view_offset > 0 {
+                self.view_offset = (self.view_offset + 1).min(self.scrollback.len());
+            }
         }
     }
 
@@ -679,6 +688,60 @@ impl Terminal {
 
     pub fn scrollback_len(&self) -> usize {
         self.scrollback.len()
+    }
+
+    /// Wheel position: 0 shows the live grid, N the N lines above it.
+    pub fn view_offset(&self) -> usize {
+        self.view_offset
+    }
+
+    /// Wheel up: look N lines further into history. No-op on alt
+    /// (the window forwards the wheel to the app as arrows instead).
+    pub fn scroll_view_up(&mut self, n: usize) {
+        if self.alt_active {
+            return;
+        }
+        self.view_offset = (self.view_offset + n).min(self.scrollback_len());
+    }
+
+    /// Wheel down: back toward live. Typing calls snap_to_bottom.
+    pub fn scroll_view_down(&mut self, n: usize) {
+        if self.alt_active {
+            return;
+        }
+        self.view_offset = self.view_offset.saturating_sub(n);
+    }
+
+    /// Back to live (any keypress).
+    pub fn snap_to_bottom(&mut self) {
+        self.view_offset = 0;
+    }
+
+    /// Visible row y with the wheel applied: history lines above live,
+    /// then the live grid. None past the top (over-scroll clamps, so
+    /// this only fires on short grids).
+    fn visible_row(&self, y: usize) -> Option<&Vec<Cell>> {
+        let idx = self.scrollback_len().saturating_sub(self.view_offset) + y;
+        if idx < self.scrollback_len() {
+            self.scrollback.get(idx)
+        } else {
+            self.grid.get(idx - self.scrollback_len())
+        }
+    }
+
+    pub fn visible_cell(&self, x: usize, y: usize) -> Option<Cell> {
+        self.visible_row(y)?.get(x).copied()
+    }
+
+    pub fn visible_line_text(&self, y: usize) -> String {
+        self.visible_row(y)
+            .map(|row| row.iter().map(|c| c.c).collect())
+            .unwrap_or_default()
+    }
+
+    /// Absolute-row base for the wheel-shifted view (selection math).
+    pub fn visible_base(&self) -> usize {
+        self.abs_base().saturating_sub(self.view_offset)
     }
 
     /// Alt screen active (vim/helix): the visible grid is NOT the main

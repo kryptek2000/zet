@@ -71,14 +71,14 @@ impl Selection {
             return String::new();
         }
         let (s, e) = self.normalized();
-        // Alt screen shows its own grid: rows address the visible grid.
-        let sb = term.abs_base();
+        // Wheel-shifted view: rows address the visible grid.
+        let sb = term.visible_base();
         let mut out = Vec::new();
         for row in s.row..=e.row {
             let line: String = if row < sb {
                 term.scrollback_line(row).unwrap_or_default()
             } else {
-                term.line_text(row - sb)
+                term.visible_line_text(row - sb)
             };
             let chars: Vec<char> = line.chars().collect();
             let (a, b) = if s.row == e.row {

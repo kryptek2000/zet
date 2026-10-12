@@ -449,12 +449,12 @@ impl Renderer {
     ) {
         self.quads.clear();
         let (cur_x, cur_y) = term.cursor();
-        let show_cursor = term.cursor_visible();
-        let sb = term.abs_base();
+        let show_cursor = term.cursor_visible() && term.view_offset() == 0;
+        let sb = term.visible_base();
         for y in 0..rows {
-            let line: Vec<char> = term.line_text(y).chars().collect();
+            let line: Vec<char> = term.visible_line_text(y).chars().collect();
             for (x, &c) in line.iter().enumerate().take(cols) {
-                let cell = term.cell(x, y);
+                let cell = term.visible_cell(x, y);
                 let fg = cell.map(|cell| cell.fg).unwrap_or_default();
                 let bg = cell.map(|cell| cell.bg).unwrap_or_default();
                 let bold = cell.map(|cell| cell.bold).unwrap_or(false);

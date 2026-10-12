@@ -448,3 +448,43 @@ fn osc133_ignored_on_alt_screen() {
     t.feed(b"\x1b[?1049h\x1b]133;B\x07\x1b]133;D;0\x07\x1b[?1049l");
     assert!(t.drain_markers().is_empty());
 }
+
+#[test]
+fn wheel_scrolls_view_into_scrollback() {
+    let mut t = Terminal::with_scrollback(5, 2, 10);
+    t.feed(b"1\n2\n3\n");
+    assert_eq!(t.view_offset(), 0);
+    assert_eq!(t.visible_line_text(0), "3    ");
+    t.scroll_view_up(1);
+    assert_eq!(t.view_offset(), 1);
+    // View shifted one line back: top row now shows what was above.
+    assert_eq!(t.visible_line_text(1), "3    ");
+    assert_eq!(t.visible_line_text(0), "2    ");
+    t.scroll_view_down(1);
+    assert_eq!(t.view_offset(), 0);
+    assert_eq!(t.visible_line_text(0), "3    ");
+}
+
+#[test]
+fn wheel_clamps_at_history_top_and_live_bottom() {
+    let mut t = Terminal::with_scrollback(5, 2, 10);
+    t.feed(b"1\n2\n");
+    // Only 1 scrollback line: up(99) clamps, down never goes negative.
+    t.scroll_view_up(99);
+    assert_eq!(t.view_offset(), t.scrollback_len());
+    t.scroll_view_down(99);
+    assert_eq!(t.view_offset(), 0);
+    t.snap_to_bottom();
+    assert_eq!(t.view_offset(), 0);
+}
+
+#[test]
+fn output_keeps_view_stable_while_scrolled() {
+    let mut t = Terminal::with_scrollback(5, 2, 10);
+    t.feed(b"1\n2\n3\n");
+    t.scroll_view_up(1);
+    let shown = t.visible_line_text(0);
+    t.feed(b"4\n");
+    // Same content stays in view (offset grew with history).
+    assert_eq!(t.visible_line_text(0), shown);
+}
