@@ -1,4 +1,4 @@
-use zet_pty::{first_word, is_shell_word, KnownCommands};
+use zet_pty::{first_word, is_shell_word, zet_fallback, KnownCommands};
 
 // --- first_word: the command position, past assignments ---
 
@@ -78,4 +78,25 @@ fn first_word_gates_routing() {
     assert_eq!(route("hello"), "translate");
     assert_eq!(route("update"), "translate");
     assert_eq!(route("list files in detail"), "translate");
+}
+
+#[test]
+fn zet_wake_word_translates_non_subcommands() {
+    // Real CLI stays direct.
+    assert_eq!(zet_fallback("zet auth show"), None);
+    assert_eq!(zet_fallback("zet blocks"), None);
+    assert_eq!(zet_fallback("zet inline"), None);
+    assert_eq!(zet_fallback("zet"), None);
+    assert_eq!(zet_fallback("zet   "), None);
+    // Glued words are other commands.
+    assert_eq!(zet_fallback("zeta"), None);
+    assert_eq!(zet_fallback("ls -la"), None);
+    // Plain words after `zet` translate without the wake word.
+    assert_eq!(
+        zet_fallback("zet whats the command to update linux?"),
+        Some("whats the command to update linux?".to_string())
+    );
+    assert_eq!(zet_fallback("zet hello"), Some("hello".to_string()));
+    // CLI typos translate too (the model usually repairs them).
+    assert_eq!(zet_fallback("zet blokcs"), Some("blokcs".to_string()));
 }

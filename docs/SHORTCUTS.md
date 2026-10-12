@@ -28,6 +28,9 @@ Just type — command or plain words — and press `Enter`:
 - Anything else (`hello`, `update`, `list files in detail`) goes to the
   model, and the line swaps to its answer as a preview — review, then
   `Enter` to run. Title never changes; there is no mode to enter or leave.
+- `zet` works as a wake word: `zet whats the command to update linux?`
+  translates the rest. Real subcommands (`zet blocks`, `zet inline …`)
+  run untouched.
 - Needs a model, resolved per request: `ZET_INLINE_SPEC` first, then the
   `zet inline <spec>` choice, then the window's startup default, then a
   fresh local probe. Set it from inside any window with e.g.

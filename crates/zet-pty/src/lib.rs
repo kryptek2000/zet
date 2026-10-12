@@ -275,3 +275,27 @@ impl KnownCommands {
         self.set.contains(name)
     }
 }
+
+/// `zet` as a wake word: `zet <real subcommand>` runs the CLI, but
+/// `zet <plain words>` translates the rest (`zet whats the command…`
+/// must not usage-error). None = run it (known subcommand, bare `zet`,
+/// or not a `zet` line at all).
+pub fn zet_fallback(line: &str) -> Option<String> {
+    const SUBCOMMANDS: &[&str] = &["auth", "blocks", "journal", "inline"];
+    let rest = line.trim_start().strip_prefix("zet")?;
+    // `zet` glued to more word chars (zeta, zetup) is not us.
+    if let Some(c) = rest.chars().next() {
+        if !c.is_whitespace() {
+            return None;
+        }
+    }
+    let rest = rest.trim_start().to_string();
+    if rest.is_empty() {
+        return None;
+    }
+    let second = rest.split_whitespace().next().unwrap_or("");
+    if SUBCOMMANDS.contains(&second) {
+        return None;
+    }
+    Some(rest)
+}

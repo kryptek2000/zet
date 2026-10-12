@@ -402,12 +402,25 @@ impl App {
 
     /// Auto-route: known first words run instantly; anything else goes
     /// to the model (translate → preview). Empty/assignment-only lines
-    /// run (they're shell business, not language).
+    /// run (they're shell business, not language). `zet` itself always
+    /// runs: real subcommands execute, the wake-word case is peeled off
+    /// earlier by zet_fallback, and anything left is CLI business.
     fn route_direct(&self, line: &str) -> bool {
         match zet_pty::first_word(line) {
             None => true,
-            Some(w) => self.known.contains(&w) || zet_pty::is_shell_word(&w),
+            Some(w) => w == "zet" || self.known.contains(&w) || zet_pty::is_shell_word(&w),
         }
+    }
+
+    /// Specs fail LOUD, not silent: a bad/stale spec notices with the
+    /// reason (spec text + provider names only — never key material)
+    /// instead of dissolving into `(no command)`.
+    fn check_spec(spec: &str) -> Result<(), String> {
+        with_keychains(|chains| {
+            zet_models::keys::resolve_provider(spec, chains)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
     }
 
     /// Kick off an NL-to-command request on a thread; the answer swaps the
@@ -424,6 +437,10 @@ impl App {
                 return false;
             }
         };
+        if let Err(e) = Self::check_spec(&spec) {
+            self.ghost.notify(nl, format!("({e})"));
+            return false;
+        }
         let (tx, rx) = mpsc::channel();
         self.nl_rx = Some(rx);
         std::thread::spawn(move || {
@@ -449,6 +466,12 @@ impl App {
                 return;
             }
         };
+        if let Err(e) = Self::check_spec(&spec) {
+            self.goal_mode = false;
+            self.retitle();
+            self.ghost.notify(goal, format!("({e})"));
+            return;
+        }
         let cwd = shell_cwd(&self.session);
         let in_repo = zet_agent::detect_repo(std::path::Path::new(&cwd));
         let (req_tx, req_rx) = mpsc::channel::<String>();
@@ -553,6 +576,16 @@ impl App {
     }
 }
 
+/// Keychain search order, shared by spec validation and client builds
+/// so the two can never drift apart (env first, OS keychain second).
+fn with_keychains<T>(f: impl FnOnce(&[&dyn zet_models::keys::Keychain]) -> T) -> T {
+    use zet_models::keys::{EnvKeychain, SystemKeychain};
+    let env = EnvKeychain;
+    let sys = SystemKeychain;
+    let chains: [&dyn zet_models::keys::Keychain; 2] = [&env, &sys];
+    f(&chains)
+}
+
 /// Build a concrete (Send) model suggester from a spec string.
 fn build_suggester(
     spec: &str,
@@ -562,12 +595,8 @@ fn build_suggester(
 
 /// Concrete model client for agent turns (Send; built per request).
 fn build_client(spec: &str) -> Option<zet_models::openai::OpenAICompat> {
-    use zet_models::keys::{resolve_provider, EnvKeychain, Keychain, SystemKeychain};
     use zet_models::Provider;
-    let env = EnvKeychain;
-    let sys = SystemKeychain;
-    let chains: [&dyn Keychain; 2] = [&env, &sys];
-    let provider = resolve_provider(spec, &chains).ok()?;
+    let provider = with_keychains(|chains| zet_models::keys::resolve_provider(spec, chains).ok())?;
     let (base_url, api_key, model) = match provider {
         Provider::OpenAICompat {
             base_url,
@@ -753,14 +782,21 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
-                // Modeless routing: known commands run; unknown first
-                // words translate (preview swaps in, never runs blind).
-                // The line stays put when there's no model (notice shown).
+                // Modeless routing: `zet <words>` translates the rest;
+                // known commands run; unknown first words translate
+                // (preview swaps in, never runs blind). The line stays
+                // put when there's no model (notice shown).
                 if is_enter && self.nl_rx.is_none() {
                     let input = self.current_text().unwrap_or_default();
-                    if !input.trim().is_empty() && !self.route_direct(&input) {
-                        self.start_nl_request(input);
-                        return;
+                    if !input.trim().is_empty() {
+                        if let Some(rest) = zet_pty::zet_fallback(&input) {
+                            self.start_nl_request(rest);
+                            return;
+                        }
+                        if !self.route_direct(&input) {
+                            self.start_nl_request(input);
+                            return;
+                        }
                     }
                 }
                 // Enter while an NL answer is in flight: wait for it.
