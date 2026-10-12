@@ -23,6 +23,9 @@ pub struct Ghost {
     notice_text: Option<String>,
     shown: Option<String>,
     can_tab: bool,
+    /// Did-you-mean offer: a full corrected line, shown on the empty
+    /// prompt, Tab-takes it. Previews, never runs by itself.
+    preview_text: Option<String>,
 }
 
 impl Ghost {
@@ -36,6 +39,7 @@ impl Ghost {
             notice_text: None,
             shown: None,
             can_tab: false,
+            preview_text: None,
         }
     }
 
@@ -57,7 +61,19 @@ impl Ghost {
         }
         self.notice_for = None;
         self.notice_text = None;
-        if inp.text.is_empty() || self.dismissed.as_deref() == Some(&inp.text) {
+        // Did-you-mean preview: shown on the empty prompt only; any
+        // typing supersedes it (history takes over from here).
+        if inp.text.is_empty() {
+            if let Some(p) = &self.preview_text {
+                self.shown = Some(p.clone());
+                self.can_tab = true;
+            } else {
+                self.shown = None;
+            }
+            return;
+        }
+        self.preview_text = None;
+        if self.dismissed.as_deref() == Some(&inp.text) {
             self.shown = None;
             return;
         }
@@ -111,17 +127,30 @@ impl Ghost {
         }
         let suffix = self.shown.take()?;
         self.dismissed = None;
+        self.preview_text = None;
         self.can_tab = false;
         Some(suffix)
     }
 
-    /// Full reset: clears ghost, dismissal, and notices. NL toggle and
-    /// line-accept use this (fresh context, re-suggest freely).
+    /// Offer a full corrected line (did-you-mean): shown dimmed on the
+    /// empty prompt, Tab-takes it, Esc or typing clears it.
+    pub fn preview(&mut self, full: String) {
+        if full.trim().is_empty() {
+            return;
+        }
+        self.preview_text = Some(full.clone());
+        self.shown = Some(full);
+        self.can_tab = true;
+    }
+
+    /// Full reset: clears ghost, dismissal, notices, and fix previews.
+    /// NL toggle and line-accept use this (fresh context, re-suggest freely).
     pub fn reset(&mut self) {
         self.shown = None;
         self.dismissed = None;
         self.notice_for = None;
         self.notice_text = None;
+        self.preview_text = None;
         self.can_tab = false;
     }
 
@@ -131,11 +160,12 @@ impl Ghost {
         self.dismissed = Some(self.last_prefix.clone());
     }
 
-    /// Esc: clears ghost/notice. True = something was showing (swallow
-    /// the key); false = pass through to the shell.
+    /// Esc: clears ghost/notice/preview. True = something was showing
+    /// (swallow the key); false = pass through to the shell.
     pub fn cancel(&mut self) -> bool {
         let active = self.shown.is_some();
         self.shown = None;
+        self.preview_text = None;
         if active {
             self.dismissed = Some(self.last_prefix.clone());
             self.notice_for = None;

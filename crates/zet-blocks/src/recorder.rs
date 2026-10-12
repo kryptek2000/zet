@@ -24,6 +24,9 @@ pub struct Recorder {
     /// Shell-reported command names (133;X markers), drained by the
     /// window into its KnownCommands set.
     cmd_names: Vec<String>,
+    /// Last nonzero-exit block (command, cwd, output, exit), drained by
+    /// the window for did-you-mean offers. Preview fuel only.
+    last_failed: Option<(String, String, String, i32)>,
 }
 
 impl Recorder {
@@ -35,12 +38,18 @@ impl Recorder {
             pending: None,
             t0: None,
             cmd_names: Vec::new(),
+            last_failed: None,
         }
     }
 
     /// Shell-reported names since the last call (aliases/functions).
     pub fn drain_cmd_names(&mut self) -> Vec<String> {
         std::mem::take(&mut self.cmd_names)
+    }
+
+    /// Last failed block since the last call, for fix-it offers.
+    pub fn drain_failed(&mut self) -> Option<(String, String, String, i32)> {
+        self.last_failed.take()
     }
 
     pub fn blocks(&self) -> rusqlite::Result<Vec<Block>> {
@@ -174,6 +183,14 @@ impl Recorder {
             cwd: cwd.to_string(),
             duration_ms: t0.elapsed().as_millis() as u64,
         };
+        if done.exit_code != 0 {
+            self.last_failed = Some((
+                block.command.clone(),
+                block.cwd.clone(),
+                block.output.clone(),
+                block.exit_code,
+            ));
+        }
         let _ = self.store.append(&block);
     }
 }

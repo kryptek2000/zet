@@ -163,3 +163,26 @@ fn redacted_suggestions_never_show() {
     assert!(!g.tabbable());
     assert_eq!(g.accept(), None);
 }
+
+#[test]
+fn fix_preview_shows_tabbable_and_clears() {
+    let mut g = Ghost::new(seed(&[]));
+    // Empty prompt: the offer shows and Tabs.
+    g.preview("ls Pictures/".to_string());
+    g.update(input(""));
+    assert_eq!(g.visible(), Some("ls Pictures/"));
+    assert!(g.tabbable());
+    assert_eq!(g.accept(), Some("ls Pictures/".to_string()));
+    // Consumed: next empty update shows nothing.
+    g.update(input(""));
+    assert_eq!(g.visible(), None);
+    // Esc clears the offer.
+    g.preview("git status".to_string());
+    assert!(g.cancel());
+    g.update(input(""));
+    assert_eq!(g.visible(), None);
+    // Typing supersedes the offer (history takes over).
+    g.preview("git status".to_string());
+    g.update(input("g"));
+    assert_eq!(g.visible(), None);
+}

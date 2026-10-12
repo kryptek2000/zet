@@ -26,6 +26,24 @@ fn x_markers_feed_vocab_not_blocks() {
 }
 
 #[test]
+fn failed_blocks_drain_for_fix_offers() {
+    let (mut t, mut rec) = recorder();
+    assert_eq!(rec.drain_failed(), None);
+    feed_pump(
+        &mut t,
+        &mut rec,
+        b"$ \x1b]133;B\x07ls pictures/\x1b]133;C\x07\r\nls: cannot access 'pictures/'\x1b]133;D;2\x07",
+    );
+    let (cmd, cwd, output, exit) = rec.drain_failed().expect("failed block");
+    assert_eq!(cmd, "ls pictures/");
+    assert_eq!(cwd, "/tmp");
+    assert!(output.contains("cannot access"), "{output}");
+    assert_eq!(exit, 2);
+    // Drained once.
+    assert_eq!(rec.drain_failed(), None);
+}
+
+#[test]
 fn records_command_with_output_and_exit() {
     let (mut t, mut rec) = recorder();
     feed_pump(&mut t, &mut rec, b"$ ");

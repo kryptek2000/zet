@@ -66,6 +66,9 @@ struct App {
     selecting: bool,
     mouse_px: Option<(f64, f64)>,
     was_alt: bool,
+    /// Computed fix for the last failure, offered as ghost preview once
+    /// the prompt is fresh. Tab takes it, Esc/typing clears it.
+    pending_fix: Option<String>,
     goal_mode: bool,
     agent_busy: bool,
     agent_rx: Option<Receiver<Option<AgentDone>>>,
@@ -178,6 +181,13 @@ impl App {
             rec.pump(&mut self.term, &shell_cwd(&self.session));
             // Shell-reported aliases/functions feed the router.
             self.known.insert_names(rec.drain_cmd_names());
+            // Failures become did-you-mean offers (preview only).
+            if let Some((cmd, cwd, output, exit)) = rec.drain_failed() {
+                let fix = zet_pty::suggest_fix(&cmd, &cwd, &output, exit, &self.known);
+                if fix.is_some() {
+                    self.pending_fix = fix;
+                }
+            }
         }
         // Alt switch swaps the visible grid: any selection addresses
         // stale rows, so drop it (both directions).
@@ -205,6 +215,7 @@ impl App {
         self.service_exec();
         self.poll_agent_done();
         self.poll_undo_done();
+        self.poll_fix_offer();
         if let Some(code) = self.shell_state.last_exit() {
             if let Some(w) = &self.window {
                 let mode = if self.agent_busy {
@@ -381,6 +392,16 @@ impl App {
         }
         let input = self.prompt_input();
         self.ghost.update(input);
+    }
+
+    /// Offer a pending did-you-mean fix once the prompt is fresh.
+    /// Called every frame: waits for the empty line, then previews.
+    fn poll_fix_offer(&mut self) {
+        if self.pending_fix.is_some() && self.current_text().is_some_and(|t| t.is_empty()) {
+            if let Some(fix) = self.pending_fix.take() {
+                self.ghost.preview(fix);
+            }
+        }
     }
 
     fn current_text(&self) -> Option<String> {
@@ -852,6 +873,7 @@ impl ApplicationHandler for App {
                 if is_esc {
                     let was_pending = self.nl_rx.is_some();
                     let was_goal = self.goal_mode;
+                    let had_fix = self.pending_fix.take().is_some();
                     let swallowed = self.ghost.cancel();
                     if was_pending || was_goal {
                         self.ghost.dismiss_current();
@@ -862,7 +884,7 @@ impl ApplicationHandler for App {
                         self.goal_mode = false;
                         self.retitle();
                     }
-                    if swallowed || was_pending || was_goal {
+                    if swallowed || was_pending || was_goal || had_fix {
                         return;
                     }
                 }
@@ -1095,6 +1117,7 @@ fn main() {
         selecting: false,
         mouse_px: None,
         was_alt: false,
+        pending_fix: None,
         nl_rx: None,
         nl_wake: false,
         goal_mode: false,

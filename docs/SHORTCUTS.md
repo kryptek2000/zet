@@ -46,6 +46,9 @@ Just type — command or plain words — and press `Enter`:
 - Broken replies never swap: `(invalid: …)` / `(no command)` notice instead.
 - Greetings and smalltalk get an `agent: …` reply on the prompt line
   instead of a command — `hello` gets answered, not exit 127.
+- If a command fails on a name, ZET offers the fix as ghost text on the
+  fresh prompt — `pictures/` vs `Pictures/`, `gti` vs `git`. Tab takes
+  it, Enter runs. Ambiguous or far off: silence, never noise.
 - If the model fails, your original line runs untouched — ZET never
   blocks your input; worst case is the shell's own error.
 - Two honest limits: new installs mid-window aren't in the command set

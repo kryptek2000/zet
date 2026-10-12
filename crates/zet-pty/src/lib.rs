@@ -274,6 +274,204 @@ impl KnownCommands {
     pub fn contains(&self, name: &str) -> bool {
         self.set.contains(name)
     }
+
+    /// Closest known name within distance 2, min by (distance, length,
+    /// name). None when nothing is close — silence over noise.
+    pub fn closest(&self, word: &str) -> Option<String> {
+        if word.is_empty() || word.len() > 32 {
+            return None;
+        }
+        let mut best: Option<(usize, String)> = None;
+        for name in &self.set {
+            if name.len().abs_diff(word.len()) > 2 {
+                continue;
+            }
+            let d = levenshtein(word, name);
+            if d == 0 || d > 2 {
+                continue;
+            }
+            let better = match &best {
+                None => true,
+                Some((bd, bn)) => d < *bd || (d == *bd && (name.len(), name) < (bn.len(), bn)),
+            };
+            if better {
+                best = Some((d, name.clone()));
+            }
+        }
+        best.map(|(_, n)| n)
+    }
+}
+
+/// Edit distance over chars. Small words only in practice; plain DP.
+pub fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, &ca) in a.iter().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            let old = row[j + 1];
+            row[j + 1] = (old + 1).min(row[j] + 1).min(prev + cost);
+            prev = old;
+        }
+    }
+    row[b.len()]
+}
+
+/// Path the shell complained about: first quoted '…'/"…" on a
+/// no-such-file line, else a pathy bare token before the complaint.
+pub fn extract_missing_path(output: &str) -> Option<String> {
+    for line in output.lines() {
+        let low = line.to_lowercase();
+        if !(low.contains("no such file or directory") || low.contains("cannot access")) {
+            continue;
+        }
+        for q in ['\'', '"'] {
+            if let Some(a) = line.find(q) {
+                if let Some(b) = line[a + 1..].find(q) {
+                    let s = line[a + 1..a + 1 + b].trim();
+                    if !s.is_empty() {
+                        return Some(s.to_string());
+                    }
+                }
+            }
+        }
+        // Bare `path: No such…` (unquoted tools): token before the colon
+        // that looks like a path.
+        if let Some(idx) = low.find("no such file") {
+            let before = &line[..idx];
+            if let Some(tok) = before
+                .split_whitespace()
+                .rev()
+                .find_map(|w| w.strip_suffix(':'))
+            {
+                if tok.contains('/') || tok.contains('.') {
+                    return Some(tok.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Case-correct `candidate` against `cwd` (or absolute): exactly one
+/// case-insensitive match renames, else None (missing or ambiguous).
+/// Exact hits need no fix (failure was something else) → None.
+pub fn fix_path_case(cwd: &str, candidate: &str) -> Option<String> {
+    let cand = candidate.trim();
+    if cand.is_empty() {
+        return None;
+    }
+    let trailing_slash = cand.ends_with('/');
+    let (dir_part, file_part): (&str, &str) = match cand.trim_end_matches('/').rsplit_once('/') {
+        Some((d, f)) => (d, f),
+        None => ("", cand.trim_end_matches('/')),
+    };
+    if file_part.is_empty() || file_part == "." || file_part == ".." {
+        return None;
+    }
+    // Home expansion is shell business: skip ~ paths.
+    if dir_part == "~" || dir_part.starts_with("~/") {
+        return None;
+    }
+    let base = if dir_part.is_empty() {
+        std::path::PathBuf::from(cwd)
+    } else if cand.starts_with('/') {
+        std::path::PathBuf::from(dir_part)
+    } else {
+        std::path::Path::new(cwd).join(dir_part)
+    };
+    if base.join(file_part).exists() {
+        return None;
+    }
+    let entries = std::fs::read_dir(&base).ok()?;
+    let want = file_part.to_lowercase();
+    let mut hits = Vec::new();
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.to_lowercase() == want {
+            hits.push(name);
+        }
+    }
+    if hits.len() != 1 {
+        return None;
+    }
+    let fixed = hits.pop().unwrap();
+    let mut out = if dir_part.is_empty() {
+        fixed
+    } else {
+        format!("{dir_part}/{fixed}")
+    };
+    if trailing_slash {
+        out.push('/');
+    }
+    Some(out)
+}
+
+/// Corrected command for common failures, else None. 127 + unknown
+/// word → closest known command; other nonzero exits + file-not-found
+/// output → case fix. Preview-only fuel: the window offers, never runs.
+pub fn suggest_fix(
+    command: &str,
+    cwd: &str,
+    output: &str,
+    exit_code: i32,
+    known: &KnownCommands,
+) -> Option<String> {
+    if command.trim().is_empty() {
+        return None;
+    }
+    if exit_code == 127 {
+        let (word, at) = first_word_at(command)?;
+        if known.contains(&word) || is_shell_word(&word) || word == "zet" {
+            return None;
+        }
+        let fix = known.closest(&word)?;
+        let mut out = command.to_string();
+        out.replace_range(at..at + word.len(), &fix);
+        return Some(out);
+    }
+    if exit_code == 0 {
+        return None;
+    }
+    let cand = extract_missing_path(output)?;
+    let fixed = fix_path_case(cwd, &cand)?;
+    let idx = command.find(&cand)?;
+    let mut out = command.to_string();
+    out.replace_range(idx..idx + cand.len(), &fixed);
+    Some(out)
+}
+
+/// First word plus its byte offset (past assignments/quotes).
+fn first_word_at(line: &str) -> Option<(String, usize)> {
+    let base = line.len() - line.trim_start().len();
+    let mut text = &line[base..];
+    let mut at = base;
+    loop {
+        let t = text.trim_start();
+        at += text.len() - t.len();
+        text = t;
+        if text.is_empty() {
+            return None;
+        }
+        if let Some(rest) = text.strip_prefix('"').or_else(|| text.strip_prefix('\'')) {
+            let quote = text.chars().next().unwrap();
+            let end = rest.find(quote)?;
+            return Some((rest[..end].to_string(), at + 1));
+        }
+        let tok = text.split_whitespace().next()?;
+        if let Some(eq) = tok.find('=') {
+            let name = &tok[..eq];
+            if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                at += tok.len();
+                text = &text[tok.len()..];
+                continue;
+            }
+        }
+        return Some((tok.to_string(), at));
+    }
 }
 
 /// `zet` as a wake word: `zet <real subcommand>` runs the CLI, but
