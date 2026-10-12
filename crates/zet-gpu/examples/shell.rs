@@ -9,7 +9,7 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::Window;
-use zet_gpu::input::{is_agent_toggle, is_copy, is_paste, paste_bytes, translate};
+use zet_gpu::input::{is_agent_toggle, is_copy, is_paste, translate};
 use zet_gpu::selection::{pix_to_cell, Selection};
 use zet_gpu::Renderer;
 use zet_pty::shell::ShellState;
@@ -829,7 +829,10 @@ impl ApplicationHandler for App {
                     if let Ok(mut clip) = arboard::Clipboard::new() {
                         if let Ok(text) = clip.get_text() {
                             if let Some(s) = &mut self.session {
-                                let _ = s.write_all(&paste_bytes(&text));
+                                let _ = s.write_all(&zet_gpu::input::paste_wrapped(
+                                    &text,
+                                    self.term.bracketed_paste(),
+                                ));
                             }
                         }
                     }

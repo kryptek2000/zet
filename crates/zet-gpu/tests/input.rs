@@ -126,3 +126,16 @@ fn ctrl_g_toggles_agent_not_bell() {
         &ctrl()
     ));
 }
+
+#[test]
+fn bracketed_wrap_keeps_newlines_literal() {
+    use zet_gpu::input::paste_wrapped;
+    // Bracketed: newlines become CR inside the 200~/201~ envelope so
+    // readline inserts instead of executing.
+    assert_eq!(
+        paste_wrapped("a\nb\r\nc", true),
+        b"\x1b[200~a\rb\rc\x1b[201~".to_vec()
+    );
+    // Unset: legacy raw CRs (shell executes).
+    assert_eq!(paste_wrapped("a\nb", false), b"a\rb".to_vec());
+}

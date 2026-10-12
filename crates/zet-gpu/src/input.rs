@@ -27,6 +27,20 @@ pub fn paste_bytes(text: &str) -> Vec<u8> {
     text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
 }
 
+/// Paste bytes honoring bracketed-paste mode: when the hosted app set
+/// DECSET 2004, wrap in 200~/201~ with newlines as CR so readline
+/// inserts the paste literally instead of executing each line.
+pub fn paste_wrapped(text: &str, bracketed: bool) -> Vec<u8> {
+    if !bracketed {
+        return paste_bytes(text);
+    }
+    let mut out = Vec::with_capacity(text.len() + 12);
+    out.extend_from_slice(b"\x1b[200~");
+    out.extend_from_slice(text.replace("\r\n", "\r").replace('\n', "\r").as_bytes());
+    out.extend_from_slice(b"\x1b[201~");
+    out
+}
+
 /// True when this press copies the mouse selection (Ctrl+Shift+C),
 /// not text to type. Check before [`translate`]: with Ctrl held, C would
 /// otherwise become ETX (0x03) — SIGINT, the opposite of copying.

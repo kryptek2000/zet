@@ -488,3 +488,13 @@ fn output_keeps_view_stable_while_scrolled() {
     // Same content stays in view (offset grew with history).
     assert_eq!(t.visible_line_text(0), shown);
 }
+
+#[test]
+fn bracketed_paste_mode_tracks_decset() {
+    let mut t = Terminal::new(10, 5);
+    assert!(!t.bracketed_paste());
+    t.feed(b"\x1b[?2004h");
+    assert!(t.bracketed_paste());
+    t.feed(b"\x1b[?2004l");
+    assert!(!t.bracketed_paste());
+}

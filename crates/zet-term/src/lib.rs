@@ -135,6 +135,10 @@ pub struct Terminal {
     alt_active: bool,
     scroll_top: usize,
     scroll_bottom: usize,
+    /// DECSET 2004: the hosted app (bash/readline) wraps pastes in
+    /// 200~/201~ so newlines insert instead of executing. The window
+    /// must honor it on every text-insertion path.
+    bracketed_paste: bool,
     pen: Pen,
     state: State,
     osc_buf: Vec<u8>,
@@ -168,6 +172,7 @@ impl Terminal {
             alt_active: false,
             scroll_top: 0,
             scroll_bottom: rows - 1,
+            bracketed_paste: false,
             pen: Pen {
                 fg: Color::Default,
                 bg: Color::Default,
@@ -438,6 +443,9 @@ impl Terminal {
                     if p == 7 {
                         self.autowrap = show;
                     }
+                    if p == 2004 {
+                        self.bracketed_paste = show;
+                    }
                 }
                 for &p in params {
                     match (p, show) {
@@ -684,6 +692,12 @@ impl Terminal {
             .get(y)
             .map(|row| row.iter().map(|c| c.c).collect())
             .unwrap_or_default()
+    }
+
+    /// DECSET 2004 state: when the hosted app set it, pastes must be
+    /// wrapped in 200~/201~ so newlines insert instead of executing.
+    pub fn bracketed_paste(&self) -> bool {
+        self.bracketed_paste
     }
 
     pub fn scrollback_len(&self) -> usize {
