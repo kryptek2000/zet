@@ -280,8 +280,13 @@ impl KnownCommands {
 /// `zet <plain words>` translates the rest (`zet whats the command…`
 /// must not usage-error). None = run it (known subcommand, bare `zet`,
 /// or not a `zet` line at all).
+///
+/// Canonical CLI group list — the CLI dispatch (zet/src/main.rs) and
+/// this fallback share it. Adding a group? Add the match arm AND this
+/// list, or the window mistranslates the new command.
+pub const CLI_SUBCOMMANDS: &[&str] = &["auth", "blocks", "journal", "inline", "models"];
+
 pub fn zet_fallback(line: &str) -> Option<String> {
-    const SUBCOMMANDS: &[&str] = &["auth", "blocks", "journal", "inline"];
     let rest = line.trim_start().strip_prefix("zet")?;
     // `zet` glued to more word chars (zeta, zetup) is not us.
     if let Some(c) = rest.chars().next() {
@@ -294,7 +299,7 @@ pub fn zet_fallback(line: &str) -> Option<String> {
         return None;
     }
     let second = rest.split_whitespace().next().unwrap_or("");
-    if SUBCOMMANDS.contains(&second) {
+    if CLI_SUBCOMMANDS.contains(&second) {
         return None;
     }
     Some(rest)

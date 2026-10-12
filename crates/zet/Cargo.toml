@@ -8,6 +8,7 @@ license.workspace = true
 zet-agent = { path = "../zet-agent" }
 zet-models = { path = "../zet-models" }
 zet-blocks = { path = "../zet-blocks" }
+zet-pty = { path = "../zet-pty" }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["term", "signal", "fs"] }

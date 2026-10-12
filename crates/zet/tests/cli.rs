@@ -145,3 +145,19 @@ fn models_bad_args_fail_loudly_without_network() {
         assert_eq!(out.status.code(), Some(2), "{args:?}");
     }
 }
+
+#[test]
+fn every_cli_group_dispatches() {
+    // The shared list (fallback router + dispatch guard) must agree
+    // with the match arms: bogus flags exit 2 through dispatch, never
+    // top-level usage, never success, never panic.
+    for group in zet_pty::CLI_SUBCOMMANDS {
+        let out = zet().args([group, "--definitely-bogus"]).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{group}");
+    }
+    // Bare known group hits the guard hint, not top-level usage.
+    let out = zet().args(["auth"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("bad usage for `zet auth`"), "{err}");
+}

@@ -15,6 +15,13 @@ fn main() {
         ["models", rest @ ..] => models_cmd(rest),
         ["blocks", rest @ ..] => blocks(rest),
         ["journal", rest @ ..] => journal(rest),
+        // Known group, bad usage: hint the group, not the top level.
+        // (Guarded by the shared list so dispatch and the window router
+        // can't drift apart — see zet_pty::CLI_SUBCOMMANDS.)
+        [sub, ..] if zet_pty::CLI_SUBCOMMANDS.contains(sub) => {
+            eprintln!("bad usage for `zet {sub}`");
+            std::process::exit(2);
+        }
         _ => {
             eprintln!("usage:");
             eprintln!("  zet auth show             list providers and key status");

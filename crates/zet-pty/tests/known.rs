@@ -86,6 +86,7 @@ fn zet_wake_word_translates_non_subcommands() {
     assert_eq!(zet_fallback("zet auth show"), None);
     assert_eq!(zet_fallback("zet blocks"), None);
     assert_eq!(zet_fallback("zet inline"), None);
+    assert_eq!(zet_fallback("zet models --free"), None);
     assert_eq!(zet_fallback("zet"), None);
     assert_eq!(zet_fallback("zet   "), None);
     // Glued words are other commands.
@@ -99,4 +100,14 @@ fn zet_wake_word_translates_non_subcommands() {
     assert_eq!(zet_fallback("zet hello"), Some("hello".to_string()));
     // CLI typos translate too (the model usually repairs them).
     assert_eq!(zet_fallback("zet blokcs"), Some("blokcs".to_string()));
+}
+
+#[test]
+fn fallback_covers_every_cli_group() {
+    // The window must never translate a real subcommand: every shared
+    // group routes to run (None), with any trailing args.
+    for group in zet_pty::CLI_SUBCOMMANDS {
+        let line = format!("zet {group} --free");
+        assert_eq!(zet_pty::zet_fallback(&line), None, "{line}");
+    }
 }
