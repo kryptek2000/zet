@@ -71,3 +71,23 @@ fn alt_screen_addresses_visible_grid() {
     let want: String = t.scrollback_line(0).unwrap().chars().take(5).collect();
     assert_eq!(s.text(&t), want.trim_end());
 }
+
+#[test]
+fn select_all_covers_scrollback_and_grid() {
+    let mut t = Terminal::new(20, 3);
+    t.feed(b"old line\r\n");
+    t.feed(b"hello world\r\nsecond line");
+    let total = t.scrollback_len() + 3;
+    let s = Selection::all(20, total);
+    assert!(!s.is_empty());
+    let text = s.text(&t);
+    assert!(text.contains("old line"), "{text}");
+    assert!(text.contains("hello world"), "{text}");
+    assert!(text.contains("second line"), "{text}");
+}
+
+#[test]
+fn select_all_empty_when_nothing_there() {
+    assert!(Selection::all(20, 0).is_empty());
+    assert!(Selection::all(0, 5).is_empty());
+}

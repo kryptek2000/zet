@@ -36,6 +36,15 @@ impl Selection {
         self.anchor == self.active
     }
 
+    /// Whole buffer (scrollback + grid): anchor top-left, active at the
+    /// last cell. Empty when there is nothing to select.
+    pub fn all(cols: usize, abs_rows: usize) -> Self {
+        if cols == 0 || abs_rows == 0 {
+            return Selection::new((0, 0), (0, 0));
+        }
+        Selection::new((0, 0), (cols - 1, abs_rows - 1))
+    }
+
     /// Row-major order: (start, end).
     pub fn normalized(&self) -> (CellPos, CellPos) {
         if (self.active.row, self.active.col) < (self.anchor.row, self.anchor.col) {

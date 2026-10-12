@@ -139,3 +139,26 @@ fn bracketed_wrap_keeps_newlines_literal() {
     // Unset: legacy raw CRs (shell executes).
     assert_eq!(paste_wrapped("a\nb", false), b"a\rb".to_vec());
 }
+
+#[test]
+fn select_all_chord_is_detected_not_typed() {
+    use zet_gpu::input::is_select_all;
+    // Ctrl+Shift+A selects all; bare Ctrl+A stays readline, plain A types.
+    assert!(is_select_all(
+        &Key::Character("A".into()),
+        true,
+        &ctrl_shift()
+    ));
+    assert!(is_select_all(
+        &Key::Character("a".into()),
+        true,
+        &ctrl_shift()
+    ));
+    assert!(!is_select_all(&Key::Character("a".into()), true, &ctrl()));
+    assert!(!is_select_all(&Key::Character("a".into()), true, &plain()));
+    assert!(!is_select_all(
+        &Key::Character("A".into()),
+        false,
+        &ctrl_shift()
+    ));
+}

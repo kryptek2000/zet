@@ -53,6 +53,17 @@ pub fn is_copy(logical: &Key, pressed: bool, mods: &ModifiersState) -> bool {
     matches!(logical, Key::Character(s) if ctrl && shift && s.eq_ignore_ascii_case("c"))
 }
 
+/// True when this press selects all terminal text (Ctrl+Shift+A).
+/// Bare Ctrl+A stays readline's line-start; plain A types.
+pub fn is_select_all(logical: &Key, pressed: bool, mods: &ModifiersState) -> bool {
+    if !pressed {
+        return false;
+    }
+    let ctrl = mods.contains(ModifiersState::CONTROL);
+    let shift = mods.contains(ModifiersState::SHIFT);
+    matches!(logical, Key::Character(s) if ctrl && shift && s.eq_ignore_ascii_case("a"))
+}
+
 /// True when this press toggles agent goal mode (Ctrl+G). Check before
 /// [`translate`]: Ctrl+G would otherwise become a BEL byte (0x07).
 pub fn is_agent_toggle(logical: &Key, pressed: bool, mods: &ModifiersState) -> bool {

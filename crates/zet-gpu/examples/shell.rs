@@ -9,7 +9,7 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::Window;
-use zet_gpu::input::{is_agent_toggle, is_copy, is_paste, translate};
+use zet_gpu::input::{is_agent_toggle, is_copy, is_paste, is_select_all, translate};
 use zet_gpu::selection::{pix_to_cell, Selection};
 use zet_gpu::Renderer;
 use zet_pty::shell::ShellState;
@@ -460,6 +460,21 @@ impl App {
         }
     }
 
+    /// Highlight the whole buffer (scrollback + grid) for copying.
+    /// Follow with Ctrl+Shift+C or right-click to copy it.
+    fn select_all(&mut self) {
+        // Alt screen owns its grid: no scrollback above it.
+        let total = if self.term.alt_active() {
+            self.rows
+        } else {
+            self.term.scrollback_len() + self.rows
+        };
+        let sel = Selection::all(self.cols, total);
+        self.selection = if sel.is_empty() { None } else { Some(sel) };
+        self.selecting = false;
+        self.needs_draw = true;
+    }
+
     fn prompt_input(&self) -> Option<zet_suggest::PromptInput> {
         let (text, col, abs) = self
             .recorder
@@ -824,6 +839,11 @@ impl ApplicationHandler for App {
                         self.copy_selection();
                         return;
                     }
+                    // Select-all is local grid reading: safe while busy.
+                    if is_select_all(&event.logical_key, pressed, &self.mods) {
+                        self.select_all();
+                        return;
+                    }
                     if let Some(bytes) = translate(
                         &event.logical_key,
                         event.text.as_deref(),
@@ -855,6 +875,12 @@ impl ApplicationHandler for App {
                 // Copy: Ctrl+Shift+C copies the mouse selection (never ETX).
                 if is_copy(&event.logical_key, pressed, &self.mods) {
                     self.copy_selection();
+                    return;
+                }
+                // Select all: Ctrl+Shift+A highlights scrollback + grid.
+                // (Bare Ctrl+A stays readline's line-start.)
+                if is_select_all(&event.logical_key, pressed, &self.mods) {
+                    self.select_all();
                     return;
                 }
                 // Agent goal mode toggle: Ctrl+G would otherwise type BEL.
