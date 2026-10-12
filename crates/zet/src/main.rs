@@ -17,6 +17,7 @@ fn main() {
         ["models", rest @ ..] => models_cmd(rest),
         ["blocks", rest @ ..] => blocks(rest),
         ["journal", rest @ ..] => journal(rest),
+        ["undo"] => undo(),
         // Known group, bad usage: hint the group, not the top level.
         // (Guarded by the shared list so dispatch and the window router
         // can't drift apart — see zet_pty::CLI_SUBCOMMANDS.)
@@ -36,6 +37,7 @@ fn main() {
             eprintln!("  zet blocks [--db PATH] [--limit N] [--session S]");
             eprintln!("                            list recorded command blocks");
             eprintln!("  zet journal [--limit N]   agent turns + recent commands (one history)");
+            eprintln!("  zet undo                  undo the last checkpointed agent step here");
             std::process::exit(2);
         }
     }
@@ -417,6 +419,28 @@ fn blocks(argv: &[&str]) {
         );
         for line in b.output.lines() {
             println!("  {line}");
+        }
+    }
+}
+
+/// One-key undo behind `zet undo`: the last checkpointed agent step,
+/// applied to the current directory. The window's F12 is the same call
+/// on the live shell — this is its backdoor when the key never arrives.
+fn undo() {
+    let entries = zet_agent::read_journal(&zet_agent::journal_path_default()).unwrap_or_else(|e| {
+        eprintln!("cannot read journal: {e}");
+        std::process::exit(1);
+    });
+    let Some(cp) = entries.iter().rev().find_map(|e| e.checkpoint.clone()) else {
+        println!("nothing to undo");
+        return;
+    };
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    match zet_agent::undo_checkpoint(&cwd, &Some(cp)) {
+        Ok(()) => println!("undone"),
+        Err(e) => {
+            eprintln!("undo failed: {e}");
+            std::process::exit(1);
         }
     }
 }

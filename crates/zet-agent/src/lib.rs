@@ -341,6 +341,10 @@ pub fn undo_checkpoint(workdir: &Path, cp: &Option<Checkpoint>) -> Result<(), Un
     let Some(cp) = cp else {
         return Ok(());
     };
+    let now = git(workdir, &["rev-parse", "HEAD"])?;
+    if now.trim() != cp.head {
+        return Err(UndoError::MovedOn(cp.head.clone(), now.trim().to_string()));
+    }
     git(workdir, &["reset", "--hard", "--quiet", &cp.head])?;
     git(workdir, &["clean", "-fd", "--quiet"])?;
     if let Some(message) = &cp.stash {
@@ -361,14 +365,18 @@ pub fn undo_checkpoint(workdir: &Path, cp: &Option<Checkpoint>) -> Result<(), Un
 /// + `clean -fd` scoped to the workdir.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Checkpoint {
-    head: String,
-    stash: Option<String>,
+    pub head: String,
+    pub stash: Option<String>,
 }
 
 #[derive(Debug)]
 pub enum UndoError {
     Git(String),
     NotFound(String),
+    /// HEAD moved past the checkpoint (commits landed since): reset
+    /// would revert them, so undo refuses. Fields: checkpoint head,
+    /// current head.
+    MovedOn(String, String),
 }
 
 impl std::fmt::Display for UndoError {
@@ -376,6 +384,12 @@ impl std::fmt::Display for UndoError {
         match self {
             UndoError::Git(e) => write!(f, "git: {e}"),
             UndoError::NotFound(e) => write!(f, "checkpoint not found: {e}"),
+            UndoError::MovedOn(expected, found) => write!(
+                f,
+                "HEAD moved on since the checkpoint ({} vs {}): undo would revert later commits, refusing",
+                &expected[..expected.len().min(8)],
+                &found[..found.len().min(8)],
+            ),
         }
     }
 }

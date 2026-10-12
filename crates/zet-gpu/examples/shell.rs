@@ -856,10 +856,14 @@ impl ApplicationHandler for App {
                 // (While busy the early gate above already swallowed this.)
                 // Runs on a thread: git in a giant repo must not hitch frames.
                 if pressed && matches!(&event.logical_key, Key::Named(NamedKey::F12)) {
+                    let input = self.current_text().unwrap_or_default();
                     if self.undo_rx.is_some() {
+                        // Never swallow silently: a stuck undo used to eat
+                        // every later F12 with zero feedback.
+                        self.ghost
+                            .notify(input, "(undo already running)".to_string());
                         return;
                     }
-                    let input = self.current_text().unwrap_or_default();
                     let cp = self
                         .last_journal
                         .iter()

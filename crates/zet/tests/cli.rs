@@ -237,3 +237,133 @@ fn journal_without_turns_still_shows_commands() {
     assert!(text.contains("no agent turns recorded"), "{text}");
     assert!(text.contains("mkdir new_folder"), "{text}");
 }
+
+#[test]
+fn undo_without_checkpoint_says_so() {
+    let home = temp_home("undo_empty");
+    let out = zet().env("HOME", &home).args(["undo"]).output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("nothing to undo"), "{text}");
+}
+
+#[test]
+fn undo_restores_repo_from_journal_checkpoint() {
+    let home = temp_home("undo_repo");
+    let repo = home.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let st = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(st.status.success(), "{args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "user.name", "t"]);
+    std::fs::write(repo.join("keep.txt"), "keep").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "base"]);
+    let head = String::from_utf8_lossy(
+        &std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .trim()
+    .to_string();
+    // The "agent step": junk appears after the checkpoint.
+    zet_agent::append_journal(
+        &home.join(".zet").join("journal.jsonl"),
+        &[zet_agent::JournalEntry {
+            command: "echo junk > junk.txt".to_string(),
+            tier: zet_policy::Tier::T1,
+            approval: zet_policy::Approval::Ask,
+            approved: true,
+            executed: true,
+            exit_code: Some(0),
+            output: "out".to_string(),
+            checkpoint: Some(zet_agent::Checkpoint { head, stash: None }),
+        }],
+    )
+    .unwrap();
+    std::fs::write(repo.join("junk.txt"), "junk").unwrap();
+    let out = zet()
+        .env("HOME", &home)
+        .current_dir(&repo)
+        .args(["undo"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{:?}", out.status);
+    assert!(!repo.join("junk.txt").exists(), "junk survived undo");
+    assert!(repo.join("keep.txt").exists(), "keep lost in undo");
+}
+
+#[test]
+fn undo_refuses_when_head_moved_on() {
+    let home = temp_home("undo_moved");
+    let repo = home.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let st = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(st.status.success(), "{args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "user.name", "t"]);
+    std::fs::write(repo.join("keep.txt"), "keep").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "base"]);
+    let head = String::from_utf8_lossy(
+        &std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .trim()
+    .to_string();
+    zet_agent::append_journal(
+        &home.join(".zet").join("journal.jsonl"),
+        &[zet_agent::JournalEntry {
+            command: "echo junk > junk.txt".to_string(),
+            tier: zet_policy::Tier::T1,
+            approval: zet_policy::Approval::Ask,
+            approved: true,
+            executed: true,
+            exit_code: Some(0),
+            output: "out".to_string(),
+            checkpoint: Some(zet_agent::Checkpoint { head, stash: None }),
+        }],
+    )
+    .unwrap();
+    // Life went on: a commit landed after the checkpoint. Undo must
+    // refuse rather than revert it.
+    std::fs::write(repo.join("later.txt"), "later").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "later"]);
+    std::fs::write(repo.join("junk.txt"), "junk").unwrap();
+    let out = zet()
+        .env("HOME", &home)
+        .current_dir(&repo)
+        .args(["undo"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "undo reverted a later commit");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("moved on"), "{err}");
+    assert!(repo.join("later.txt").exists(), "later commit lost");
+    assert!(
+        repo.join("junk.txt").exists(),
+        "junk should survive refusal"
+    );
+}
