@@ -123,6 +123,11 @@ pub struct Terminal {
     cy: usize,
     cursor_visible: bool,
     saved_cursor: (usize, usize),
+    /// DECAWM (?7): wrap long lines. Pending wrap: the cursor sits on
+    /// the last column after an exact-fit line until the next input
+    /// resolves it (printable wraps, movement cancels).
+    autowrap: bool,
+    pending_wrap: bool,
     alt_grid: Vec<Vec<Cell>>,
     alt_active: bool,
     scroll_top: usize,
@@ -153,6 +158,8 @@ impl Terminal {
             cy: 0,
             cursor_visible: true,
             saved_cursor: (0, 0),
+            autowrap: true,
+            pending_wrap: false,
             alt_grid: Vec::new(),
             alt_active: false,
             scroll_top: 0,
@@ -232,21 +239,26 @@ impl Terminal {
 
     fn ground(&mut self, b: u8) {
         if b == b'\n' {
+            self.pending_wrap = false;
             self.linefeed();
             self.cx = 0;
         } else if b == b'\r' {
+            self.pending_wrap = false;
             self.cx = 0;
         } else if b == 0x1b {
             self.state = State::Escape;
         } else if b == 0x08 {
+            self.pending_wrap = false;
             self.cx = self.cx.saturating_sub(1);
         } else if b == b'\t' {
+            self.pending_wrap = false;
             self.cx = ((self.cx / 8) + 1) * 8;
             if self.cx >= self.cols {
                 self.cx = 0;
                 self.linefeed();
             }
         } else if b == 0x0b || b == 0x0c {
+            self.pending_wrap = false;
             self.linefeed();
             self.cx = 0;
         } else {
@@ -405,6 +417,12 @@ impl Terminal {
     }
 
     fn dispatch_csi(&mut self, final_byte: u8, params: &[u16], private: Option<u8>) {
+        // Cursor-moving finals cancel a pending wrap (VT behavior).
+        match final_byte {
+            b'H' | b'f' | b'A' | b'B' | b'C' | b'D' | b'E' | b'M' | b's' | b'u' | b'J' | b'K'
+            | b'L' => self.pending_wrap = false,
+            _ => {}
+        }
         match final_byte {
             b'm' => self.pen.sgr(params),
             b'h' | b'l' if private == Some(b'?') => {
@@ -412,6 +430,9 @@ impl Terminal {
                 for &p in params {
                     if p == 25 {
                         self.cursor_visible = show;
+                    }
+                    if p == 7 {
+                        self.autowrap = show;
                     }
                 }
                 for &p in params {
@@ -497,6 +518,12 @@ impl Terminal {
     }
 
     fn put(&mut self, c: char) {
+        // Pending wrap resolves on the next printable: down a row first.
+        if self.pending_wrap {
+            self.pending_wrap = false;
+            self.cx = 0;
+            self.linefeed();
+        }
         self.grid[self.cy][self.cx] = Cell {
             c,
             fg: self.pen.fg,
@@ -505,8 +532,13 @@ impl Terminal {
         };
         self.cx += 1;
         if self.cx >= self.cols {
-            self.cx = 0;
-            self.linefeed();
+            // Last column: with autowrap the wrap waits for the next
+            // printable (cursor stays put); without it, later chars
+            // overwrite the last cell.
+            self.cx = self.cols - 1;
+            if self.autowrap {
+                self.pending_wrap = true;
+            }
         }
     }
 

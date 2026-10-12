@@ -1,6 +1,70 @@
 use zet_term::{Color, Event, Terminal};
 
 #[test]
+fn autowrap_splits_long_lines() {
+    let mut t = Terminal::new(10, 5);
+    t.feed(b"0123456789ABCDE");
+    assert_eq!(t.line_text(0), "0123456789");
+    assert_eq!(t.line_text(1).trim_end(), "ABCDE");
+    assert_eq!(t.cursor(), (5, 1));
+}
+
+#[test]
+fn exact_fit_leaves_cursor_on_last_cell_until_next_char() {
+    // Pending wrap: the classic VT state. Cursor stays put; apps
+    // querying position see the last column, not the next row.
+    let mut t = Terminal::new(10, 5);
+    t.feed(b"0123456789");
+    assert_eq!(t.cursor(), (9, 0));
+    assert_eq!(t.line_text(1).trim_end(), "");
+    t.feed(b"X");
+    assert_eq!(t.cursor(), (1, 1));
+    assert_eq!(t.line_text(1).chars().next(), Some('X'));
+}
+
+#[test]
+fn pending_wrap_plus_linefeed_does_not_skip_a_row() {
+    let mut t = Terminal::new(10, 5);
+    t.feed(b"0123456789\nABC");
+    assert_eq!(t.line_text(0), "0123456789");
+    assert_eq!(t.line_text(1).trim_end(), "ABC");
+    assert_eq!(t.cursor(), (3, 1));
+}
+
+#[test]
+fn backspace_after_exact_fit_cancels_pending_wrap() {
+    let mut t = Terminal::new(10, 5);
+    t.feed(b"0123456789");
+    t.feed(b"\x08"); // BS: wrap cancelled, cursor left to col 8
+    t.feed(b"Z");
+    assert_eq!(t.line_text(0), "01234567Z9");
+    assert_eq!(t.cursor(), (9, 0));
+}
+
+#[test]
+fn decawm_off_overwrites_last_column() {
+    let mut t = Terminal::new(10, 5);
+    t.feed(b"\x1b[?7l");
+    t.feed(b"0123456789ABCDE");
+    assert_eq!(t.line_text(0), "012345678E");
+    assert_eq!(t.cursor(), (9, 0));
+    // And back on wraps again (F overwrote col 9 above; G wraps fresh).
+    t.feed(b"\x1b[?7h");
+    t.feed(b"FG");
+    assert_eq!(t.line_text(0).chars().last(), Some('F'));
+    assert_eq!(t.line_text(1).trim_end(), "G");
+}
+
+#[test]
+fn wrap_scrolls_at_bottom() {
+    let mut t = Terminal::new(10, 3);
+    t.feed(b"aaaaaaaaaaBBBBBBBBBBCCCCCCCCCCDDDDD");
+    assert_eq!(t.scrollback_len(), 1);
+    assert_eq!(t.line_text(0), "BBBBBBBBBB");
+    assert_eq!(t.line_text(2).trim_end(), "DDDDD");
+}
+
+#[test]
 fn printable_text_advances_cursor_and_stores_cells() {
     let mut t = Terminal::new(80, 24);
     t.feed(b"hello");
