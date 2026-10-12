@@ -35,7 +35,7 @@ fn main() {
             eprintln!("                            (openrouter / opencode-go keys, local server, compat URL)");
             eprintln!("  zet blocks [--db PATH] [--limit N] [--session S]");
             eprintln!("                            list recorded command blocks");
-            eprintln!("  zet journal [--limit N]   list agent turn journal entries");
+            eprintln!("  zet journal [--limit N]   agent turns + recent commands (one history)");
             std::process::exit(2);
         }
     }
@@ -452,29 +452,42 @@ fn journal(argv: &[&str]) {
     });
     if entries.is_empty() {
         println!("no agent turns recorded");
-        return;
-    }
-    let start = entries.len().saturating_sub(limit);
-    for (k, e) in entries[start..].iter().enumerate() {
-        let verdict = if !e.approved {
-            "denied".to_string()
-        } else if e.executed {
-            format!(
-                "exit {}",
-                e.exit_code
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "?".to_string())
-            )
-        } else {
-            "not run".to_string()
-        };
-        println!("#{} [{:?} {}] {}", start + k, e.tier, verdict, e.command);
-        let shown: String = e.output.chars().take(800).collect();
-        for line in shown.lines() {
-            println!("  {line}");
+    } else {
+        let start = entries.len().saturating_sub(limit);
+        for (k, e) in entries[start..].iter().enumerate() {
+            let verdict = if !e.approved {
+                "denied".to_string()
+            } else if e.executed {
+                format!(
+                    "exit {}",
+                    e.exit_code
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "?".to_string())
+                )
+            } else {
+                "not run".to_string()
+            };
+            println!("#{} [{:?} {}] {}", start + k, e.tier, verdict, e.command);
+            let shown: String = e.output.chars().take(800).collect();
+            for line in shown.lines() {
+                println!("  {line}");
+            }
+            if e.output.chars().count() > 800 {
+                println!("  … ({} chars total)", e.output.chars().count());
+            }
         }
-        if e.output.chars().count() > 800 {
-            println!("  … ({} chars total)", e.output.chars().count());
+    }
+    // One history: turns above, the commands behind them below. The
+    // block store owns open errors (`zet blocks` reports them); here a
+    // missing store just means no commands to show.
+    if let Ok(store) = zet_blocks::Store::open_default() {
+        if let Ok(list) = store.recent(limit) {
+            if !list.is_empty() {
+                println!("recent commands:");
+                for b in &list {
+                    println!("#{} [exit {}] {}", b.id, b.exit_code, b.command);
+                }
+            }
         }
     }
 }

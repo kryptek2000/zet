@@ -4442,6 +4442,7 @@ dependencies = [
  "zet-agent",
  "zet-blocks",
  "zet-models",
+ "zet-policy",
  "zet-pty",
 ]
 

@@ -10,5 +10,8 @@ zet-models = { path = "../zet-models" }
 zet-blocks = { path = "../zet-blocks" }
 zet-pty = { path = "../zet-pty" }
 
+[dev-dependencies]
+zet-policy = { path = "../zet-policy" }
+
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["term", "signal", "fs"] }

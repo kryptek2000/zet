@@ -162,3 +162,78 @@ fn every_cli_group_dispatches() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("bad usage for `zet auth`"), "{err}");
 }
+
+fn temp_home(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "zet_home_{}_{}_{}",
+        tag,
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(dir.join(".zet")).unwrap();
+    dir
+}
+
+fn seed_block(home: &std::path::Path, cmd: &str) {
+    let db = home.join(".zet").join("blocks.sqlite");
+    let store = zet_blocks::Store::open(db.to_str().unwrap()).unwrap();
+    store
+        .append(&zet_blocks::Block {
+            id: 0,
+            session: "s".to_string(),
+            command: cmd.to_string(),
+            output: "out".to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            duration_ms: 1,
+        })
+        .unwrap();
+}
+
+fn seed_turn(home: &std::path::Path) {
+    zet_agent::append_journal(
+        &home.join(".zet").join("journal.jsonl"),
+        &[zet_agent::JournalEntry {
+            command: "echo agent-step".to_string(),
+            tier: zet_policy::Tier::T1,
+            approval: zet_policy::Approval::Ask,
+            approved: true,
+            executed: true,
+            exit_code: Some(0),
+            output: "out".to_string(),
+            checkpoint: None,
+        }],
+    )
+    .unwrap();
+}
+
+#[test]
+fn journal_unifies_turns_and_recent_commands() {
+    let home = temp_home("unified");
+    seed_block(&home, "ls ~/Desktop");
+    seed_turn(&home);
+    let out = zet()
+        .env("HOME", &home)
+        .args(["journal", "--limit", "5"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("echo agent-step"), "{text}");
+    assert!(text.contains("recent commands:"), "{text}");
+    assert!(text.contains("ls ~/Desktop"), "{text}");
+}
+
+#[test]
+fn journal_without_turns_still_shows_commands() {
+    let home = temp_home("commands_only");
+    seed_block(&home, "mkdir new_folder");
+    let out = zet().env("HOME", &home).args(["journal"]).output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("no agent turns recorded"), "{text}");
+    assert!(text.contains("mkdir new_folder"), "{text}");
+}
