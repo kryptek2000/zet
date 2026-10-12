@@ -583,12 +583,26 @@ impl App {
         let (tx, rx) = mpsc::channel();
         self.nl_rx = Some(rx);
         self.nl_wake = wake;
+        // M1 for NL too: the request sees recent blocks + cwd + repo
+        // state, so "fix this" needs no explaining. Gathered here (main
+        // thread, needs the recorder), moved into the worker.
+        let cwd = shell_cwd(&self.session);
+        let context = self
+            .recorder
+            .as_ref()
+            .and_then(|r| r.blocks().ok())
+            .map(|blocks| {
+                let git = zet_context::git_state(std::path::Path::new(&cwd));
+                zet_context::gather(&blocks, &cwd, git, zet_context::DEFAULT_BUDGET).render()
+            });
         std::thread::spawn(move || {
             // check_spec passed, so the client builds; a race (key
             // deleted between) reports instead of going silent.
             let answer: Result<Option<String>, String> = match build_suggester(&spec) {
                 None => Err("model unavailable".to_string()),
-                Some(m) => m.suggest_nl(&nl).map_err(|e| e.to_string()),
+                Some(m) => m
+                    .suggest_nl(&nl, context.as_deref())
+                    .map_err(|e| e.to_string()),
             };
             let _ = tx.send(answer);
         });

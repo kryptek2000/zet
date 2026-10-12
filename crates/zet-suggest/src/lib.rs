@@ -39,10 +39,21 @@ impl<M: ChatModel> ModelSuggester<M> {
         ModelSuggester { model }
     }
 
-    fn ask(&self, system: &str, input: &str) -> Result<Option<String>, zet_models::ModelError> {
+    fn ask(
+        &self,
+        system: &str,
+        input: &str,
+        context: Option<&str>,
+        max_tokens: u32,
+    ) -> Result<Option<String>, zet_models::ModelError> {
+        let mut full_system = system.to_string();
+        if let Some(context) = context {
+            full_system.push_str("\nTerminal context (what the user sees):\n");
+            full_system.push_str(context);
+        }
         let req = ChatRequest {
             model: String::new(),
-            system: Some(system.to_string()),
+            system: Some(full_system),
             messages: vec![Message {
                 role: Role::User,
                 text: input.to_string(),
@@ -50,7 +61,7 @@ impl<M: ChatModel> ModelSuggester<M> {
                 tool_calls: vec![],
             }],
             tools: vec![],
-            max_tokens: 64,
+            max_tokens,
         };
         let res = self.model.chat(&req)?;
         Ok(first_line(&res.text))
@@ -59,11 +70,21 @@ impl<M: ChatModel> ModelSuggester<M> {
     /// Natural language to shell command. Replies with only the command —
     /// or CHAT: + one liner when there is no command (greeting/smalltalk).
     /// Model failures surface (the window notices them) instead of
-    /// dissolving into silence.
-    pub fn suggest_nl(&self, nl: &str) -> Result<Option<String>, zet_models::ModelError> {
+    /// dissolving into silence. `context` (terminal state) rides along
+    /// when present; the ghost path never pays for it.
+    pub fn suggest_nl(
+        &self,
+        nl: &str,
+        context: Option<&str>,
+    ) -> Result<Option<String>, zet_models::ModelError> {
         self.ask(
             "Translate the request to a single shell command. Reply with ONLY the command, no prose, no fences. Examples: 'list files' -> ls -la; 'disk usage' -> df -h; 'find todos' -> grep -rn TODO . If the request is greeting, smalltalk, or has no shell command (e.g. 'hello'), reply with CHAT: followed by a friendly one-liner, e.g. 'CHAT: Hey! Tell me what to run.'",
             nl,
+            context,
+            // Room to read context + think + answer in one line. The old
+            // 64-token budget starved reasoning models (thinking ate the
+            // answer); a cap is not spend — one-liners still cost lines.
+            256,
         )
     }
 }
@@ -74,9 +95,12 @@ impl<M: ChatModel> Suggest for ModelSuggester<M> {
             return None;
         }
         // Ghost path stays silent on failure (instant history covers it).
+        // No context, tight budget: per-keystroke calls stay cheap.
         self.ask(
             "Complete this shell command prefix. Reply with ONLY the full command, no prose, no fences.",
             prefix,
+            None,
+            64,
         )
         .ok()
         .flatten()
@@ -95,11 +119,15 @@ impl<H: Suggest, M: ChatModel> ChainSuggester<H, M> {
         ChainSuggester { history, model }
     }
 
-    pub fn suggest_nl(&self, nl: &str) -> Result<Option<String>, zet_models::ModelError> {
+    pub fn suggest_nl(
+        &self,
+        nl: &str,
+        context: Option<&str>,
+    ) -> Result<Option<String>, zet_models::ModelError> {
         if let Some(hit) = self.history.suggest(nl) {
             return Ok(Some(hit));
         }
-        self.model.suggest_nl(nl)
+        self.model.suggest_nl(nl, context)
     }
 }
 

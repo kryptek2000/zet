@@ -100,7 +100,7 @@ fn model_takes_first_command_line_only() {
     let (m, calls) = script("Sure thing!\ngit status\nDone.");
     let s = ModelSuggester::new(m);
     assert_eq!(
-        s.suggest_nl("show git status").unwrap(),
+        s.suggest_nl("show git status", None).unwrap(),
         Some("git status".to_string())
     );
     assert_eq!(calls.get(), 1);
@@ -110,7 +110,7 @@ fn model_takes_first_command_line_only() {
 fn model_empty_is_none() {
     let (m, _) = script("\n  \n");
     let s = ModelSuggester::new(m);
-    assert_eq!(s.suggest_nl("anything").unwrap(), None);
+    assert_eq!(s.suggest_nl("anything", None).unwrap(), None);
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn chat_prefix_passes_through_first_line() {
     // no fences) and classify as conversation, never as commands.
     let (m, _) = script("CHAT: Hey! Tell me what to run.");
     let s = ModelSuggester::new(m);
-    let answer = s.suggest_nl("hello").unwrap().expect("chat answer");
+    let answer = s.suggest_nl("hello", None).unwrap().expect("chat answer");
     assert_eq!(
         chat_reply(&answer),
         Some("Hey! Tell me what to run.".to_string())
@@ -148,7 +148,7 @@ fn chain_prefers_history_over_model() {
     let (m2, calls2) = script("from-model");
     let c2 = ChainSuggester::new(HistorySuggester::new(&store), ModelSuggester::new(m2));
     assert_eq!(
-        c2.suggest_nl("list pods").unwrap(),
+        c2.suggest_nl("list pods", None).unwrap(),
         Some("from-model".to_string())
     );
     assert_eq!(calls2.get(), 1);
@@ -168,7 +168,7 @@ fn model_strips_fences_and_bullets() {
         let (m, _) = script(reply);
         let s = ModelSuggester::new(m);
         assert_eq!(
-            s.suggest_nl("x").unwrap().as_deref(),
+            s.suggest_nl("x", None).unwrap().as_deref(),
             if want.is_empty() { None } else { Some(want) },
             "{reply:?}"
         );
@@ -199,7 +199,7 @@ fn model_skips_think_blocks() {
         let (m, _) = script(reply);
         let s = ModelSuggester::new(m);
         assert_eq!(
-            s.suggest_nl("x").unwrap().as_deref(),
+            s.suggest_nl("x", None).unwrap().as_deref(),
             if want.is_empty() { None } else { Some(want) },
             "{reply:?}"
         );
@@ -212,7 +212,10 @@ fn lone_greeting_survives_first_line() {
     // dissolved into `(no command)`. A one-line reply IS the answer.
     let (m, _) = script("Hello!");
     let s = ModelSuggester::new(m);
-    assert_eq!(s.suggest_nl("hello").unwrap().as_deref(), Some("Hello!"));
+    assert_eq!(
+        s.suggest_nl("hello", None).unwrap().as_deref(),
+        Some("Hello!")
+    );
 }
 
 #[test]
@@ -220,7 +223,7 @@ fn multiline_leadin_still_skipped() {
     let (m, _) = script("Sure thing!\nls -la");
     let s = ModelSuggester::new(m);
     assert_eq!(
-        s.suggest_nl("list files").unwrap().as_deref(),
+        s.suggest_nl("list files", None).unwrap().as_deref(),
         Some("ls -la")
     );
 }
@@ -229,6 +232,52 @@ fn multiline_leadin_still_skipped() {
 fn chat_with_bang_survives() {
     let (m, _) = script("CHAT: Hey!");
     let s = ModelSuggester::new(m);
-    let answer = s.suggest_nl("hello").unwrap().expect("chat answer");
+    let answer = s.suggest_nl("hello", None).unwrap().expect("chat answer");
     assert_eq!(chat_reply(&answer).as_deref(), Some("Hey!"));
+}
+
+struct SysCap {
+    systems: Rc<std::cell::RefCell<Vec<String>>>,
+}
+
+impl ChatModel for SysCap {
+    fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, ModelError> {
+        self.systems
+            .borrow_mut()
+            .push(req.system.clone().unwrap_or_default());
+        Ok(ChatResponse {
+            text: "ls -la".to_string(),
+            tool_calls: vec![],
+        })
+    }
+}
+
+#[test]
+fn nl_context_reaches_the_system_prompt() {
+    let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let s = ModelSuggester::new(SysCap {
+        systems: Rc::clone(&seen),
+    });
+    let answer = s
+        .suggest_nl("fix it", Some("cwd: /x\n$ cat missing (exit 1)\n"))
+        .unwrap();
+    assert_eq!(answer.as_deref(), Some("ls -la"));
+    let systems = seen.borrow();
+    assert!(systems[0].contains("Terminal context"), "{}", systems[0]);
+    assert!(
+        systems[0].contains("cat missing (exit 1)"),
+        "{}",
+        systems[0]
+    );
+}
+
+#[test]
+fn nl_without_context_stays_bare() {
+    let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let s = ModelSuggester::new(SysCap {
+        systems: Rc::clone(&seen),
+    });
+    s.suggest_nl("hello", None).unwrap();
+    let systems = seen.borrow();
+    assert!(!systems[0].contains("Terminal context"), "{}", systems[0]);
 }

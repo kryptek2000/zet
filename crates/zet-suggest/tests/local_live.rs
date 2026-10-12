@@ -51,7 +51,7 @@ fn live_local_nl_suggests_command() {
     let client = local_client();
     let s = ModelSuggester::new(client);
     let cmd = s
-        .suggest_nl("list files in the current directory")
+        .suggest_nl("list files in the current directory", None)
         .unwrap()
         .expect("no suggestion");
     println!("LOCAL NL: {cmd}");
