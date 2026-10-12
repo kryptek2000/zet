@@ -1,5 +1,6 @@
 pub mod atlas;
 pub mod damage;
+pub mod exec_watch;
 pub mod input;
 pub mod quad;
 pub mod renderer;

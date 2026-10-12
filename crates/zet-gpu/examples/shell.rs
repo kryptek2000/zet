@@ -93,7 +93,8 @@ struct PendingExec {
     cmd: String,
     typed: bool,
     blocks_before: usize,
-    deadline: std::time::Instant,
+    started: std::time::Instant,
+    watch: zet_gpu::exec_watch::StepWatch,
 }
 
 type ExecRes = (Option<i32>, String);
@@ -248,7 +249,11 @@ impl App {
                         cmd,
                         typed: false,
                         blocks_before: before,
-                        deadline: std::time::Instant::now() + std::time::Duration::from_secs(120),
+                        started: std::time::Instant::now(),
+                        watch: zet_gpu::exec_watch::StepWatch::new(
+                            std::time::Duration::from_secs(120),
+                            std::time::Duration::from_secs(10),
+                        ),
                     });
                 }
             }
@@ -279,17 +284,31 @@ impl App {
                     .as_ref()
                     .and_then(|r| r.blocks().ok())
                     .unwrap_or_default();
-                if blocks.len() > st.blocks_before {
-                    blocks.last().map(|b| {
+                let settled = blocks.len() > st.blocks_before;
+                let elapsed = st.started.elapsed();
+                match st.watch.poll(elapsed, settled) {
+                    zet_gpu::exec_watch::StepPoll::Settle => blocks.last().map(|b| {
                         (
                             Some(b.exit_code),
                             format!("{}\n[exit {}]", b.output, b.exit_code),
                         )
-                    })
-                } else if std::time::Instant::now() > st.deadline {
-                    Some((None, "exec timed out waiting for the prompt".to_string()))
-                } else {
-                    None
+                    }),
+                    zet_gpu::exec_watch::StepPoll::Wait => None,
+                    zet_gpu::exec_watch::StepPoll::Interrupt => {
+                        // Stuck on stdin (pager, bat-on-stdin alias): ^C
+                        // reclaims the prompt; the 130 block usually
+                        // settles inside grace and completes normally.
+                        if let Some(s) = &mut self.session {
+                            let _ = s.write_all(&[0x03]);
+                        }
+                        None
+                    }
+                    zet_gpu::exec_watch::StepPoll::Abandon => Some((
+                        None,
+                        "step produced no result after 120s; sent Ctrl+C and \
+                         the prompt never returned"
+                            .to_string(),
+                    )),
                 }
             }
         };
