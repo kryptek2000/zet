@@ -1,6 +1,8 @@
-use zet_models::keys::{EnvKeychain, Keychain, SystemKeychain};
+use zet_models::keys::{
+    opencode_auth_path, read_opencode_key_at, EnvKeychain, Keychain, SystemKeychain,
+};
 
-const PROVIDERS: &[&str] = &["openai", "openrouter", "compat"];
+const PROVIDERS: &[&str] = &["openai", "openrouter", "compat", "opencode"];
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -30,7 +32,7 @@ fn main() {
             eprintln!("  zet inline [SPEC|off]     show/set/clear the NL/agent model");
             eprintln!("                            (e.g. openrouter:openai/gpt-4o-mini, local:llama3.2:1b)");
             eprintln!("  zet models [--free] [URL] list choosable models (ready specs)");
-            eprintln!("                            (openrouter key, local server, or compat URL)");
+            eprintln!("                            (openrouter / opencode-go keys, local server, compat URL)");
             eprintln!("  zet blocks [--db PATH] [--limit N] [--session S]");
             eprintln!("                            list recorded command blocks");
             eprintln!("  zet journal [--limit N]   list agent turn journal entries");
@@ -41,7 +43,18 @@ fn main() {
 
 fn auth_show() {
     for provider in PROVIDERS {
-        let status = if EnvKeychain.get(provider).is_some() {
+        let status = if *provider == "opencode" {
+            // Go login lives with the CLI, not (only) the keychain.
+            if read_opencode_key_at(&opencode_auth_path()).is_some() {
+                "set (opencode cli)"
+            } else if EnvKeychain.get(provider).is_some() {
+                "set (env)"
+            } else if SystemKeychain.get(provider).is_some() {
+                "set (keychain)"
+            } else {
+                "missing (`opencode auth login opencode`)"
+            }
+        } else if EnvKeychain.get(provider).is_some() {
             "set (env)"
         } else if SystemKeychain.get(provider).is_some() {
             "set (keychain)"
@@ -286,6 +299,20 @@ fn models_cmd(argv: &[&str]) {
                 Err(e) => eprintln!("openrouter: {e}"),
             },
             None => eprintln!("openrouter: skipped (no key — `zet auth add openrouter`)"),
+        }
+        let go_key = read_opencode_key_at(&opencode_auth_path())
+            .or_else(|| keychains(|c| zet_models::keys::resolve_key("opencode", c)));
+        match go_key {
+            Some(key) => match zet_models::list_models("https://opencode.ai/zen/go/v1", &key) {
+                Ok(ids) => {
+                    for id in ids.iter().filter(|id| keep(id)) {
+                        println!("opencode:{id}");
+                        listed += 1;
+                    }
+                }
+                Err(e) => eprintln!("opencode: {e}"),
+            },
+            None => eprintln!("opencode: skipped (`opencode auth login opencode`)"),
         }
         match zet_models::keys::local_tags_at("127.0.0.1", 11434) {
             Some(names) => {

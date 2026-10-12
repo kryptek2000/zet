@@ -211,3 +211,92 @@ fn system_keychain_live_roundtrip() {
     kc.delete(&account).unwrap();
     assert_eq!(kc.get(&account), None);
 }
+
+fn opencode_scratch(name: &str) -> std::path::PathBuf {
+    let p = std::env::temp_dir().join(format!(
+        "zet-opencode-{}-{}-{:?}",
+        name,
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&p);
+    std::fs::create_dir_all(&p).unwrap();
+    p.join("auth.json")
+}
+
+#[test]
+fn opencode_key_roundtrip_and_shapes() {
+    use zet_models::keys::read_opencode_key_at;
+    // Missing, malformed, wrong shape: all None (fall through).
+    let f = opencode_scratch("missing");
+    assert_eq!(read_opencode_key_at(&f), None);
+    let f = opencode_scratch("bad");
+    std::fs::write(&f, "not json{{").unwrap();
+    assert_eq!(read_opencode_key_at(&f), None);
+    let f = opencode_scratch("shape");
+    std::fs::write(&f, r#"{"other": {"key": "x"}}"#).unwrap();
+    assert_eq!(read_opencode_key_at(&f), None);
+    // Blank key = unset.
+    let f = opencode_scratch("blank");
+    std::fs::write(&f, r#"{"opencode-go": {"type": "oauth", "key": "  "}}"#).unwrap();
+    assert_eq!(read_opencode_key_at(&f), None);
+    // Real shape reads.
+    let f = opencode_scratch("good");
+    std::fs::write(
+        &f,
+        r#"{"opencode-go": {"type": "oauth", "key": "oc_sk_test"}}"#,
+    )
+    .unwrap();
+    assert_eq!(read_opencode_key_at(&f).as_deref(), Some("oc_sk_test"));
+}
+
+#[test]
+fn opencode_resolve_prefers_file_then_keychain() {
+    use zet_models::keys::{resolve_opencode, ResolveError};
+    use zet_models::Provider;
+    let file = opencode_scratch("resolve");
+    std::fs::write(&file, r#"{"opencode-go": {"key": "oc_sk_file"}}"#).unwrap();
+    // File wins over keychain.
+    let p = resolve_opencode(
+        "muse-spark",
+        &chain(&[Fake::with(("opencode", "chain-key"))]),
+        &file,
+    )
+    .unwrap();
+    match p {
+        Provider::OpenAICompat {
+            base_url,
+            api_key,
+            model,
+        } => {
+            assert_eq!(base_url, "https://opencode.ai/zen/go/v1");
+            assert_eq!(api_key, "oc_sk_file");
+            assert_eq!(model, "muse-spark");
+        }
+        _ => panic!("wrong provider"),
+    }
+    // No file: keychain fallback.
+    let missing = opencode_scratch("nope-missing");
+    let p = resolve_opencode(
+        "muse-spark",
+        &chain(&[Fake::with(("opencode", "chain-key"))]),
+        &missing,
+    )
+    .unwrap();
+    match p {
+        Provider::OpenAICompat { api_key, .. } => assert_eq!(api_key, "chain-key"),
+        _ => panic!("wrong provider"),
+    }
+    // Neither: login advice, and it names the CLI command.
+    let err = resolve_opencode("muse-spark", &chain(&[Fake::empty()]), &missing).unwrap_err();
+    assert!(matches!(err, ResolveError::OpencodeLogin), "{err:?}");
+    assert!(err.to_string().contains("opencode auth login"), "{err}");
+    // Empty model: bad spec.
+    assert!(resolve_opencode("", &chain(&[Fake::empty()]), &missing).is_err());
+}
+
+#[test]
+fn opencode_auth_path_default_shape() {
+    use zet_models::keys::opencode_auth_path;
+    assert!(opencode_auth_path().ends_with("opencode/auth.json"));
+}

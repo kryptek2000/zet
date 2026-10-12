@@ -106,6 +106,7 @@ impl Keychain for SystemKeychain {
 pub enum ResolveError {
     BadSpec(String),
     MissingKey { provider: String },
+    OpencodeLogin,
 }
 
 impl std::fmt::Display for ResolveError {
@@ -113,12 +114,16 @@ impl std::fmt::Display for ResolveError {
         match self {
             ResolveError::BadSpec(s) => write!(
                 f,
-                "bad model spec {s:?}: want openai:MODEL, openrouter:MODEL, compat:URL:MODEL, or local[:ENDPOINT]:MODEL"
+                "bad model spec {s:?}: want openai:MODEL, openrouter:MODEL, compat:URL:MODEL, opencode:MODEL, or local[:ENDPOINT]:MODEL"
             ),
             ResolveError::MissingKey { provider } => write!(
                 f,
                 "no API key for '{provider}': run `zet auth add {provider}` or set {}",
                 EnvKeychain::var_name(provider)
+            ),
+            ResolveError::OpencodeLogin => write!(
+                f,
+                "no OpenCode Go credential: run `opencode auth login opencode`, or `zet auth add opencode`"
             ),
         }
     }
@@ -300,8 +305,9 @@ fn port_headed(model: &str) -> bool {
 
 /// Build a [`Provider`] from a config spec, fetching the key from `chains`:
 /// `openai:MODEL`, `openrouter:VENDOR/MODEL`, `compat:BASE_URL:MODEL`
-/// (split on the last `:` so URLs survive), `local:MODEL` or
-/// `local:ENDPOINT:MODEL` (no key needed).
+/// (split on the last `:` so URLs survive), `opencode:MODEL` (Go
+/// subscription via the opencode CLI login, else `opencode` keychain),
+/// `local:MODEL` or `local:ENDPOINT:MODEL` (no key needed).
 pub fn resolve_provider(spec: &str, chains: &[&dyn Keychain]) -> Result<Provider, ResolveError> {
     let bad = || ResolveError::BadSpec(spec.to_string());
     let (kind, rest) = spec.split_once(':').ok_or_else(bad)?;
@@ -329,6 +335,7 @@ pub fn resolve_provider(spec: &str, chains: &[&dyn Keychain]) -> Result<Provider
                 model: model.to_string(),
             })
         }
+        "opencode" => resolve_opencode(rest, chains, &opencode_auth_path()),
         "local" => {
             // Bare model on the default endpoint (tags may contain
             // colons), or ENDPOINT:MODEL with an explicit base URL:
@@ -351,4 +358,52 @@ pub fn resolve_provider(spec: &str, chains: &[&dyn Keychain]) -> Result<Provider
         }
         _ => Err(bad()),
     }
+}
+
+/// Where the opencode CLI keeps its login (`~/.local/share/opencode`,
+/// or XDG_DATA_HOME when set).
+pub fn opencode_auth_path() -> std::path::PathBuf {
+    let data = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        format!("{home}/.local/share")
+    });
+    std::path::Path::new(&data)
+        .join("opencode")
+        .join("auth.json")
+}
+
+/// Go subscription key from an opencode auth file (`{"opencode-go":
+/// {"key": "oc_sk_…", …}}`). None on missing/unreadable/misshapen —
+/// callers fall through to the `opencode` keychain, then login advice.
+pub fn read_opencode_key_at(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let key = json.pointer("/opencode-go/key")?.as_str()?;
+    if key.trim().is_empty() {
+        None
+    } else {
+        Some(key.to_string())
+    }
+}
+
+/// `opencode:MODEL`: OpenCode Go gateway with the CLI login's key,
+/// else a pasted `opencode` keychain entry. Path is a parameter so
+/// tests stay hermetic (no real HOME reads).
+pub fn resolve_opencode(
+    model: &str,
+    chains: &[&dyn Keychain],
+    auth_path: &std::path::Path,
+) -> Result<Provider, ResolveError> {
+    if model.is_empty() {
+        return Err(ResolveError::BadSpec("opencode:".to_string()));
+    }
+    let key = read_opencode_key_at(auth_path).or_else(|| resolve_key("opencode", chains));
+    let Some(key) = key else {
+        return Err(ResolveError::OpencodeLogin);
+    };
+    Ok(Provider::OpenAICompat {
+        base_url: "https://opencode.ai/zen/go/v1".to_string(),
+        api_key: key,
+        model: model.to_string(),
+    })
 }

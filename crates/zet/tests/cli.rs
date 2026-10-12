@@ -13,6 +13,7 @@ fn auth_show_lists_providers_without_crashing() {
     assert!(out.status.success(), "{:?}", out.status);
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("openrouter"), "{text}");
+    assert!(text.contains("opencode:"), "{text}");
 }
 
 #[test]
