@@ -976,7 +976,7 @@ impl ApplicationHandler for App {
                     r.draw_terminal(&self.term, self.cols, self.rows, self.selection);
                     if let Some(g) = self.ghost.visible() {
                         let (cx, cy) = self.term.cursor();
-                        r.draw_ghost(cy, cx, g, self.cols);
+                        r.draw_ghost(cy, cx, g, self.cols, self.rows);
                     }
                     r.render();
                     self.last_frame = std::time::Instant::now();

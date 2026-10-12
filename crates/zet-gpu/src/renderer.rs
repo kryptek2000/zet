@@ -514,17 +514,15 @@ impl Renderer {
 
     /// Ghost autocomplete suffix, dimmed, starting at (row, col) — the
     /// remainder of a suggestion after the typed prefix. Spaces advance
-    /// without quads (matching draw_terminal). Clipped to grid width.
-    pub fn draw_ghost(&mut self, row: usize, col: usize, text: &str, cols: usize) {
-        for (x, c) in (col..).zip(text.chars()) {
-            if x >= cols {
-                break;
-            }
+    /// without quads (matching draw_terminal). Wraps across rows so long
+    /// previews and notices stay visible instead of clipping.
+    pub fn draw_ghost(&mut self, row: usize, col: usize, text: &str, cols: usize, rows: usize) {
+        for (x, y, c) in wrap_ghost(row, col, text, cols, rows) {
             if c != ' ' {
                 if let Some(slot) = self.slot_for(c) {
                     self.quads.extend(cell_quad(
-                        x as u32,
-                        row as u32,
+                        x,
+                        y,
                         self.cell_w,
                         self.cell_h,
                         (slot.x, slot.y),
@@ -535,7 +533,40 @@ impl Renderer {
             }
         }
     }
+}
 
+/// Visible cells for ghost/notice text starting at (row, col), wrapped
+/// across rows and clipped to the grid. Pure coordinates — unit-tested
+/// without a GPU.
+pub fn wrap_ghost(
+    row: usize,
+    col: usize,
+    text: &str,
+    cols: usize,
+    rows: usize,
+) -> Vec<(u32, u32, char)> {
+    let mut out = Vec::new();
+    let (mut x, mut y) = (col, row);
+    for c in text.chars() {
+        if c == '\n' {
+            x = 0;
+            y += 1;
+        } else {
+            if x >= cols {
+                x = 0;
+                y += 1;
+            }
+            if y >= rows {
+                break;
+            }
+            out.push((x as u32, y as u32, c));
+            x += 1;
+        }
+    }
+    out
+}
+
+impl Renderer {
     pub fn render(&mut self) {
         use wgpu::CurrentSurfaceTexture as Cst;
         let frame = match self.surface.get_current_texture() {
