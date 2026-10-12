@@ -233,18 +233,15 @@ impl GoClient {
         Ok(ChatResponse { text, tool_calls })
     }
 
-    /// Flatten messages to one input (system first). The Responses
-    /// protocol has no function calling: agent turns (which always send
-    /// tools) fail LOUD here instead of running tool-blind.
-    /// Reasoning effort stays minimal (NL answers are one-liners; the
-    /// model would otherwise burn the token budget thinking) with a 512
-    /// floor so thinking never starves the answer.
-    ///
-    /// With tools (agent turns) the input becomes an item array carrying
-    /// `function_call` / `function_call_output` linkage instead of flat
-    /// text — verified live against the Go gateway, which returns
-    /// `call_id` (not `id`) on its function_call items.
-    fn responses_body(&self, req: &ChatRequest) -> Value {
+    /// Flatten messages to one input (system first). NL turns (no tools,
+    /// no call history) stay a plain string; agent turns become an item
+    /// array carrying `function_call` / `function_call_output` linkage —
+    /// verified live against the Go gateway, which returns `call_id`
+    /// (not `id`) on its function_call items.
+    /// Reasoning effort stays minimal (answers are short; the model
+    /// would otherwise burn the token budget thinking) with a 512 floor
+    /// so thinking never starves the answer.
+    fn responses_body(&self, req: &ChatRequest) -> Result<Value, ModelError> {
         let tools: Vec<Value> = req
             .tools
             .iter()
@@ -278,9 +275,16 @@ impl GoClient {
             for m in &req.messages {
                 match m.role {
                     Role::Tool => {
+                        // Call linkage is the whole protocol: a result with
+                        // no call id answers nothing — loud, not null.
+                        let Some(call_id) = &m.tool_call_id else {
+                            return Err(ModelError::Protocol(
+                                "tool result without call_id has no call to answer".to_string(),
+                            ));
+                        };
                         items.push(json!({
                             "type": "function_call_output",
-                            "call_id": m.tool_call_id,
+                            "call_id": call_id,
                             "output": m.text,
                         }));
                     }
@@ -310,11 +314,11 @@ impl GoClient {
             }
             body["input"] = Value::String(parts.join("\n"));
         }
-        body
+        Ok(body)
     }
 
     fn responses_try(&self, req: &ChatRequest) -> Result<ChatResponse, ModelError> {
-        let (status, text) = self.post("/responses", self.responses_body(req))?;
+        let (status, text) = self.post("/responses", self.responses_body(req)?)?;
         if status != 200 {
             return Err(Self::fail(status, &text));
         }

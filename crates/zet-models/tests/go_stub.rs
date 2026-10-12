@@ -287,3 +287,45 @@ fn responses_leg_runs_function_calls() {
     assert_eq!(res2.text, "listed");
     h.join().unwrap();
 }
+
+#[test]
+fn tool_result_without_call_id_fails_loud() {
+    // call_id:null would answer nothing — the client refuses pre-POST
+    // (after the chat leg 400s into the responses fallback).
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let h = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let (_, _) = read_request(&mut stream);
+        reply(
+            &mut stream,
+            400,
+            r#"{"error":{"type":"ModelProtocolUnsupported","message":"nope"}}"#,
+        );
+        // No second accept: responses_body must fail before any POST.
+    });
+    let c = GoClient::new(
+        format!("http://127.0.0.1:{port}"),
+        "test-key".to_string(),
+        "no-call-id-model".to_string(),
+    );
+    let bad = ChatRequest {
+        model: String::new(),
+        system: None,
+        messages: vec![Message {
+            role: Role::Tool,
+            text: "orphan".to_string(),
+            tool_call_id: None,
+            tool_calls: vec![],
+        }],
+        tools: vec![zet_models::ToolDef {
+            name: "run_shell".to_string(),
+            description: "run".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        }],
+        max_tokens: 16,
+    };
+    let err = c.chat(&bad).unwrap_err().to_string();
+    assert!(err.contains("call_id"), "{err}");
+    h.join().unwrap();
+}
