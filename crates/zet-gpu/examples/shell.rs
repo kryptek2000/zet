@@ -687,27 +687,33 @@ fn with_keychains<T>(f: impl FnOnce(&[&dyn zet_models::keys::Keychain]) -> T) ->
 }
 
 /// Build a concrete (Send) model suggester from a spec string.
-fn build_suggester(
-    spec: &str,
-) -> Option<zet_suggest::ModelSuggester<zet_models::openai::OpenAICompat>> {
+fn build_suggester(spec: &str) -> Option<zet_suggest::ModelSuggester<zet_models::Client>> {
     build_client(spec).map(zet_suggest::ModelSuggester::new)
 }
 
 /// Concrete model client for agent turns (Send; built per request).
-fn build_client(spec: &str) -> Option<zet_models::openai::OpenAICompat> {
+/// The opencode: provider yields the Go gateway client (session
+/// headers + chat/responses fallback); everything else is OpenAI-shape.
+fn build_client(spec: &str) -> Option<zet_models::Client> {
     use zet_models::Provider;
     let provider = with_keychains(|chains| zet_models::keys::resolve_provider(spec, chains).ok())?;
-    let (base_url, api_key, model) = match provider {
+    Some(match provider {
+        Provider::Go { api_key, model } => zet_models::Client::Go(zet_models::go::GoClient::new(
+            zet_models::go::GO_BASE_URL.to_string(),
+            api_key,
+            model,
+        )),
         Provider::OpenAICompat {
             base_url,
             api_key,
             model,
-        } => (base_url, api_key, model),
-        Provider::Local { endpoint, model } => (endpoint, String::new(), model),
-    };
-    Some(zet_models::openai::OpenAICompat::new(
-        base_url, api_key, model,
-    ))
+        } => zet_models::Client::OpenAI(zet_models::openai::OpenAICompat::new(
+            base_url, api_key, model,
+        )),
+        Provider::Local { endpoint, model } => zet_models::Client::OpenAI(
+            zet_models::openai::OpenAICompat::new(endpoint, String::new(), model),
+        ),
+    })
 }
 
 impl ApplicationHandler for App {

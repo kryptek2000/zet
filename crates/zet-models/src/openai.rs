@@ -40,7 +40,7 @@ impl OpenAICompat {
 /// the real cause (unknown model, bad field); bare statuses don't.
 /// JSON error envelopes (`{"error":{"message":…}}`, OpenRouter-style)
 /// collapse to just the message — the envelope hides the diagnosis.
-fn snippet(body: &mut ureq::Body) -> String {
+pub(crate) fn snippet(body: &mut ureq::Body) -> String {
     let text = body.read_to_string().unwrap_or_default();
     if let Some(msg) = error_message(&text) {
         return msg;
@@ -50,7 +50,9 @@ fn snippet(body: &mut ureq::Body) -> String {
 
 /// Pull `.error.message` / `.message` out of a JSON error body.
 /// None when the body isn't that shape (falls back to raw snippet).
-fn error_message(text: &str) -> Option<String> {
+/// Prefixed with `.error.type` when present — callers match on it
+/// (the Go gateway's `ModelProtocolUnsupported` drives fallback).
+pub(crate) fn error_message(text: &str) -> Option<String> {
     let json: Value = serde_json::from_str(text).ok()?;
     let msg = json
         .pointer("/error/message")
@@ -58,13 +60,20 @@ fn error_message(text: &str) -> Option<String> {
         .as_str()?;
     let flat = flatten(msg);
     if flat.is_empty() {
-        None
-    } else {
+        return None;
+    }
+    let kind = json
+        .pointer("/error/type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+    if kind.is_empty() {
         Some(flat)
+    } else {
+        Some(format!("{kind}: {flat}"))
     }
 }
 
-fn flatten(text: &str) -> String {
+pub(crate) fn flatten(text: &str) -> String {
     let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut short = flat.chars().take(300).collect::<String>();
     if short.len() < flat.len() {

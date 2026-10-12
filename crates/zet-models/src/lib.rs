@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub mod go;
 pub mod keys;
 pub mod mcp;
 pub mod openai;
@@ -95,6 +96,22 @@ impl ChatModel for Box<dyn ChatModel> {
     }
 }
 
+/// Runtime client: plain OpenAI-shape, or the Go gateway (which needs
+/// session headers and per-model protocol fallback).
+pub enum Client {
+    OpenAI(openai::OpenAICompat),
+    Go(go::GoClient),
+}
+
+impl ChatModel for Client {
+    fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, ModelError> {
+        match self {
+            Client::OpenAI(c) => c.chat(req),
+            Client::Go(c) => c.chat(req),
+        }
+    }
+}
+
 /// Provider configuration. Keys arrive from the OS keychain at runtime
 /// (see `zet auth add`); they are never written to disk by this crate.
 #[derive(Debug, Clone)]
@@ -106,6 +123,11 @@ pub enum Provider {
     },
     Local {
         endpoint: String,
+        model: String,
+    },
+    /// OpenCode Go gateway: session headers + per-model protocol.
+    Go {
+        api_key: String,
         model: String,
     },
 }
@@ -132,6 +154,11 @@ impl Provider {
             Provider::Local { endpoint, model } => {
                 Box::new(openai::OpenAICompat::new(endpoint, String::new(), model))
             }
+            Provider::Go { api_key, model } => Box::new(go::GoClient::new(
+                go::GO_BASE_URL.to_string(),
+                api_key,
+                model,
+            )),
         }
     }
 
@@ -148,6 +175,11 @@ impl Provider {
             Provider::Local { endpoint, model } => {
                 m.insert("endpoint", endpoint.clone());
                 m.insert("model", model.clone());
+            }
+            Provider::Go { model, .. } => {
+                m.insert("base_url", go::GO_BASE_URL.to_string());
+                m.insert("model", model.clone());
+                m.insert("api_key", "***".to_string());
             }
         }
         m

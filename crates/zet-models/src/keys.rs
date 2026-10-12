@@ -401,8 +401,7 @@ pub fn resolve_opencode(
     let Some(key) = key else {
         return Err(ResolveError::OpencodeLogin);
     };
-    Ok(Provider::OpenAICompat {
-        base_url: "https://opencode.ai/zen/go/v1".to_string(),
+    Ok(Provider::Go {
         api_key: key,
         model: model.to_string(),
     })

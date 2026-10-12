@@ -264,12 +264,7 @@ fn opencode_resolve_prefers_file_then_keychain() {
     )
     .unwrap();
     match p {
-        Provider::OpenAICompat {
-            base_url,
-            api_key,
-            model,
-        } => {
-            assert_eq!(base_url, "https://opencode.ai/zen/go/v1");
+        Provider::Go { api_key, model } => {
             assert_eq!(api_key, "oc_sk_file");
             assert_eq!(model, "muse-spark");
         }
@@ -284,7 +279,7 @@ fn opencode_resolve_prefers_file_then_keychain() {
     )
     .unwrap();
     match p {
-        Provider::OpenAICompat { api_key, .. } => assert_eq!(api_key, "chain-key"),
+        Provider::Go { api_key, .. } => assert_eq!(api_key, "chain-key"),
         _ => panic!("wrong provider"),
     }
     // Neither: login advice, and it names the CLI command.
