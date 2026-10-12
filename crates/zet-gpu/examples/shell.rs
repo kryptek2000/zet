@@ -1186,7 +1186,15 @@ fn main() {
         exec_req_rx: None,
         exec_res_tx: None,
         exec_pending: None,
-        last_journal: Vec::new(),
+        // F12 must work across restarts: the disk journal outlives the
+        // window, so hydrate from it (recent tail; checkpoints are what
+        // matter). Without this a restart silently disarms undo.
+        last_journal: zet_agent::read_journal(&zet_agent::journal_path_default())
+            .map(|all| {
+                let start = all.len().saturating_sub(50);
+                all[start..].to_vec()
+            })
+            .unwrap_or_default(),
         undo_rx: None,
         last_frame: std::time::Instant::now(),
         needs_draw: true,
