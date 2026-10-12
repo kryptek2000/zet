@@ -100,7 +100,7 @@ fn model_takes_first_command_line_only() {
     let (m, calls) = script("Sure thing!\ngit status\nDone.");
     let s = ModelSuggester::new(m);
     assert_eq!(
-        s.suggest_nl("show git status"),
+        s.suggest_nl("show git status").unwrap(),
         Some("git status".to_string())
     );
     assert_eq!(calls.get(), 1);
@@ -110,7 +110,7 @@ fn model_takes_first_command_line_only() {
 fn model_empty_is_none() {
     let (m, _) = script("\n  \n");
     let s = ModelSuggester::new(m);
-    assert_eq!(s.suggest_nl("anything"), None);
+    assert_eq!(s.suggest_nl("anything").unwrap(), None);
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn chat_prefix_passes_through_first_line() {
     // no fences) and classify as conversation, never as commands.
     let (m, _) = script("CHAT: Hey! Tell me what to run.");
     let s = ModelSuggester::new(m);
-    let answer = s.suggest_nl("hello").expect("chat answer");
+    let answer = s.suggest_nl("hello").unwrap().expect("chat answer");
     assert_eq!(
         chat_reply(&answer),
         Some("Hey! Tell me what to run.".to_string())
@@ -147,7 +147,10 @@ fn chain_prefers_history_over_model() {
     assert_eq!(calls.get(), 0, "model must not run on history hit");
     let (m2, calls2) = script("from-model");
     let c2 = ChainSuggester::new(HistorySuggester::new(&store), ModelSuggester::new(m2));
-    assert_eq!(c2.suggest_nl("list pods"), Some("from-model".to_string()));
+    assert_eq!(
+        c2.suggest_nl("list pods").unwrap(),
+        Some("from-model".to_string())
+    );
     assert_eq!(calls2.get(), 1);
 }
 
@@ -165,7 +168,7 @@ fn model_strips_fences_and_bullets() {
         let (m, _) = script(reply);
         let s = ModelSuggester::new(m);
         assert_eq!(
-            s.suggest_nl("x").as_deref(),
+            s.suggest_nl("x").unwrap().as_deref(),
             if want.is_empty() { None } else { Some(want) },
             "{reply:?}"
         );
@@ -196,7 +199,7 @@ fn model_skips_think_blocks() {
         let (m, _) = script(reply);
         let s = ModelSuggester::new(m);
         assert_eq!(
-            s.suggest_nl("x").as_deref(),
+            s.suggest_nl("x").unwrap().as_deref(),
             if want.is_empty() { None } else { Some(want) },
             "{reply:?}"
         );

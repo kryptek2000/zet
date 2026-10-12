@@ -28,9 +28,12 @@ Just type — command or plain words — and press `Enter`:
 - Anything else (`hello`, `update`, `list files in detail`) goes to the
   model, and the line swaps to its answer as a preview — review, then
   `Enter` to run. Title never changes; there is no mode to enter or leave.
-- `zet` works as a wake word: `zet whats the command to update linux?`
-  translates the rest. Real subcommands (`zet blocks`, `zet inline …`)
-  run untouched.
+- `zet` is a verb: `zet update linux` runs the answer, it doesn't
+  preview it. Real subcommands (`zet blocks`, `zet inline …`) run
+  untouched. Critical (T3) answers still preview with a review notice —
+  some orders need eyes first.
+- Model failures notice loud (`(model error: rate limited: …)`) — free
+  tiers throttle; wait a minute and retry.
 - Needs a model, resolved per request: `ZET_INLINE_SPEC` first, then the
   `zet inline <spec>` choice, then the window's startup default, then a
   fresh local probe. Set it from inside any window with e.g.

@@ -51,7 +51,10 @@ struct App {
     env_spec: Option<String>,
     startup_spec: Option<String>,
     ghost: zet_suggest::Ghost,
-    nl_rx: Option<Receiver<Option<String>>>,
+    nl_rx: Option<Receiver<Result<Option<String>, String>>>,
+    /// The in-flight NL request came from the `zet` wake word: its
+    /// answer runs (unless T3), not just previews.
+    nl_wake: bool,
     /// Commands that run without translation (PATH at startup +
     /// shell-reported aliases/functions). Unknown first words route
     /// to the model instead — no modes, no chords.
@@ -311,8 +314,19 @@ impl App {
                 // Dead worker: drop back to history instead of "…" forever.
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.nl_rx = None;
+                    self.nl_wake = false;
                 }
-                Ok(answer) => {
+                // Model failures notice LOUD (rate limits, net, auth) —
+                // never dissolve into `(no command)` again.
+                Ok(Err(e)) => {
+                    self.nl_rx = None;
+                    self.nl_wake = false;
+                    if let Some(input) = self.current_text() {
+                        let short: String = e.chars().take(100).collect();
+                        self.ghost.notify(input, format!("(model error: {short})"));
+                    }
+                }
+                Ok(Ok(answer)) => {
                     self.nl_rx = None;
                     if let Some(cmd) = answer {
                         // Conversation, not a command: answer it on the
@@ -326,6 +340,18 @@ impl App {
                         // syntactically broken replies notice instead of swap.
                         } else if zet_pty::syntax_ok(&self.shell_name, &cmd) {
                             self.accept_line(&cmd);
+                            // Wake-word orders (`zet update linux`) run:
+                            // explicit instruction, T3 never auto-passes.
+                            if self.nl_wake && zet_policy::classify(&cmd) != zet_policy::Tier::T3 {
+                                if let Some(s) = &mut self.session {
+                                    let _ = s.write_all(b"\r");
+                                }
+                            } else if self.nl_wake {
+                                self.ghost.notify(
+                                    cmd.clone(),
+                                    "(review: critical command — Enter to run)".to_string(),
+                                );
+                            }
                         } else if let Some(input) = self.current_text() {
                             let short: String = cmd.chars().take(60).collect();
                             self.ghost.notify(input, format!("(invalid: {short})"));
@@ -333,6 +359,7 @@ impl App {
                     } else if let Some(input) = self.current_text() {
                         self.ghost.notify(input, "(no command)".to_string());
                     }
+                    self.nl_wake = false;
                     self.retitle();
                 }
             }
@@ -424,9 +451,10 @@ impl App {
     }
 
     /// Kick off an NL-to-command request on a thread; the answer swaps the
-    /// line when it lands (polled in update_ghost). Returns false with no
-    /// model configured.
-    fn start_nl_request(&mut self, nl: String) -> bool {
+    /// line when it lands (polled in update_ghost). Wake-word requests
+    /// (`wake=true`) run their answer instead of previewing it (unless
+    /// T3). Returns false with no model configured.
+    fn start_nl_request(&mut self, nl: String, wake: bool) -> bool {
         let spec = match self.resolve_spec() {
             Some(s) => s,
             None => {
@@ -443,8 +471,14 @@ impl App {
         }
         let (tx, rx) = mpsc::channel();
         self.nl_rx = Some(rx);
+        self.nl_wake = wake;
         std::thread::spawn(move || {
-            let answer = build_suggester(&spec).and_then(|m| m.suggest_nl(&nl));
+            // check_spec passed, so the client builds; a race (key
+            // deleted between) reports instead of going silent.
+            let answer: Result<Option<String>, String> = match build_suggester(&spec) {
+                None => Err("model unavailable".to_string()),
+                Some(m) => m.suggest_nl(&nl).map_err(|e| e.to_string()),
+            };
             let _ = tx.send(answer);
         });
         true
@@ -705,6 +739,7 @@ impl ApplicationHandler for App {
                     self.goal_mode = !self.goal_mode;
                     self.ghost.reset();
                     self.nl_rx = None;
+                    self.nl_wake = false;
                     self.retitle();
                     return;
                 }
@@ -766,6 +801,7 @@ impl ApplicationHandler for App {
                         self.ghost.dismiss_current();
                     }
                     self.nl_rx = None;
+                    self.nl_wake = false;
                     if self.goal_mode {
                         self.goal_mode = false;
                         self.retitle();
@@ -790,11 +826,12 @@ impl ApplicationHandler for App {
                     let input = self.current_text().unwrap_or_default();
                     if !input.trim().is_empty() {
                         if let Some(rest) = zet_pty::zet_fallback(&input) {
-                            self.start_nl_request(rest);
+                            // Wake word: an order, not a question.
+                            self.start_nl_request(rest, true);
                             return;
                         }
                         if !self.route_direct(&input) {
-                            self.start_nl_request(input);
+                            self.start_nl_request(input, false);
                             return;
                         }
                     }
@@ -957,6 +994,7 @@ fn main() {
         ghost,
         known: zet_pty::KnownCommands::from_env(),
         nl_rx: None,
+        nl_wake: false,
         goal_mode: false,
         agent_busy: false,
         agent_rx: None,

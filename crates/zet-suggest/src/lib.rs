@@ -39,7 +39,7 @@ impl<M: ChatModel> ModelSuggester<M> {
         ModelSuggester { model }
     }
 
-    fn ask(&self, system: &str, input: &str) -> Option<String> {
+    fn ask(&self, system: &str, input: &str) -> Result<Option<String>, zet_models::ModelError> {
         let req = ChatRequest {
             model: String::new(),
             system: Some(system.to_string()),
@@ -52,13 +52,15 @@ impl<M: ChatModel> ModelSuggester<M> {
             tools: vec![],
             max_tokens: 64,
         };
-        let res = self.model.chat(&req).ok()?;
-        first_line(&res.text)
+        let res = self.model.chat(&req)?;
+        Ok(first_line(&res.text))
     }
 
     /// Natural language to shell command. Replies with only the command —
     /// or CHAT: + one liner when there is no command (greeting/smalltalk).
-    pub fn suggest_nl(&self, nl: &str) -> Option<String> {
+    /// Model failures surface (the window notices them) instead of
+    /// dissolving into silence.
+    pub fn suggest_nl(&self, nl: &str) -> Result<Option<String>, zet_models::ModelError> {
         self.ask(
             "Translate the request to a single shell command. Reply with ONLY the command, no prose, no fences. Examples: 'list files' -> ls -la; 'disk usage' -> df -h; 'find todos' -> grep -rn TODO . If the request is greeting, smalltalk, or has no shell command (e.g. 'hello'), reply with CHAT: followed by a friendly one-liner, e.g. 'CHAT: Hey! Tell me what to run.'",
             nl,
@@ -71,10 +73,13 @@ impl<M: ChatModel> Suggest for ModelSuggester<M> {
         if prefix.is_empty() {
             return None;
         }
+        // Ghost path stays silent on failure (instant history covers it).
         self.ask(
             "Complete this shell command prefix. Reply with ONLY the full command, no prose, no fences.",
             prefix,
         )
+        .ok()
+        .flatten()
         .filter(|c| c != prefix)
     }
 }
@@ -90,9 +95,9 @@ impl<H: Suggest, M: ChatModel> ChainSuggester<H, M> {
         ChainSuggester { history, model }
     }
 
-    pub fn suggest_nl(&self, nl: &str) -> Option<String> {
+    pub fn suggest_nl(&self, nl: &str) -> Result<Option<String>, zet_models::ModelError> {
         if let Some(hit) = self.history.suggest(nl) {
-            return Some(hit);
+            return Ok(Some(hit));
         }
         self.model.suggest_nl(nl)
     }
