@@ -125,6 +125,10 @@ pub struct Agent<M: ChatModel, A: Approver> {
     workdir: PathBuf,
     executor: Box<dyn Executor>,
     pub journal: Vec<JournalEntry>,
+    /// Terminal context (recent blocks, cwd, repo state), prepended to
+    /// the system prompt when present. Built by the caller (window)
+    /// from `zet_context`, so the agent sees what the user sees.
+    context: Option<String>,
 }
 
 impl<M: ChatModel, A: Approver> Agent<M, A> {
@@ -137,7 +141,14 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
             workdir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             executor: Box::new(DirectExec),
             journal: Vec::new(),
+            context: None,
         }
+    }
+
+    /// Terminal context for this turn (see `zet_context::Context::render`).
+    pub fn with_context(mut self, context: String) -> Self {
+        self.context = Some(context);
+        self
     }
 
     pub fn with_executor<E: Executor + 'static>(mut self, executor: E) -> Self {
@@ -193,9 +204,14 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
             tool_calls: vec![],
         }];
         for _ in 0..self.max_iters {
+            let mut system = SYSTEM_PROMPT.to_string();
+            if let Some(context) = &self.context {
+                system.push_str("\nTerminal context (what the user sees):\n");
+                system.push_str(context);
+            }
             let req = ChatRequest {
                 model: String::new(),
-                system: Some(SYSTEM_PROMPT.to_string()),
+                system: Some(system),
                 messages: messages.clone(),
                 tools: vec![shell_tool_def()],
                 max_tokens: 1024,

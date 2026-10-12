@@ -593,6 +593,17 @@ impl App {
         }
         let cwd = shell_cwd(&self.session);
         let in_repo = zet_agent::detect_repo(std::path::Path::new(&cwd));
+        // M1: the turn sees what the user sees — recent blocks (scrubbed,
+        // budgeted), cwd, repo state. Best effort: failures degrade to
+        // no-context rather than blocking the turn.
+        let context = self
+            .recorder
+            .as_ref()
+            .and_then(|r| r.blocks().ok())
+            .map(|blocks| {
+                let git = zet_context::git_state(std::path::Path::new(&cwd));
+                zet_context::gather(&blocks, &cwd, git, zet_context::DEFAULT_BUDGET).render()
+            });
         let (req_tx, req_rx) = mpsc::channel::<String>();
         let (res_tx, res_rx) = mpsc::channel::<ExecRes>();
         let (done_tx, done_rx) = mpsc::channel::<Option<AgentDone>>();
@@ -612,6 +623,9 @@ impl App {
                         res: res_rx,
                         shell: shell_name,
                     });
+                if let Some(context) = context {
+                    agent = agent.with_context(context);
+                }
                 let summary = agent
                     .run(&goal)
                     .unwrap_or_else(|e| format!("agent error: {e}"));

@@ -447,3 +447,24 @@ fn executor_veto_journals_never_run_without_checkpoint() {
     assert!(entry.checkpoint.is_none());
     assert!(entry.output.contains("rejected: echo hello"));
 }
+
+#[test]
+fn terminal_context_reaches_the_system_prompt() {
+    let model = Script::new(vec![Script::final_text("done")]);
+    let mut agent = Agent::new(model, AllowAll, true, 8)
+        .with_context("cwd: /home/bandit/zet\n$ cat missing (exit 1)\n".to_string());
+    let out = agent.run("fix it").unwrap();
+    assert_eq!(out, "done");
+    let system = agent.model.seen.borrow()[0].system.clone().unwrap();
+    assert!(system.contains("Terminal context"), "{system}");
+    assert!(system.contains("cat missing (exit 1)"), "{system}");
+}
+
+#[test]
+fn no_context_leaves_system_prompt_bare() {
+    let model = Script::new(vec![Script::final_text("done")]);
+    let mut agent = Agent::new(model, AllowAll, true, 8);
+    agent.run("hi").unwrap();
+    let system = agent.model.seen.borrow()[0].system.clone().unwrap();
+    assert!(!system.contains("Terminal context"), "{system}");
+}

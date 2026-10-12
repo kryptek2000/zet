@@ -4468,6 +4468,10 @@ dependencies = [
 [[package]]
 name = "zet-context"
 version = "0.1.0"
+dependencies = [
+ "regex",
+ "zet-blocks",
+]
 
 [[package]]
 name = "zet-daemon"
@@ -4485,6 +4489,7 @@ dependencies = [
  "winit",
  "zet-agent",
  "zet-blocks",
+ "zet-context",
  "zet-models",
  "zet-policy",
  "zet-pty",

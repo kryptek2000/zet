@@ -17,6 +17,7 @@ pollster = "1"
 arboard = "3"
 zet-agent = { path = "../zet-agent" }
 zet-blocks = { path = "../zet-blocks" }
+zet-context = { path = "../zet-context" }
 zet-models = { path = "../zet-models" }
 zet-policy = { path = "../zet-policy" }
 zet-suggest = { path = "../zet-suggest" }
