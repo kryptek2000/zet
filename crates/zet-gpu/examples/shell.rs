@@ -1073,6 +1073,40 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                     return;
                 }
+                // Drag-select autoscroll: holding the mouse past the
+                // top/bottom edge walks the view each frame so the
+                // selection reaches off-screen text. needs_draw only
+                // when something moved, or the loop would spin.
+                if self.selecting {
+                    if let (Some((_, my)), Some(r)) = (self.mouse_px, self.renderer.as_ref()) {
+                        let (_, ch) = r.cell_px();
+                        let view_h = self.rows as f64 * ch.max(1) as f64;
+                        let lines = zet_gpu::selection::drag_scroll_lines(my, view_h);
+                        if lines != 0 {
+                            let before = self.term.view_offset();
+                            if lines > 0 {
+                                self.term.scroll_view_up(lines as usize);
+                            } else {
+                                self.term.scroll_view_down((-lines) as usize);
+                            }
+                            if let Some(cell) = self.mouse_cell() {
+                                if let Some(sel) = &mut self.selection {
+                                    let next = zet_gpu::selection::CellPos {
+                                        col: cell.col,
+                                        row: cell.row,
+                                    };
+                                    if sel.active != next {
+                                        sel.active = next;
+                                        self.needs_draw = true;
+                                    }
+                                }
+                            }
+                            if self.term.view_offset() != before {
+                                self.needs_draw = true;
+                            }
+                        }
+                    }
+                }
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
                     r.draw_terminal(&self.term, self.cols, self.rows, self.selection);
                     if let Some(g) = self.ghost.visible() {

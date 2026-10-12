@@ -127,3 +127,17 @@ pub fn pix_to_cell(
         row: (vis.clamp(0, rows.saturating_sub(1) as isize) as usize) + scrollback,
     }
 }
+
+/// Drag-select autoscroll: holding the mouse past the top/bottom edge
+/// of the view walks it so the selection reaches off-screen text.
+/// Positive scrolls up (into history), negative back toward live,
+/// scaled per frame; zero inside the view.
+pub fn drag_scroll_lines(mouse_y: f64, view_h: f64) -> isize {
+    if mouse_y < 0.0 {
+        2
+    } else if mouse_y >= view_h {
+        -2
+    } else {
+        0
+    }
+}

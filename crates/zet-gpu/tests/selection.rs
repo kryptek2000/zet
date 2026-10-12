@@ -91,3 +91,15 @@ fn select_all_empty_when_nothing_there() {
     assert!(Selection::all(20, 0).is_empty());
     assert!(Selection::all(0, 5).is_empty());
 }
+
+#[test]
+fn drag_past_edge_scrolls_view() {
+    use zet_gpu::selection::drag_scroll_lines;
+    // Mouse above the view (y<0) scrolls up; below scrolls down;
+    // inside stays put.
+    assert!(drag_scroll_lines(-4.0, 400.0) > 0);
+    assert!(drag_scroll_lines(404.0, 400.0) < 0);
+    assert_eq!(drag_scroll_lines(0.0, 400.0), 0);
+    assert_eq!(drag_scroll_lines(200.0, 400.0), 0);
+    assert_eq!(drag_scroll_lines(399.0, 400.0), 0);
+}
