@@ -236,6 +236,9 @@ impl GoClient {
     /// Flatten messages to one input (system first). The Responses
     /// protocol has no function calling: agent turns (which always send
     /// tools) fail LOUD here instead of running tool-blind.
+    /// Reasoning effort stays minimal (NL answers are one-liners; the
+    /// model would otherwise burn the token budget thinking) with a 512
+    /// floor so thinking never starves the answer.
     fn responses_body(&self, req: &ChatRequest) -> Value {
         let mut parts = Vec::new();
         if let Some(system) = &req.system {
@@ -247,7 +250,8 @@ impl GoClient {
         json!({
             "model": self.model,
             "input": parts.join("\n"),
-            "max_output_tokens": req.max_tokens,
+            "max_output_tokens": req.max_tokens.max(512),
+            "reasoning": {"effort": "minimal"},
         })
     }
 

@@ -108,6 +108,12 @@ fn protocol_unsupported_falls_back_to_responses() {
         assert_session(&head);
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload["model"], "proto-fallback-model");
+        // One-liner leg: minimal thinking, floored budget.
+        assert_eq!(payload["reasoning"]["effort"], "minimal");
+        assert!(
+            payload["max_output_tokens"].as_u64().unwrap_or(0) >= 512,
+            "{payload}"
+        );
         reply(
             &mut stream,
             200,
