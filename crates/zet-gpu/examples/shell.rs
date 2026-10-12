@@ -447,7 +447,7 @@ impl App {
     }
 
     /// Copy the mouse selection to the clipboard (no-op when empty).
-    fn copy_selection(&self) {
+    fn copy_selection(&mut self) {
         let Some(sel) = &self.selection else {
             return;
         };
@@ -455,8 +455,19 @@ impl App {
         if text.is_empty() {
             return;
         }
-        if let Ok(mut clip) = arboard::Clipboard::new() {
-            let _ = clip.set_text(text);
+        let input = self.current_text().unwrap_or_default();
+        match arboard::Clipboard::new().and_then(|mut clip| clip.set_text(text)) {
+            Ok(()) => {
+                let (s, e) = sel.normalized();
+                let lines = e.row - s.row + 1;
+                self.ghost.notify(
+                    input,
+                    format!("(copied {lines} line{})", if lines == 1 { "" } else { "s" }),
+                );
+            }
+            Err(e) => {
+                self.ghost.notify(input, format!("(copy failed: {e})"));
+            }
         }
     }
 
