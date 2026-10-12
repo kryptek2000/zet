@@ -98,6 +98,17 @@ fn paste_normalizes_newlines_to_cr() {
 }
 
 #[test]
+fn copy_chord_is_detected_not_typed() {
+    use zet_gpu::input::is_copy;
+    // Ctrl+Shift+C copies; bare Ctrl+C stays SIGINT, plain C types.
+    assert!(is_copy(&Key::Character("C".into()), true, &ctrl_shift()));
+    assert!(is_copy(&Key::Character("c".into()), true, &ctrl_shift()));
+    assert!(!is_copy(&Key::Character("c".into()), true, &ctrl()));
+    assert!(!is_copy(&Key::Character("c".into()), true, &plain()));
+    assert!(!is_copy(&Key::Character("C".into()), false, &ctrl_shift()));
+}
+
+#[test]
 fn ctrl_g_toggles_agent_not_bell() {
     use zet_gpu::input::is_agent_toggle;
     // Ctrl+G would type BEL (0x07) via translate; in the shell it must

@@ -11,6 +11,7 @@ Everything below describes the built window (`cargo run -p zet-gpu
 | `Esc` | Dismiss ghost / cancel an in-flight answer / exit goal mode. Swallowed only when it did something; otherwise passes to the shell. |
 | `Enter` | Known commands run. Anything else translates via the model (preview swaps in). In goal mode, starts the turn. While an answer is in flight, Enter waits. |
 | `Ctrl+Shift+V`, `Shift+Ins` | Paste (newlines become Enter). |
+| Drag / `Ctrl+Shift+C` / right-click | Select text with the mouse; copy the selection (right-click copies too). Typing clears it. |
 | `Backspace` | Erase via the shell's own VERASE — works in every line discipline. |
 | `Del` | Forward-delete (`ESC[3~`), handled by the shell natively. |
 | `Ctrl+C` | Normal SIGINT. While an agent turn runs, the *only* key that reaches the shell: the brake that cancels its running command. |

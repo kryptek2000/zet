@@ -80,6 +80,15 @@ const GHOST_RGBA: Rgba = Rgba {
     a: 1.0,
 };
 
+/// Mouse-selection fill: dark mint-teal, solid (no blending) with white
+/// ink — distinct from the white-block cursor.
+const SEL_RGBA: Rgba = Rgba {
+    r: 0.10,
+    g: 0.30,
+    b: 0.27,
+    a: 1.0,
+};
+
 /// Map a terminal cell color to linear display RGB.
 /// M0 palette: classic 16 ANSI colors picked as sRGB display values and
 /// converted to linear (the swapchain is an sRGB format); Rgb passes
@@ -429,11 +438,19 @@ impl Renderer {
 
     /// Stage terminal grid cells as textured quads for the next render().
     /// M0: one glyph per cell; CJK/combining alignment is a follow-up.
-    /// The cursor cell is drawn inverted (block cursor).
-    pub fn draw_terminal(&mut self, term: &zet_term::Terminal, cols: usize, rows: usize) {
+    /// The cursor cell is drawn inverted (block cursor); mouse-selected
+    /// cells draw in selection tint (absolute rows via scrollback).
+    pub fn draw_terminal(
+        &mut self,
+        term: &zet_term::Terminal,
+        cols: usize,
+        rows: usize,
+        sel: Option<crate::selection::Selection>,
+    ) {
         self.quads.clear();
         let (cur_x, cur_y) = term.cursor();
         let show_cursor = term.cursor_visible();
+        let sb = term.abs_base();
         for y in 0..rows {
             let line: Vec<char> = term.line_text(y).chars().collect();
             for (x, &c) in line.iter().enumerate().take(cols) {
@@ -442,12 +459,15 @@ impl Renderer {
                 let bg = cell.map(|cell| cell.bg).unwrap_or_default();
                 let bold = cell.map(|cell| cell.bold).unwrap_or(false);
                 let cursor_here = show_cursor && x == cur_x && y == cur_y;
-                if bg != zet_term::Color::Default || cursor_here {
+                let selected = sel.as_ref().is_some_and(|s| s.contains(x, sb + y));
+                if bg != zet_term::Color::Default || cursor_here || selected {
                     let fill = if cursor_here {
                         match fg {
                             zet_term::Color::Default => Rgba::WHITE,
                             _ => term_color(fg, bold),
                         }
+                    } else if selected {
+                        SEL_RGBA
                     } else {
                         term_color(bg, false)
                     };
@@ -471,6 +491,8 @@ impl Renderer {
                         zet_term::Color::Default => BG_RGBA,
                         _ => term_color(bg, false),
                     }
+                } else if selected {
+                    Rgba::WHITE
                 } else {
                     term_color(fg, bold)
                 };

@@ -5,11 +5,12 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::Window;
-use zet_gpu::input::{is_agent_toggle, is_paste, paste_bytes, translate};
+use zet_gpu::input::{is_agent_toggle, is_copy, is_paste, paste_bytes, translate};
+use zet_gpu::selection::{pix_to_cell, Selection};
 use zet_gpu::Renderer;
 use zet_pty::shell::ShellState;
 use zet_pty::Session;
@@ -59,6 +60,12 @@ struct App {
     /// shell-reported aliases/functions). Unknown first words route
     /// to the model instead — no modes, no chords.
     known: zet_pty::KnownCommands,
+    /// Mouse selection (absolute cells): drag to select, Ctrl+Shift+C
+    /// or right-click to copy. Typing clears it.
+    selection: Option<Selection>,
+    selecting: bool,
+    mouse_px: Option<(f64, f64)>,
+    was_alt: bool,
     goal_mode: bool,
     agent_busy: bool,
     agent_rx: Option<Receiver<Option<AgentDone>>>,
@@ -171,6 +178,14 @@ impl App {
             rec.pump(&mut self.term, &shell_cwd(&self.session));
             // Shell-reported aliases/functions feed the router.
             self.known.insert_names(rec.drain_cmd_names());
+        }
+        // Alt switch swaps the visible grid: any selection addresses
+        // stale rows, so drop it (both directions).
+        let alt = self.term.alt_active();
+        if alt != self.was_alt {
+            self.selection = None;
+            self.selecting = false;
+            self.was_alt = alt;
         }
         // Settle probe (ZET_PERF=1 only): Enter-to-block with a fully
         // drained channel. Parsed + recorded; pixels ≤1 frame behind
@@ -373,6 +388,36 @@ impl App {
             .as_ref()
             .and_then(|rec| rec.current_input(&self.term))
             .map(|(text, _, _)| text)
+    }
+
+    /// Cell under the last known mouse position (absolute rows).
+    fn mouse_cell(&self) -> Option<zet_gpu::selection::CellPos> {
+        let (x, y) = self.mouse_px?;
+        let r = self.renderer.as_ref()?;
+        let (cw, ch) = r.cell_px();
+        Some(pix_to_cell(
+            x,
+            y,
+            cw,
+            ch,
+            self.cols,
+            self.rows,
+            self.term.abs_base(),
+        ))
+    }
+
+    /// Copy the mouse selection to the clipboard (no-op when empty).
+    fn copy_selection(&self) {
+        let Some(sel) = &self.selection else {
+            return;
+        };
+        let text = sel.text(&self.term);
+        if text.is_empty() {
+            return;
+        }
+        if let Ok(mut clip) = arboard::Clipboard::new() {
+            let _ = clip.set_text(text);
+        }
     }
 
     fn prompt_input(&self) -> Option<zet_suggest::PromptInput> {
@@ -706,9 +751,15 @@ impl ApplicationHandler for App {
                     self.perf_input = Some(std::time::Instant::now());
                 }
                 // Agent running: input locked (its steps own the line).
+                // Copy is local, not shell input: reading the grid never
+                // disturbs the turn, so it stays available while busy.
                 // Ctrl+C still reaches the shell: the emergency brake that
                 // cancels the agent's running command (D fires, step ends).
                 if self.agent_busy {
+                    if is_copy(&event.logical_key, pressed, &self.mods) {
+                        self.copy_selection();
+                        return;
+                    }
                     if let Some(bytes) = translate(
                         &event.logical_key,
                         event.text.as_deref(),
@@ -732,6 +783,11 @@ impl ApplicationHandler for App {
                             }
                         }
                     }
+                    return;
+                }
+                // Copy: Ctrl+Shift+C copies the mouse selection (never ETX).
+                if is_copy(&event.logical_key, pressed, &self.mods) {
+                    self.copy_selection();
                     return;
                 }
                 // Agent goal mode toggle: Ctrl+G would otherwise type BEL.
@@ -846,6 +902,10 @@ impl ApplicationHandler for App {
                     pressed,
                     &self.mods,
                 ) {
+                    // Typing clears the mouse selection.
+                    if pressed {
+                        self.selection = None;
+                    }
                     // Send exactly what the line discipline erases with.
                     if bytes == [0x7f] {
                         bytes = vec![self.erase];
@@ -891,7 +951,7 @@ impl ApplicationHandler for App {
                     return;
                 }
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
-                    r.draw_terminal(&self.term, self.cols, self.rows);
+                    r.draw_terminal(&self.term, self.cols, self.rows, self.selection);
                     if let Some(g) = self.ghost.visible() {
                         let (cx, cy) = self.term.cursor();
                         r.draw_ghost(cy, cx, g, self.cols);
@@ -902,6 +962,44 @@ impl ApplicationHandler for App {
                     self.note_frame();
                 }
                 // No re-arm here: about_to_wait drives the heartbeat.
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                self.needs_draw = true;
+                match (button, state) {
+                    // Left-drag selects; click without drag clears.
+                    (MouseButton::Left, ElementState::Pressed) => {
+                        if let Some(cell) = self.mouse_cell() {
+                            self.selecting = true;
+                            self.selection =
+                                Some(Selection::new((cell.col, cell.row), (cell.col, cell.row)));
+                        }
+                    }
+                    (MouseButton::Left, ElementState::Released) => {
+                        self.selecting = false;
+                        if self.selection.is_some_and(|s| s.is_empty()) {
+                            self.selection = None;
+                        }
+                    }
+                    // Right-click copies the selection (terminal convention).
+                    (MouseButton::Right, ElementState::Pressed) => {
+                        self.copy_selection();
+                    }
+                    _ => {}
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.mouse_px = Some((position.x, position.y));
+                if self.selecting {
+                    if let Some(cell) = self.mouse_cell() {
+                        if let Some(sel) = &mut self.selection {
+                            sel.active = zet_gpu::selection::CellPos {
+                                col: cell.col,
+                                row: cell.row,
+                            };
+                            self.needs_draw = true;
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -993,6 +1091,10 @@ fn main() {
         startup_spec,
         ghost,
         known: zet_pty::KnownCommands::from_env(),
+        selection: None,
+        selecting: false,
+        mouse_px: None,
+        was_alt: false,
         nl_rx: None,
         nl_wake: false,
         goal_mode: false,

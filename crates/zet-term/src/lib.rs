@@ -649,6 +649,23 @@ impl Terminal {
         self.scrollback.len()
     }
 
+    /// Alt screen active (vim/helix): the visible grid is NOT the main
+    /// grid, so absolute-row math (selection, markers) must use offset 0
+    /// and main-buffer text. The scrollback itself is preserved underneath.
+    pub fn alt_active(&self) -> bool {
+        self.alt_active
+    }
+
+    /// Absolute-row base for the visible grid: scrollback length on the
+    /// main grid, 0 on alt (which shows its own blank grid).
+    pub fn abs_base(&self) -> usize {
+        if self.alt_active {
+            0
+        } else {
+            self.scrollback.len()
+        }
+    }
+
     pub fn scrollback_line(&self, i: usize) -> Option<String> {
         self.scrollback
             .get(i)

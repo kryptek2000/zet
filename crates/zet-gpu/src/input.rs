@@ -27,6 +27,18 @@ pub fn paste_bytes(text: &str) -> Vec<u8> {
     text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
 }
 
+/// True when this press copies the mouse selection (Ctrl+Shift+C),
+/// not text to type. Check before [`translate`]: with Ctrl held, C would
+/// otherwise become ETX (0x03) — SIGINT, the opposite of copying.
+pub fn is_copy(logical: &Key, pressed: bool, mods: &ModifiersState) -> bool {
+    if !pressed {
+        return false;
+    }
+    let ctrl = mods.contains(ModifiersState::CONTROL);
+    let shift = mods.contains(ModifiersState::SHIFT);
+    matches!(logical, Key::Character(s) if ctrl && shift && s.eq_ignore_ascii_case("c"))
+}
+
 /// True when this press toggles agent goal mode (Ctrl+G). Check before
 /// [`translate`]: Ctrl+G would otherwise become a BEL byte (0x07).
 pub fn is_agent_toggle(logical: &Key, pressed: bool, mods: &ModifiersState) -> bool {
