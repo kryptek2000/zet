@@ -171,3 +171,49 @@ impl ChatModel for OpenAICompat {
         Ok(ChatResponse { text, tool_calls })
     }
 }
+
+/// `GET {base}/models` ids (OpenAI shape: `{"data":[{"id":…}]}`).
+/// Powers `zet models`: OpenRouter, Go, any compat endpoint. 10s bound.
+pub fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, crate::ModelError> {
+    use crate::ModelError;
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(std::time::Duration::from_secs(10)))
+            .build(),
+    );
+    let mut resp = agent
+        .get(format!("{}/models", base_url.trim_end_matches('/')))
+        .header("Authorization", format!("Bearer {api_key}"))
+        .call()
+        .map_err(|e| ModelError::Network(e.to_string()))?;
+    let status = resp.status().as_u16();
+    if status != 200 {
+        let snippet = snippet(resp.body_mut());
+        return Err(match status {
+            401 | 403 => ModelError::Auth(format!("provider rejected the credentials: {snippet}")),
+            429 => ModelError::RateLimited(format!("provider rate limit hit: {snippet}")),
+            500.. => ModelError::Server(format!("provider status {status}: {snippet}")),
+            _ => ModelError::Protocol(format!("model list failed: status {status}: {snippet}")),
+        });
+    }
+    let payload: Value = resp
+        .body_mut()
+        .read_json()
+        .map_err(|e| ModelError::Protocol(format!("bad model list JSON: {e}")))?;
+    let ids = payload
+        .get("data")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("id")?.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(ids)
+}
+
+/// OpenRouter free-tier marker: ids ending in `:free`.
+pub fn is_free_model(id: &str) -> bool {
+    id.ends_with(":free")
+}

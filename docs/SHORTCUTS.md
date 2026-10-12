@@ -39,6 +39,8 @@ Just type — command or plain words — and press `Enter`:
   fresh local probe. Set it from inside any window with e.g.
   `zet inline openrouter:openai/gpt-4o-mini` (or `zet inline off`) —
   windows pick it up with no restart. `zet inline` shows the current one.
+  `zet models` lists choosable models as ready specs (OpenRouter key,
+  local server, or a compat URL; `--free` keeps free-tier ids).
   With nothing configured: sticky `(no model: …)` hint, nothing runs.
 - Broken replies never swap: `(invalid: …)` / `(no command)` notice instead.
 - Greetings and smalltalk get an `agent: …` reply on the prompt line

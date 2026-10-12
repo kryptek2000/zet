@@ -133,3 +133,15 @@ fn inline_bad_spec_fails_loudly_without_writing() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("bad spec"), "{err}");
 }
+
+#[test]
+fn models_bad_args_fail_loudly_without_network() {
+    // Arg validation precedes all IO: safe and deterministic in CI.
+    for args in [
+        &["models", "--nope"][..],
+        &["models", "http://a", "http://b"][..],
+    ] {
+        let out = zet().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+    }
+}

@@ -196,6 +196,21 @@ pub fn autodetect_local_at(host: &str, port: u16) -> Option<String> {
     if !ip.is_loopback() {
         return None;
     }
+    let names = local_tags_at(host, port)?;
+    LOCAL_PREFERRED
+        .iter()
+        .find(|p| names.iter().any(|n| n == *p))
+        .map(|s| format!("local:{s}"))
+}
+
+/// Every model the local server reports (ollama `/api/tags`), for
+/// `zet models`. None when unreachable — same fast-fail bounds as
+/// autodetect (100ms probe, 2s fetch), loopback only.
+pub fn local_tags_at(host: &str, port: u16) -> Option<Vec<String>> {
+    let ip: std::net::IpAddr = host.parse().ok()?;
+    if !ip.is_loopback() {
+        return None;
+    }
     let addr = format!("{host}:{port}");
     let sock: std::net::SocketAddr = addr.parse().ok()?;
     std::net::TcpStream::connect_timeout(&sock, std::time::Duration::from_millis(100)).ok()?;
@@ -208,16 +223,13 @@ pub fn autodetect_local_at(host: &str, port: u16) -> Option<String> {
     let mut body = agent.get(format!("http://{addr}/api/tags")).call().ok()?;
     let text = body.body_mut().read_to_string().ok()?;
     let json: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let names: Vec<&str> = json
+    let names: Vec<String> = json
         .get("models")?
         .as_array()?
         .iter()
-        .filter_map(|m| m.get("name")?.as_str())
+        .filter_map(|m| m.get("name")?.as_str().map(str::to_string))
         .collect();
-    LOCAL_PREFERRED
-        .iter()
-        .find(|p| names.iter().any(|n| n == *p))
-        .map(|s| format!("local:{s}"))
+    Some(names)
 }
 
 /// Left side of a `local:` split: scheme://host[:port][/path], no

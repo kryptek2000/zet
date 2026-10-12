@@ -7,6 +7,7 @@ pub mod openai;
 
 pub use keys::KeyError;
 pub use mcp::McpError;
+pub use openai::{is_free_model, list_models};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

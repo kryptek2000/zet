@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>ZET · Finished Vision</title>
+<style>
+:root{color-scheme:dark;--bg:#070b12;--win:#0c121c;--grid:#0a101a;--line:#1d2a3c;--text:#e8eff7;--muted:#8b9cad;--dim:#5c6f84;--mint:#58e5ce;--amber:#f6c478;--red:#ef8f94;--green:#83d9a5;--mono:'JetBrains Mono','SFMono-Regular',Consolas,'Liberation Mono',monospace}
+*{box-sizing:border-box}html,body{margin:0;min-height:100%}body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;padding:22px;display:flex;flex-direction:column;gap:14px;align-items:center}
+.bar{width:min(1060px,100%);display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.bar h1{font-size:13px;font-weight:600;margin:0;color:var(--muted)}
+.bar h1 b{color:var(--text)}
+.scn{border:1px solid var(--line);background:var(--win);color:var(--muted);border-radius:7px;padding:8px 12px;font:inherit;font-size:12px;cursor:pointer}
+.scn:hover{border-color:var(--mint);color:var(--mint)}
+.scn.on{border-color:var(--mint);color:var(--mint);background:#58e5ce12}
+.win{width:min(1060px,100%);background:var(--win);border:1px solid #2c3c50;border-radius:12px;overflow:hidden;box-shadow:0 24px 90px #000a}
+.chrome{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--line);background:#0b111b;font-size:11px;color:var(--dim)}
+.dots{display:flex;gap:6px}.dots i{width:10px;height:10px;border-radius:50%;background:#314154}.dots i:first-child{background:#c97b7d}.dots i:nth-child(2){background:#c9a86a}.dots i:nth-child(3){background:#6fae8d}
+.title{margin:0 auto;color:var(--muted)}.title b{color:var(--text)}
+.pill{display:flex;align-items:center;gap:7px;border:1px solid var(--line);border-radius:20px;padding:4px 11px;color:var(--muted);font-size:11px}
+.pill i{width:7px;height:7px;border-radius:50%;background:var(--green)}
+.grid{background:var(--grid);padding:18px 20px;min-height:480px;font-size:13px;line-height:1.75}
+.blk{margin:0 0 14px}
+.meta{display:flex;gap:10px;font-size:10px;color:var(--dim);margin-bottom:2px}
+.meta .ok{color:var(--green)}.meta .bad{color:var(--amber)}
+.cmd{color:var(--text);overflow-wrap:anywhere}.cmd .p{color:var(--mint);margin-right:10px}
+.out{color:var(--muted);white-space:pre-wrap;margin-left:24px}.out .g{color:var(--green)}.out .r{color:var(--red)}.out .a{color:var(--amber)}
+.ghost{color:#3d5266}
+.notice{color:var(--mint);margin-left:24px}
+.typed-agent{color:#c9b8f5}
+.gate{margin:6px 0 6px 24px;border:1px solid #5c4f33;background:#171307;border-radius:7px;padding:10px 12px;max-width:560px}
+.gate .t{font-size:10px;color:var(--amber);letter-spacing:1px}
+.gate .c{color:#e6c4a1;margin:6px 0}
+.gate .row{display:flex;gap:8px}
+.gate button{font:inherit;font-size:11px;border-radius:5px;padding:6px 12px;cursor:pointer;border:1px solid #3a4a5c;background:#1b2635;color:var(--text)}
+.gate button.go{background:#1f5c4f;border-color:#3a9586;color:#e6fff7}
+.prompt-line{display:flex;align-items:center;gap:0;margin-top:4px}
+.prompt-line .p{color:var(--mint);margin-right:10px}
+.caret{display:inline-block;width:8px;height:16px;background:var(--text);vertical-align:-3px;animation:blink 1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+@media(prefers-reduced-motion:reduce){.caret{animation:none}}
+.status{display:flex;gap:16px;padding:8px 16px;border-top:1px solid var(--line);background:#0a111b;font-size:10px;color:var(--dim)}
+.status .r{margin-left:auto;color:var(--dim)}
+.cap{width:min(1060px,100%);color:var(--dim);font-size:12px;line-height:1.7}
+.cap b{color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="bar">
+  <h1><b>ZET</b> · finished vision — no panels, the agent lives in the grid</h1>
+  <button class="scn on" data-s="hello">1 · hello</button>
+  <button class="scn" data-s="update">2 · zet update linux</button>
+  <button class="scn" data-s="danger">3 · zet wipe tmp</button>
+</div>
+<div class="win">
+  <div class="chrome">
+    <div class="dots" aria-hidden="true"><i></i><i></i><i></i></div>
+    <div class="title"><b>ZET</b> — /bin/bash (exit 0)</div>
+    <div class="pill"><i></i><span id="pillModel">openrouter:laguna-s-2.1:free</span></div>
+  </div>
+  <div class="grid" id="grid" aria-live="polite"></div>
+  <div class="status"><span>⎇ master</span><span>3 blocks</span><span class="r">Tab ghost · F12 undo · Ctrl+G agent</span></div>
+</div>
+<p class="cap" id="cap"></p>
+<script>
+(()=>{'use strict';
+const grid=document.getElementById('grid'),cap=document.getElementById('cap');
+const reduced=matchMedia('(prefers-reduced-motion: reduce)').matches;
+const P='<span class="p">❯</span>';
+const S={
+hello:{cap:'<b>1 ·</b> Plain words are answered, never 127. No mode entered, title untouched.',
+html:`<div class="blk"><div class="meta"><span>01</span><span class="ok">exit 0</span><span>21:52:03 · 4ms</span></div><div class="cmd">${P}ls</div><div class="out">blocks.sqlite  docs  shell</div></div><div class="blk"><div class="cmd">${P}hello</div><div class="notice">agent: Hey! Tell me what to run.</div></div><div class="prompt-line">${P}<span class="caret"></span></div>`},
+update:{cap:'<b>2 ·</b> <b>zet</b> is a verb. The order translates, the tier gate passes (sudo still asks), and it <b>runs</b> — typed visibly, recorded like your own keystrokes.',
+html:`<div class="blk"><div class="cmd">${P}zet update linux</div><div class="out"><span class="typed-agent">sudo apt update &amp;&amp; sudo apt upgrade -y</span></div><div class="out">Hit:1 http://archive.ubuntu.com noble InRelease
+<span class="g">19 packages can be upgraded.</span> Run 'apt list --upgradable'.</div><div class="meta"><span class="ok">exit 0</span><span>agent turn · T2 · journaled · F12 undoes</span></div></div><div class="prompt-line">${P}<span class="caret"></span></div>`},
+danger:{cap:'<b>3 ·</b> T3 never auto-passes. The same wake word that runs updates <b>stops</b> here — preview + review notice, Enter only from you.',
+html:`<div class="blk"><div class="cmd">${P}zet wipe tmp</div><div class="cmd">${P}sudo rm -rf /tmp/* <span class="ghost">(review: critical command — Enter to run)</span></div><div class="gate"><div class="t">T3 · CRITICAL — TYPE TO CONFIRM</div><div class="c">sudo rm -rf /tmp/*</div><div class="row"><button class="go">Run it</button><button>Reject</button></div></div></div><div class="prompt-line">${P}<span class="caret"></span></div>`}};
+function show(k){document.querySelectorAll('.scn').forEach(b=>b.classList.toggle('on',b.dataset.s===k));grid.innerHTML=S[k].html;cap.innerHTML=S[k].cap;}
+document.querySelectorAll('.scn').forEach(b=>b.addEventListener('click',()=>show(b.dataset.s)));
+show('hello');
+})();
+</script>
+</body>
+</html>

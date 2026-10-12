@@ -12,6 +12,7 @@ fn main() {
         ["inline"] => inline_show(),
         ["inline", "off"] => inline_clear(),
         ["inline", spec] => inline_set(spec),
+        ["models", rest @ ..] => models_cmd(rest),
         ["blocks", rest @ ..] => blocks(rest),
         ["journal", rest @ ..] => journal(rest),
         _ => {
@@ -21,6 +22,8 @@ fn main() {
             eprintln!("  zet auth rm <provider>    delete key from OS keychain");
             eprintln!("  zet inline [SPEC|off]     show/set/clear the NL/agent model");
             eprintln!("                            (e.g. openrouter:openai/gpt-4o-mini, local:llama3.2:1b)");
+            eprintln!("  zet models [--free] [URL] list choosable models (ready specs)");
+            eprintln!("                            (openrouter key, local server, or compat URL)");
             eprintln!("  zet blocks [--db PATH] [--limit N] [--session S]");
             eprintln!("                            list recorded command blocks");
             eprintln!("  zet journal [--limit N]   list agent turn journal entries");
@@ -221,6 +224,84 @@ fn inline_clear() {
             std::process::exit(1);
         }
     }
+}
+
+/// List choosable models as ready `zet inline` specs: OpenRouter (key),
+/// local server (no key), or one compat URL. `--free` keeps `:free` ids.
+fn models_cmd(argv: &[&str]) {
+    let mut free_only = false;
+    let mut url: Option<&str> = None;
+    for a in argv {
+        if *a == "--free" {
+            free_only = true;
+        } else if a.starts_with('-') {
+            eprintln!("unknown flag {a:?}: want --free");
+            std::process::exit(2);
+        } else if url.is_none() {
+            url = Some(a);
+        } else {
+            eprintln!("too many args: want [--free] [URL]");
+            std::process::exit(2);
+        }
+    }
+    let keep = |id: &str| !free_only || zet_models::is_free_model(id);
+    let mut listed = 0;
+    if let Some(url) = url {
+        // One compat endpoint, fail loud (explicitly asked).
+        let key = keychains(|c| zet_models::keys::resolve_key("compat", c));
+        let Some(key) = key else {
+            eprintln!("no key for 'compat': run `zet auth add compat` or set ZET_COMPAT_API_KEY");
+            std::process::exit(1);
+        };
+        match zet_models::list_models(url, &key) {
+            Ok(ids) => {
+                for id in ids.iter().filter(|id| keep(id)) {
+                    println!("compat:{url}:{id}");
+                    listed += 1;
+                }
+            }
+            Err(e) => {
+                eprintln!("{url}: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // Sweep every source with credentials; misses note to stderr.
+        let or_key = keychains(|c| zet_models::keys::resolve_key("openrouter", c));
+        match or_key {
+            Some(key) => match zet_models::list_models("https://openrouter.ai/api/v1", &key) {
+                Ok(ids) => {
+                    for id in ids.iter().filter(|id| keep(id)) {
+                        println!("openrouter:{id}");
+                        listed += 1;
+                    }
+                }
+                Err(e) => eprintln!("openrouter: {e}"),
+            },
+            None => eprintln!("openrouter: skipped (no key — `zet auth add openrouter`)"),
+        }
+        match zet_models::keys::local_tags_at("127.0.0.1", 11434) {
+            Some(names) => {
+                for name in names.iter().filter(|n| keep(n)) {
+                    println!("local:{name}");
+                    listed += 1;
+                }
+            }
+            None => eprintln!("local: skipped (no server on 127.0.0.1:11434)"),
+        }
+    }
+    if listed == 0 {
+        eprintln!("no models listed");
+        std::process::exit(1);
+    }
+}
+
+/// Keychain search order for CLI reads (env first, OS keychain second).
+fn keychains<T>(f: impl FnOnce(&[&dyn Keychain]) -> T) -> T {
+    let env = EnvKeychain;
+    let sys = SystemKeychain;
+    let chains: [&dyn Keychain; 2] = [&env, &sys];
+    f(&chains)
 }
 
 fn blocks(argv: &[&str]) {
