@@ -205,3 +205,30 @@ fn model_skips_think_blocks() {
         );
     }
 }
+
+#[test]
+fn lone_greeting_survives_first_line() {
+    // Regression: a bare `Hello!` was eaten as a "prose lead-in" and
+    // dissolved into `(no command)`. A one-line reply IS the answer.
+    let (m, _) = script("Hello!");
+    let s = ModelSuggester::new(m);
+    assert_eq!(s.suggest_nl("hello").unwrap().as_deref(), Some("Hello!"));
+}
+
+#[test]
+fn multiline_leadin_still_skipped() {
+    let (m, _) = script("Sure thing!\nls -la");
+    let s = ModelSuggester::new(m);
+    assert_eq!(
+        s.suggest_nl("list files").unwrap().as_deref(),
+        Some("ls -la")
+    );
+}
+
+#[test]
+fn chat_with_bang_survives() {
+    let (m, _) = script("CHAT: Hey!");
+    let s = ModelSuggester::new(m);
+    let answer = s.suggest_nl("hello").unwrap().expect("chat answer");
+    assert_eq!(chat_reply(&answer).as_deref(), Some("Hey!"));
+}

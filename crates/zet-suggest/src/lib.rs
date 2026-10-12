@@ -129,8 +129,12 @@ fn first_line(text: &str) -> Option<String> {
             continue;
         }
         // Skip prose lead-ins ("Sure thing!", "Here you go:"). Commands
-        // ending in !?: are the accepted casualty (rare; echo strings).
-        if line.ends_with([':', '!', '?']) {
+        // ending in !?: are the accepted casualty — EXCEPT when the
+        // whole reply is one line: a lone `Hello!` is an answer, not a
+        // lead-in, and skipping it dissolves into `(no command)`.
+        if line.ends_with([':', '!', '?'])
+            && text.lines().filter(|l| !l.trim().is_empty()).count() > 1
+        {
             continue;
         }
         // Fence openers (``` or ```sh) carry no command; closed inline
