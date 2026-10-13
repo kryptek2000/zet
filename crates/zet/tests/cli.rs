@@ -367,3 +367,11 @@ fn undo_refuses_when_head_moved_on() {
         "junk should survive refusal"
     );
 }
+
+#[test]
+fn run_rejects_flags_and_empty_goal() {
+    let out = zet().args(["run", "--fast"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let out = zet().args(["run"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}

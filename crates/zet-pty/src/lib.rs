@@ -482,7 +482,9 @@ fn first_word_at(line: &str) -> Option<(String, usize)> {
 /// Canonical CLI group list — the CLI dispatch (zet/src/main.rs) and
 /// this fallback share it. Adding a group? Add the match arm AND this
 /// list, or the window mistranslates the new command.
-pub const CLI_SUBCOMMANDS: &[&str] = &["auth", "blocks", "journal", "inline", "models", "undo"];
+pub const CLI_SUBCOMMANDS: &[&str] = &[
+    "auth", "blocks", "journal", "inline", "models", "undo", "run",
+];
 
 pub fn zet_fallback(line: &str) -> Option<String> {
     let rest = line.trim_start().strip_prefix("zet")?;

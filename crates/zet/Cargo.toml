@@ -9,6 +9,7 @@ zet-agent = { path = "../zet-agent" }
 zet-models = { path = "../zet-models" }
 zet-blocks = { path = "../zet-blocks" }
 zet-pty = { path = "../zet-pty" }
+zet-context = { path = "../zet-context" }
 
 [dev-dependencies]
 zet-policy = { path = "../zet-policy" }

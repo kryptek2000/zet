@@ -137,6 +137,17 @@ impl Approver for DenyNonRead {
     }
 }
 
+/// Unattended delegation (`zet run`): everything the window would
+/// pre-consent, except T3 — critical commands need a human present
+/// to type-confirm, and there is none.
+pub struct Unattended;
+
+impl Approver for Unattended {
+    fn approve(&self, tier: Tier, _command: &str) -> bool {
+        tier != Tier::T3
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct JournalEntry {
     pub command: String,

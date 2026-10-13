@@ -18,6 +18,7 @@ fn main() {
         ["blocks", rest @ ..] => blocks(rest),
         ["journal", rest @ ..] => journal(rest),
         ["undo"] => undo(),
+        ["run", rest @ ..] => run_cmd(rest),
         // Known group, bad usage: hint the group, not the top level.
         // (Guarded by the shared list so dispatch and the window router
         // can't drift apart — see zet_pty::CLI_SUBCOMMANDS.)
@@ -38,6 +39,7 @@ fn main() {
             eprintln!("                            list recorded command blocks");
             eprintln!("  zet journal [--limit N]   agent turns + recent commands (one history)");
             eprintln!("  zet undo                  undo the last checkpointed agent step here");
+            eprintln!("  zet run <goal...>         run an agent turn here, unattended (never T3)");
             std::process::exit(2);
         }
     }
@@ -423,6 +425,63 @@ fn blocks(argv: &[&str]) {
     }
 }
 
+/// Delegated run: an agent turn in this directory, unattended. T3 is
+/// never approved (no human to type-confirm); the turn is journaled
+/// so `zet journal` shows it and `zet undo` reaches it.
+fn run_cmd(argv: &[&str]) {
+    if argv.is_empty() {
+        eprintln!("usage: zet run <goal...>");
+        std::process::exit(2);
+    }
+    if argv.iter().any(|a| a.starts_with('-')) {
+        eprintln!("zet run takes a goal, not flags");
+        std::process::exit(2);
+    }
+    let goal = argv.join(" ");
+    let path = zet_models::keys::inline_spec_path();
+    let spec = match std::env::var("ZET_INLINE_SPEC") {
+        Ok(s) => s,
+        Err(_) => match zet_models::keys::read_inline_spec_at(&path) {
+            Some(s) => s,
+            None => match zet_models::keys::autodetect_local() {
+                Some(s) => s,
+                None => {
+                    eprintln!("no model: set ZET_INLINE_SPEC or `zet inline <spec>`");
+                    std::process::exit(1);
+                }
+            },
+        },
+    };
+    let provider =
+        keychains(|c| zet_models::keys::resolve_provider(&spec, c)).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1);
+        });
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let in_repo = zet_agent::detect_repo(&cwd);
+    let git = zet_context::git_state(&cwd);
+    let context = zet_context::gather(
+        &[],
+        &cwd.to_string_lossy(),
+        git,
+        zet_context::DEFAULT_BUDGET,
+    )
+    .render();
+    let mut agent =
+        zet_agent::Agent::new(provider.into_client(), zet_agent::Unattended, in_repo, 8)
+            .with_workdir(cwd)
+            .with_context(context);
+    match agent.run(&goal) {
+        Ok(summary) => {
+            println!("{summary}");
+            let _ = zet_agent::append_journal(&zet_agent::journal_path_default(), &agent.journal);
+        }
+        Err(e) => {
+            eprintln!("agent error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
 /// One-key undo behind `zet undo`: the last checkpointed agent step,
 /// applied to the current directory. The window's F12 is the same call
 /// on the live shell — this is its backdoor when the key never arrives.

@@ -714,3 +714,15 @@ fn agreed_plan_reaches_the_system_prompt() {
     assert!(system.contains("1. Create the file"), "{system}");
     assert!(system.contains("2. Verify it"), "{system}");
 }
+
+#[test]
+fn unattended_approves_up_to_t2_never_t3() {
+    use zet_agent::Unattended;
+    use zet_policy::Tier;
+    let a = Unattended;
+    use zet_agent::Approver;
+    assert!(a.approve(Tier::T0, "ls"));
+    assert!(a.approve(Tier::T1, "echo hi > f"));
+    assert!(a.approve(Tier::T2, "rm one-file"));
+    assert!(!a.approve(Tier::T3, "rm -rf /"));
+}

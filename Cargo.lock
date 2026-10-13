@@ -4492,6 +4492,7 @@ dependencies = [
  "nix",
  "zet-agent",
  "zet-blocks",
+ "zet-context",
  "zet-models",
  "zet-policy",
  "zet-pty",
