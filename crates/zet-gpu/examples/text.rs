@@ -66,7 +66,7 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                 } else {
                     if let Some(r) = &mut self.renderer {
-                        r.draw_terminal(&self.term, COLS, ROWS, None);
+                        r.draw_terminal(&self.term, COLS, ROWS, None, 0);
                         r.render();
                         self.rendered += 1;
                     }

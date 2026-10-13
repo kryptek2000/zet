@@ -89,6 +89,27 @@ const SEL_RGBA: Rgba = Rgba {
     a: 1.0,
 };
 
+/// Tab bar: near-black strip; the active segment lifts lighter with
+/// white ink, inactive segments dim. Same quad machinery as cells.
+const TABBAR_BG: Rgba = Rgba {
+    r: 0.03,
+    g: 0.04,
+    b: 0.07,
+    a: 1.0,
+};
+const TAB_ACTIVE_BG: Rgba = Rgba {
+    r: 0.10,
+    g: 0.13,
+    b: 0.20,
+    a: 1.0,
+};
+const TAB_DIM_INK: Rgba = Rgba {
+    r: 0.45,
+    g: 0.48,
+    b: 0.55,
+    a: 1.0,
+};
+
 /// Map a terminal cell color to linear display RGB.
 /// M0 palette: classic 16 ANSI colors picked as sRGB display values and
 /// converted to linear (the swapchain is an sRGB format); Rgb passes
@@ -446,6 +467,7 @@ impl Renderer {
         cols: usize,
         rows: usize,
         sel: Option<crate::selection::Selection>,
+        y_off: u32,
     ) {
         self.quads.clear();
         let (cur_x, cur_y) = term.cursor();
@@ -474,7 +496,7 @@ impl Renderer {
                     if let Some(bg_slot) = self.bg_slot {
                         self.quads.extend(cell_quad(
                             x as u32,
-                            y as u32,
+                            y as u32 + y_off,
                             self.cell_w,
                             self.cell_h,
                             (bg_slot.x, bg_slot.y),
@@ -501,13 +523,55 @@ impl Renderer {
                 };
                 self.quads.extend(cell_quad(
                     x as u32,
-                    y as u32,
+                    y as u32 + y_off,
                     self.cell_w,
                     self.cell_h,
                     (slot.x, slot.y),
                     self.atlas_size,
                     ink,
                 ));
+            }
+        }
+    }
+
+    /// Tab bar on row 0: equal segments, active lifted + white ink,
+    /// inactive dim. Labels pre-truncated by the caller; overlong text
+    /// clips at the grid edge.
+    pub fn draw_tabbar(&mut self, labels: &[String], active: usize, cols: usize) {
+        let n = labels.len().max(1);
+        for x in 0..cols {
+            let seg = crate::selection::tab_segment(x, cols, labels.len());
+            let is_active = seg == active;
+            let fill = if is_active { TAB_ACTIVE_BG } else { TABBAR_BG };
+            if let Some(bg_slot) = self.bg_slot {
+                self.quads.extend(cell_quad(
+                    x as u32,
+                    0,
+                    self.cell_w,
+                    self.cell_h,
+                    (bg_slot.x, bg_slot.y),
+                    self.atlas_size,
+                    fill,
+                ));
+            }
+            let seg_w = cols / n;
+            let lx = x - seg * seg_w;
+            let text: Vec<char> = labels[seg].chars().collect();
+            if lx < text.len() {
+                let c = text[lx];
+                if c != ' ' {
+                    if let Some(slot) = self.slot_for(c) {
+                        self.quads.extend(cell_quad(
+                            x as u32,
+                            0,
+                            self.cell_w,
+                            self.cell_h,
+                            (slot.x, slot.y),
+                            self.atlas_size,
+                            if is_active { Rgba::WHITE } else { TAB_DIM_INK },
+                        ));
+                    }
+                }
             }
         }
     }

@@ -111,6 +111,16 @@ impl Selection {
 
 /// Window pixels to absolute cell. Clamps to the grid; rows offset by
 /// scrollback so a scrolled view still selects the right lines.
+/// Tab-bar hit test: equal segments across the grid width, clamped.
+/// Pure geometry — the bar owns row 0 whenever more than one tab
+/// exists; clicks there switch instead of selecting.
+pub fn tab_segment(x_cell: usize, cols: usize, n_tabs: usize) -> usize {
+    if n_tabs == 0 || cols == 0 {
+        return 0;
+    }
+    (x_cell * n_tabs / cols).min(n_tabs - 1)
+}
+
 pub fn pix_to_cell(
     x: f64,
     y: f64,

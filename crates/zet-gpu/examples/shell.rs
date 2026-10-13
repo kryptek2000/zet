@@ -586,6 +586,9 @@ impl App {
         let (x, y) = self.mouse_px?;
         let r = self.renderer.as_ref()?;
         let (cw, ch) = r.cell_px();
+        // Pixel row 0 belongs to the tab bar when visible: shift the
+        // grid mapping down (bar clicks are intercepted before select).
+        let y = y - self.bar_rows() as f64 * ch as f64;
         Some(pix_to_cell(
             x,
             y,
@@ -713,6 +716,50 @@ impl App {
         }
     }
 
+    /// Tab bar owns row 0 whenever more than one tab exists; the
+    /// terminal grid shrinks by that row (all mappings offset).
+    fn bar_rows(&self) -> usize {
+        (self.tabs.len() > 1) as usize
+    }
+
+    fn grid_rows(&self) -> usize {
+        self.rows.saturating_sub(self.bar_rows())
+    }
+
+    /// Size every tab's grid + PTY to the current window minus the bar.
+    fn fit_all(&mut self) {
+        let (cols, rows) = (self.cols, self.grid_rows());
+        for tab in &mut self.tabs {
+            tab.term.resize(cols, rows);
+            if let Some(s) = &tab.session {
+                let _ = s.resize(cols.min(32767) as u16, rows.min(32767) as u16);
+            }
+        }
+    }
+
+    /// Short per-tab labels: index + cwd tail, truncated to segment.
+    fn tab_labels(&self) -> Vec<String> {
+        let n = self.tabs.len().max(1);
+        let seg_w = (self.cols / n).max(4);
+        self.tabs
+            .iter()
+            .enumerate()
+            .map(|(k, tab)| {
+                let cwd = shell_cwd(&tab.session);
+                let tail = cwd.rsplit('/').next().unwrap_or(&cwd);
+                let name: String = tail
+                    .chars()
+                    .rev()
+                    .take(seg_w - 4)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+                format!(" {} {name}", k + 1)
+            })
+            .collect()
+    }
+
     /// Open a fresh shell tab and switch to it.
     fn new_tab(&mut self) {
         let Some(wake) = self.wake.clone() else {
@@ -721,13 +768,8 @@ impl App {
         self.tabs
             .push(Tab::spawn(&self.prog, self.hook.clone(), wake));
         self.active = self.tabs.len() - 1;
-        // New grid, current window size.
-        let (cols, rows) = (self.cols, self.rows);
-        let tab = &mut self.tabs[self.active];
-        tab.term.resize(cols, rows);
-        if let Some(s) = &tab.session {
-            let _ = s.resize(cols.min(32767) as u16, rows.min(32767) as u16);
-        }
+        // New grid + bar toggle may shrink every tab: refit all.
+        self.fit_all();
         self.needs_draw = true;
         self.retitle();
     }
@@ -745,6 +787,8 @@ impl App {
             s.shutdown();
         }
         self.active = self.active.min(self.tabs.len() - 1);
+        // Bar may vanish: remaining grids grow back.
+        self.fit_all();
         self.needs_draw = true;
         self.retitle();
     }
@@ -1141,14 +1185,10 @@ impl ApplicationHandler for App {
         let size = window.inner_size();
         let cols = ((size.width / cw).max(20) as usize).min(500);
         let rows = ((size.height / ch).max(10) as usize).min(200);
-        for tab in &mut self.tabs {
-            tab.term.resize(cols, rows);
-            if let Some(s) = &tab.session {
-                let _ = s.resize(cols.min(32767) as u16, rows.min(32767) as u16);
-            }
-        }
         self.cols = cols;
         self.rows = rows;
+        // fit_all shrinks grids by the tab-bar row when tabbed.
+        self.fit_all();
         self.window = Some(window);
         self.renderer = Some(renderer);
         // Heartbeat re-armed every about_to_wait; this initial value only
@@ -1428,14 +1468,10 @@ impl ApplicationHandler for App {
                     r.resize(size.width, size.height);
                     let cols = ((size.width / cw).max(20) as usize).min(500);
                     let rows = ((size.height / ch).max(10) as usize).min(200);
-                    for tab in &mut self.tabs {
-                        tab.term.resize(cols, rows);
-                        if let Some(s) = &tab.session {
-                            let _ = s.resize(cols.min(32767) as u16, rows.min(32767) as u16);
-                        }
-                    }
                     self.cols = cols;
                     self.rows = rows;
+                    // fit_all shrinks grids by the tab-bar row when tabbed.
+                    self.fit_all();
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -1481,16 +1517,29 @@ impl ApplicationHandler for App {
                         }
                     }
                 }
+                // Snapshot draw params before borrowing the renderer:
+                // grid rows, bar offset, labels, selection are Copy/owned.
+                let (grid_rows, bar, cols, active) =
+                    (self.grid_rows(), self.bar_rows(), self.cols, self.active);
+                let labels = self.tab_labels();
+                let sel = self.tabs[self.active].selection;
+                let ghost = self.tabs[self.active].ghost.visible().map(|g| {
+                    let (cx, cy) = self.tabs[self.active].term.cursor();
+                    (cx, cy, g.to_string())
+                });
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
                     r.draw_terminal(
                         &self.tabs[self.active].term,
-                        self.cols,
-                        self.rows,
-                        self.tabs[self.active].selection,
+                        cols,
+                        grid_rows,
+                        sel,
+                        bar as u32,
                     );
-                    if let Some(g) = self.tabs[self.active].ghost.visible() {
-                        let (cx, cy) = self.tabs[self.active].term.cursor();
-                        r.draw_ghost(cy, cx, g, self.cols, self.rows);
+                    if bar > 0 {
+                        r.draw_tabbar(&labels, active, cols);
+                    }
+                    if let Some((cx, cy, g)) = ghost {
+                        r.draw_ghost(cy + bar, cx, &g, cols, self.rows);
                     }
                     r.render();
                     self.last_frame = std::time::Instant::now();
@@ -1504,6 +1553,23 @@ impl ApplicationHandler for App {
                 match (button, state) {
                     // Left-drag selects; click without drag clears.
                     (MouseButton::Left, ElementState::Pressed) => {
+                        // Tab bar owns pixel row 0: clicks switch tabs.
+                        if self.bar_rows() > 0 {
+                            if let (Some((x, y)), Some(r)) = (self.mouse_px, &self.renderer) {
+                                let (cw, ch) = r.cell_px();
+                                if (y / ch as f64).floor() as usize == 0 {
+                                    let col = (x / cw.max(1) as f64).floor().max(0.0) as usize;
+                                    self.active = zet_gpu::selection::tab_segment(
+                                        col,
+                                        self.cols,
+                                        self.tabs.len(),
+                                    );
+                                    self.needs_draw = true;
+                                    self.retitle();
+                                    return;
+                                }
+                            }
+                        }
                         if let Some(cell) = self.mouse_cell() {
                             self.tabs[self.active].selecting = true;
                             self.tabs[self.active].selection =

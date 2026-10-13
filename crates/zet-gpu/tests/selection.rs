@@ -109,3 +109,15 @@ fn drag_past_edge_scrolls_view() {
     assert!(drag_scroll_lines(-10000.0, 400.0, 20.0) <= 24);
     assert!(drag_scroll_lines(10000.0, 400.0, 20.0) >= -24);
 }
+
+#[test]
+fn tab_segments_split_evenly_and_clamp() {
+    use zet_gpu::selection::tab_segment;
+    assert_eq!(tab_segment(0, 80, 2), 0);
+    assert_eq!(tab_segment(39, 80, 2), 0);
+    assert_eq!(tab_segment(40, 80, 2), 1);
+    assert_eq!(tab_segment(79, 80, 2), 1);
+    assert_eq!(tab_segment(999, 80, 2), 1);
+    assert_eq!(tab_segment(0, 80, 0), 0);
+    assert_eq!(tab_segment(53, 80, 3), 1);
+}
