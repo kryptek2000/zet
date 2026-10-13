@@ -76,6 +76,42 @@ pub fn is_agent_toggle(logical: &Key, pressed: bool, mods: &ModifiersState) -> b
     matches!(logical, Key::Character(s) if s.eq_ignore_ascii_case("g"))
 }
 
+/// True on Ctrl+Shift+T: open a new tab. Checked before [`translate`].
+pub fn is_new_tab(logical: &Key, pressed: bool, mods: &ModifiersState) -> bool {
+    if !pressed {
+        return false;
+    }
+    let ctrl = mods.contains(ModifiersState::CONTROL);
+    let shift = mods.contains(ModifiersState::SHIFT);
+    matches!(logical, Key::Character(s) if ctrl && shift && s.eq_ignore_ascii_case("t"))
+}
+
+/// True on Ctrl+Shift+W: close the active tab. Checked before [`translate`].
+pub fn is_close_tab(logical: &Key, pressed: bool, mods: &ModifiersState) -> bool {
+    if !pressed {
+        return false;
+    }
+    let ctrl = mods.contains(ModifiersState::CONTROL);
+    let shift = mods.contains(ModifiersState::SHIFT);
+    matches!(logical, Key::Character(s) if ctrl && shift && s.eq_ignore_ascii_case("w"))
+}
+
+/// True on Ctrl+PageDown / Ctrl+PageUp: cycle tabs. Checked before
+/// [`translate`] (which would emit scrolling escapes).
+pub fn is_cycle_tab(logical: &Key, pressed: bool, mods: &ModifiersState) -> Option<i8> {
+    if !pressed {
+        return None;
+    }
+    if !mods.contains(ModifiersState::CONTROL) {
+        return None;
+    }
+    match logical {
+        Key::Named(NamedKey::PageDown) => Some(1),
+        Key::Named(NamedKey::PageUp) => Some(-1),
+        _ => None,
+    }
+}
+
 /// Translate a key press into bytes for the PTY.
 /// Returns None for releases and unmapped keys.
 pub fn translate(

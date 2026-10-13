@@ -6,10 +6,13 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::Window;
-use zet_gpu::input::{is_agent_toggle, is_copy, is_paste, is_select_all, translate};
+use zet_gpu::input::{
+    is_agent_toggle, is_close_tab, is_copy, is_cycle_tab, is_new_tab, is_paste, is_select_all,
+    translate,
+};
 use zet_gpu::selection::{pix_to_cell, Selection};
 use zet_gpu::Renderer;
 use zet_pty::shell::ShellState;
@@ -69,11 +72,7 @@ impl Tab {
     /// Spawn a shell + reader thread + recorder: the per-tab pieces
     /// of what main() built inline. `wake` nudges the event loop when
     /// PTY bytes land so output renders instantly.
-    fn spawn(
-        prog: &str,
-        hook: Option<String>,
-        wake: winit::event_loop::EventLoopProxy<()>,
-    ) -> Self {
+    fn spawn(prog: &str, hook: Option<String>, wake: EventLoopProxy<()>) -> Self {
         let mut session =
             Session::spawn("env", &["TERM=xterm-256color", prog, "-i"], 80, 24).unwrap();
         zet_gpu::perf_mark("shell_spawn");
@@ -156,6 +155,10 @@ struct App {
     tabs: Vec<Tab>,
     active: usize,
     shell_name: String,
+    /// Spawn recipe for new tabs: same shell + hooks, fresh PTY.
+    prog: String,
+    hook: Option<String>,
+    wake: Option<EventLoopProxy<()>>,
     mods: ModifiersState,
     cols: usize,
     rows: usize,
@@ -250,57 +253,19 @@ fn shell_cwd(session: &Option<Session>) -> String {
 
 impl App {
     fn pump(&mut self) {
-        let mut died = false;
-        // Drain PTY bytes first (borrow ends), then feed the grid.
-        let chunks: Vec<Vec<u8>> = match &self.tabs[self.active].rx {
-            Some(rx) => std::iter::from_fn(|| rx.try_recv().ok()).collect(),
-            None => Vec::new(),
-        };
-        for chunk in chunks {
-            self.tabs[self.active].term.feed(&chunk);
-        }
-        if let Some(s) = &mut self.tabs[self.active].session {
-            if let Ok(Some(_)) = s.try_exit() {
-                died = true;
+        // Every tab drains PTY bytes + records blocks (a background tab
+        // with a full pipe would stall its shell otherwise). Title and
+        // settle probe stay active-tab-only.
+        let mut died_active = false;
+        for i in 0..self.tabs.len() {
+            if self.pump_tab(i) && i == self.active {
+                died_active = true;
             }
         }
-        if died {
-            self.tabs[self.active].dead = true;
+        if died_active {
             if let Some(w) = &self.window {
                 w.set_title(&format!("ZET — {} (exited)", self.shell_name));
             }
-        }
-        let events = self.tabs[self.active].term.drain_events();
-        for event in events {
-            self.tabs[self.active].shell_state.observe(&event);
-        }
-        // Cwd owned before the recorder borrow; drains collected before
-        // shared App state (known) is touched.
-        let cwd = shell_cwd(&self.tabs[self.active].session);
-        let tab = &mut self.tabs[self.active];
-        let (names, failed) = match &mut tab.recorder {
-            Some(rec) => {
-                rec.pump(&mut tab.term, &cwd);
-                (rec.drain_cmd_names(), rec.drain_failed())
-            }
-            None => (Vec::new(), None),
-        };
-        // Shell-reported aliases/functions feed the router.
-        self.known.insert_names(names);
-        // Failures become did-you-mean offers (preview only).
-        if let Some((cmd, cwd, output, exit)) = failed {
-            let fix = zet_pty::suggest_fix(&cmd, &cwd, &output, exit, &self.known);
-            if fix.is_some() {
-                self.tabs[self.active].pending_fix = fix;
-            }
-        }
-        // Alt switch swaps the visible grid: any selection addresses
-        // stale rows, so drop it (both directions).
-        let alt = self.tabs[self.active].term.alt_active();
-        if alt != self.tabs[self.active].was_alt {
-            self.tabs[self.active].selection = None;
-            self.tabs[self.active].selecting = false;
-            self.tabs[self.active].was_alt = alt;
         }
         // Settle probe (ZET_PERF=1 only): Enter-to-block with a fully
         // drained channel. Parsed + recorded; pixels ≤1 frame behind
@@ -323,34 +288,86 @@ impl App {
         self.poll_undo_done();
         self.poll_fix_offer();
         if let Some(code) = self.tabs[self.active].shell_state.last_exit() {
-            if let Some(w) = &self.window {
-                let mode = if self.tabs[self.active].agent_busy {
-                    " (agent…)"
-                } else if self.tabs[self.active].goal_mode {
-                    " (agent)"
-                } else {
-                    ""
-                };
-                w.set_title(&format!("ZET — {} (exit {code}){mode}", self.shell_name));
-            }
+            self.retitle_with_exit(code);
         }
         self.update_ghost();
+    }
+
+    /// Drain one tab's PTY + record its blocks. Returns true when its
+    /// shell newly exited (caller titles only the active tab).
+    fn pump_tab(&mut self, i: usize) -> bool {
+        let mut died = false;
+        // Drain PTY bytes first (borrow ends), then feed the grid.
+        let chunks: Vec<Vec<u8>> = match &self.tabs[i].rx {
+            Some(rx) => std::iter::from_fn(|| rx.try_recv().ok()).collect(),
+            None => Vec::new(),
+        };
+        for chunk in chunks {
+            self.tabs[i].term.feed(&chunk);
+        }
+        if let Some(s) = &mut self.tabs[i].session {
+            if let Ok(Some(_)) = s.try_exit() {
+                died = true;
+            }
+        }
+        if died {
+            self.tabs[i].dead = true;
+        }
+        let events = self.tabs[i].term.drain_events();
+        for event in events {
+            self.tabs[i].shell_state.observe(&event);
+        }
+        // Cwd owned before the recorder borrow; drains collected before
+        // shared App state (known) is touched.
+        let cwd = shell_cwd(&self.tabs[i].session);
+        let tab = &mut self.tabs[i];
+        let (names, failed) = match &mut tab.recorder {
+            Some(rec) => {
+                rec.pump(&mut tab.term, &cwd);
+                (rec.drain_cmd_names(), rec.drain_failed())
+            }
+            None => (Vec::new(), None),
+        };
+        // Shell-reported aliases/functions feed the router.
+        self.known.insert_names(names);
+        // Failures become did-you-mean offers (preview only).
+        if let Some((cmd, cwd, output, exit)) = failed {
+            let fix = zet_pty::suggest_fix(&cmd, &cwd, &output, exit, &self.known);
+            if fix.is_some() {
+                self.tabs[i].pending_fix = fix;
+            }
+        }
+        // Alt switch swaps the visible grid: any selection addresses
+        // stale rows, so drop it (both directions).
+        let alt = self.tabs[i].term.alt_active();
+        if alt != self.tabs[i].was_alt {
+            self.tabs[i].selection = None;
+            self.tabs[i].selecting = false;
+            self.tabs[i].was_alt = alt;
+        }
+        died
     }
 
     /// Type one pending agent step visibly, then complete it from the
     /// recorded block. Single-lane: the agent waits, input is locked, so
     /// the newest block past `blocks_before` is our step's.
     fn service_exec(&mut self) {
-        if self.tabs[self.active].exec_pending.is_none() {
-            if let Some(rx) = &self.tabs[self.active].exec_req_rx {
+        for i in 0..self.tabs.len() {
+            self.service_exec_at(i);
+        }
+    }
+
+    fn service_exec_at(&mut self, i: usize) {
+        if self.tabs[i].exec_pending.is_none() {
+            if let Some(rx) = &self.tabs[i].exec_req_rx {
                 if let Ok(cmd) = rx.try_recv() {
-                    let before = self.tabs[self.active]
+                    let before = self.tabs[i]
                         .recorder
                         .as_ref()
                         .and_then(|r| r.blocks().ok())
                         .map(|b| b.len())
                         .unwrap_or(0);
-                    self.tabs[self.active].exec_pending = Some(PendingExec {
+                    self.tabs[i].exec_pending = Some(PendingExec {
                         cmd,
                         typed: false,
                         blocks_before: before,
@@ -364,7 +381,7 @@ impl App {
             }
         }
         let res: Option<ExecRes> = {
-            let tab = &mut self.tabs[self.active];
+            let tab = &mut self.tabs[i];
             let Some(st) = &mut tab.exec_pending else {
                 return;
             };
@@ -419,10 +436,10 @@ impl App {
             }
         };
         if let Some(res) = res {
-            if let Some(tx) = &self.tabs[self.active].exec_res_tx {
+            if let Some(tx) = &self.tabs[i].exec_res_tx {
                 let _ = tx.send(res);
             }
-            self.tabs[self.active].exec_pending = None;
+            self.tabs[i].exec_pending = None;
         }
     }
 
@@ -430,26 +447,30 @@ impl App {
     /// A dead worker (panicked thread) clears the channel with a failure
     /// notice instead of locking F12 forever.
     fn poll_undo_done(&mut self) {
-        let Some(rx) = &self.tabs[self.active].undo_rx else {
+        for i in 0..self.tabs.len() {
+            self.poll_undo_done_at(i);
+        }
+    }
+
+    fn poll_undo_done_at(&mut self, i: usize) {
+        let Some(rx) = &self.tabs[i].undo_rx else {
             return;
         };
         match rx.try_recv() {
             Err(std::sync::mpsc::TryRecvError::Empty) => (),
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.tabs[self.active].undo_rx = None;
+                self.tabs[i].undo_rx = None;
                 let input = self.current_text().unwrap_or_default();
-                self.tabs[self.active]
+                self.tabs[i]
                     .ghost
                     .notify(input, "(undo failed: worker gone)".to_string());
             }
             Ok(res) => {
-                self.tabs[self.active].undo_rx = None;
+                self.tabs[i].undo_rx = None;
                 let input = self.current_text().unwrap_or_default();
                 match res {
-                    Ok(()) => self.tabs[self.active]
-                        .ghost
-                        .notify(input, "(undone)".to_string()),
-                    Err(e) => self.tabs[self.active]
+                    Ok(()) => self.tabs[i].ghost.notify(input, "(undone)".to_string()),
+                    Err(e) => self.tabs[i]
                         .ghost
                         .notify(input, format!("(undo failed: {e})")),
                 }
@@ -654,8 +675,79 @@ impl App {
             } else {
                 ""
             };
-            w.set_title(&format!("ZET — {}{mode}", self.shell_name));
+            // Tab position only when it matters (more than one).
+            let tabs = if self.tabs.len() > 1 {
+                format!(" [{}/{}]", self.active + 1, self.tabs.len())
+            } else {
+                String::new()
+            };
+            w.set_title(&format!("ZET — {}{mode}{tabs}", self.shell_name));
         }
+    }
+
+    /// Title variant carrying the last exit code (post-command).
+    fn retitle_with_exit(&self, code: u32) {
+        if let Some(w) = &self.window {
+            let mode = if self.tabs[self.active].agent_busy {
+                " (agent…)"
+            } else if self.tabs[self.active].goal_mode {
+                " (agent)"
+            } else {
+                ""
+            };
+            let tabs = if self.tabs.len() > 1 {
+                format!(" [{}/{}]", self.active + 1, self.tabs.len())
+            } else {
+                String::new()
+            };
+            w.set_title(&format!(
+                "ZET — {} (exit {code}){mode}{tabs}",
+                self.shell_name
+            ));
+        }
+    }
+
+    /// Open a fresh shell tab and switch to it.
+    fn new_tab(&mut self) {
+        let Some(wake) = self.wake.clone() else {
+            return;
+        };
+        self.tabs
+            .push(Tab::spawn(&self.prog, self.hook.clone(), wake));
+        self.active = self.tabs.len() - 1;
+        // New grid, current window size.
+        let (cols, rows) = (self.cols, self.rows);
+        let tab = &mut self.tabs[self.active];
+        tab.term.resize(cols, rows);
+        if let Some(s) = &tab.session {
+            let _ = s.resize(cols.min(32767) as u16, rows.min(32767) as u16);
+        }
+        self.needs_draw = true;
+        self.retitle();
+    }
+
+    /// Close the active tab (dropping its session kills the shell).
+    /// The last tab closes the window instead of stranding it.
+    fn close_tab(&mut self, event_loop: &ActiveEventLoop) {
+        if self.tabs.len() <= 1 {
+            event_loop.exit();
+            return;
+        }
+        self.tabs.remove(self.active);
+        self.active = self.active.min(self.tabs.len() - 1);
+        self.needs_draw = true;
+        self.retitle();
+    }
+
+    /// Cycle tabs (dir = +1 next, -1 previous). No-op solo.
+    fn cycle_tab(&mut self, dir: i8) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        let n = self.tabs.len() as i8;
+        self.active = (self.active as i8 + dir).rem_euclid(n) as usize;
+        self.needs_draw = true;
+        self.retitle();
     }
 
     /// Model spec for this NL/agent request: explicit env (launch config)
@@ -854,21 +946,27 @@ impl App {
     /// Enter (Esc drops it). Single lane with agent turns: a running
     /// turn blocks planning like everything else.
     fn poll_plan(&mut self) {
-        let Some(rx) = &self.tabs[self.active].plan_rx else {
+        for i in 0..self.tabs.len() {
+            self.poll_plan_at(i);
+        }
+    }
+
+    fn poll_plan_at(&mut self, i: usize) {
+        let Some(rx) = &self.tabs[i].plan_rx else {
             return;
         };
         let (goal, ready) = match rx.try_recv() {
             Err(std::sync::mpsc::TryRecvError::Empty) => return,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.tabs[self.active].plan_rx = None;
+                self.tabs[i].plan_rx = None;
                 return;
             }
             Ok(ready) => ready,
         };
-        self.tabs[self.active].plan_rx = None;
+        self.tabs[i].plan_rx = None;
         match ready {
             Err(e) => {
-                self.tabs[self.active]
+                self.tabs[i]
                     .ghost
                     .notify(goal, format!("(plan failed: {e})"));
             }
@@ -883,8 +981,8 @@ impl App {
                         text.push_str(&format!("\n{}. {}", i + 1, step));
                     }
                     text.push_str("\n(Enter: run it, Esc: drop it)");
-                    self.tabs[self.active].ghost.notify(goal.clone(), text);
-                    self.tabs[self.active].pending_plan = Some((goal, steps));
+                    self.tabs[i].ghost.notify(goal.clone(), text);
+                    self.tabs[i].pending_plan = Some((goal, steps));
                 }
             }
         }
@@ -894,36 +992,42 @@ impl App {
     /// notice on the fresh prompt, modes cleared. A dead worker unlocks
     /// input with a failure notice instead of holding the lock forever.
     fn poll_agent_done(&mut self) {
-        let Some(rx) = &self.tabs[self.active].agent_rx else {
+        for i in 0..self.tabs.len() {
+            self.poll_agent_done_at(i);
+        }
+    }
+
+    fn poll_agent_done_at(&mut self, i: usize) {
+        let Some(rx) = &self.tabs[i].agent_rx else {
             return;
         };
         match rx.try_recv() {
             Err(std::sync::mpsc::TryRecvError::Empty) => (),
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.tabs[self.active].agent_rx = None;
-                self.tabs[self.active].agent_busy = false;
-                self.tabs[self.active].exec_req_rx = None;
-                self.tabs[self.active].exec_res_tx = None;
-                self.tabs[self.active].exec_pending = None;
+                self.tabs[i].agent_rx = None;
+                self.tabs[i].agent_busy = false;
+                self.tabs[i].exec_req_rx = None;
+                self.tabs[i].exec_res_tx = None;
+                self.tabs[i].exec_pending = None;
                 self.retitle();
                 let input = self.current_text().unwrap_or_default();
-                self.tabs[self.active]
+                self.tabs[i]
                     .ghost
                     .notify(input, "(agent failed: worker gone)".to_string());
             }
             Ok(done) => {
-                self.tabs[self.active].agent_rx = None;
-                self.tabs[self.active].agent_busy = false;
-                self.tabs[self.active].exec_req_rx = None;
-                self.tabs[self.active].exec_res_tx = None;
-                self.tabs[self.active].exec_pending = None;
+                self.tabs[i].agent_rx = None;
+                self.tabs[i].agent_busy = false;
+                self.tabs[i].exec_req_rx = None;
+                self.tabs[i].exec_res_tx = None;
+                self.tabs[i].exec_pending = None;
                 self.retitle();
                 let (input, text) = match done {
                     Some((summary, journal)) => {
                         // Best effort: the turn survives the window via `zet journal`.
                         let _ =
                             zet_agent::append_journal(&zet_agent::journal_path_default(), &journal);
-                        self.tabs[self.active].last_journal = journal;
+                        self.tabs[i].last_journal = journal;
                         let first: String = summary
                             .lines()
                             .next()
@@ -941,7 +1045,7 @@ impl App {
                         "(agent: no model — check spec/key)".to_string(),
                     ),
                 };
-                self.tabs[self.active].ghost.notify(input, text);
+                self.tabs[i].ghost.notify(input, text);
             }
         }
     }
@@ -1027,9 +1131,11 @@ impl ApplicationHandler for App {
         let size = window.inner_size();
         let cols = ((size.width / cw).max(20) as usize).min(500);
         let rows = ((size.height / ch).max(10) as usize).min(200);
-        self.tabs[self.active].term.resize(cols, rows);
-        if let Some(s) = &self.tabs[self.active].session {
-            let _ = s.resize(cols.min(32767) as u16, rows.min(32767) as u16);
+        for tab in &mut self.tabs {
+            tab.term.resize(cols, rows);
+            if let Some(s) = &tab.session {
+                let _ = s.resize(cols.min(32767) as u16, rows.min(32767) as u16);
+            }
         }
         self.cols = cols;
         self.rows = rows;
@@ -1129,6 +1235,19 @@ impl ApplicationHandler for App {
                 // (Bare Ctrl+A stays readline's line-start.)
                 if is_select_all(&event.logical_key, pressed, &self.mods) {
                     self.select_all();
+                    return;
+                }
+                // Tabs: new/close/cycle never reach the shell.
+                if is_new_tab(&event.logical_key, pressed, &self.mods) {
+                    self.new_tab();
+                    return;
+                }
+                if is_close_tab(&event.logical_key, pressed, &self.mods) {
+                    self.close_tab(event_loop);
+                    return;
+                }
+                if let Some(dir) = is_cycle_tab(&event.logical_key, pressed, &self.mods) {
+                    self.cycle_tab(dir);
                     return;
                 }
                 // Agent goal mode toggle: Ctrl+G would otherwise type BEL.
@@ -1299,9 +1418,11 @@ impl ApplicationHandler for App {
                     r.resize(size.width, size.height);
                     let cols = ((size.width / cw).max(20) as usize).min(500);
                     let rows = ((size.height / ch).max(10) as usize).min(200);
-                    self.tabs[self.active].term.resize(cols, rows);
-                    if let Some(s) = &self.tabs[self.active].session {
-                        let _ = s.resize(cols.min(32767) as u16, rows.min(32767) as u16);
+                    for tab in &mut self.tabs {
+                        tab.term.resize(cols, rows);
+                        if let Some(s) = &tab.session {
+                            let _ = s.resize(cols.min(32767) as u16, rows.min(32767) as u16);
+                        }
                     }
                     self.cols = cols;
                     self.rows = rows;
@@ -1455,7 +1576,7 @@ fn main() {
     // Wake the loop the moment PTY bytes land: output renders instantly
     // instead of waiting for the heartbeat.
     let proxy = event_loop.create_proxy();
-    let tab = Tab::spawn(&prog, hook, proxy);
+    let tab = Tab::spawn(&prog, hook.clone(), proxy.clone());
     // Model for plain-language input: explicit ZET_INLINE_SPEC (launch config)
     // wins; else the persisted `zet inline` choice re-read per request;
     // else zero-config local when ollama serves a preferred model.
@@ -1475,6 +1596,9 @@ fn main() {
         tabs: vec![tab],
         active: 0,
         shell_name,
+        prog: prog.clone(),
+        hook: hook.clone(),
+        wake: Some(proxy),
         mods: ModifiersState::empty(),
         cols: 80,
         rows: 24,

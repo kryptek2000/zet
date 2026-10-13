@@ -162,3 +162,29 @@ fn select_all_chord_is_detected_not_typed() {
         &ctrl_shift()
     ));
 }
+
+#[test]
+fn tab_shortcuts_match_only_with_modifiers() {
+    use winit::keyboard::{Key, ModifiersState};
+    use zet_gpu::input::{is_close_tab, is_cycle_tab, is_new_tab};
+    let cs = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    let ctrl = ModifiersState::CONTROL;
+    assert!(is_new_tab(&Key::Character("t".into()), true, &cs));
+    assert!(is_close_tab(&Key::Character("w".into()), true, &cs));
+    // Bare Ctrl+T/W are readline's transpose/kill-region: never steal.
+    assert!(!is_new_tab(&Key::Character("t".into()), true, &ctrl));
+    assert!(!is_close_tab(&Key::Character("w".into()), true, &ctrl));
+    assert_eq!(
+        is_cycle_tab(&Key::Named(NamedKey::PageDown), true, &ctrl),
+        Some(1)
+    );
+    assert_eq!(
+        is_cycle_tab(&Key::Named(NamedKey::PageUp), true, &ctrl),
+        Some(-1)
+    );
+    assert_eq!(
+        is_cycle_tab(&Key::Named(NamedKey::PageDown), true, &plain()),
+        None
+    );
+    assert_eq!(is_cycle_tab(&Key::Character("a".into()), true, &ctrl), None);
+}
