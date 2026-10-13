@@ -448,3 +448,32 @@ fn run_unknown_recipe_lists_available() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("greet"), "{err}");
 }
+
+#[test]
+fn usage_reports_seeded_log() {
+    let home = temp_home("usage");
+    let log = home.join(".zet").join("usage.jsonl");
+    std::fs::write(
+        &log,
+        "{\"ts\":1,\"label\":\"opencode:spark\",\"in_chars\":400,\"out_chars\":400,\"in_est\":100,\"out_est\":100,\"ms\":50}\n\
+         {\"ts\":2,\"label\":\"local:llama\",\"in_chars\":80,\"out_chars\":40,\"in_est\":20,\"out_est\":10,\"ms\":150}\n\
+         garbage-line\n",
+    )
+    .unwrap();
+    let out = zet().env("HOME", &home).args(["usage"]).output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("2 calls"), "{text}");
+    assert!(text.contains("opencode:spark"), "{text}");
+    assert!(text.contains("local:llama"), "{text}");
+    assert!(text.contains("estimated"), "{text}");
+}
+
+#[test]
+fn usage_empty_reports_none() {
+    let home = temp_home("usage_empty");
+    let out = zet().env("HOME", &home).args(["usage"]).output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("no usage recorded"), "{text}");
+}

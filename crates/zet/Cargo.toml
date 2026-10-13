@@ -11,6 +11,7 @@ zet-blocks = { path = "../zet-blocks" }
 zet-pty = { path = "../zet-pty" }
 zet-context = { path = "../zet-context" }
 notify-rust = "4"
+serde_json = "1"
 
 [dev-dependencies]
 zet-policy = { path = "../zet-policy" }

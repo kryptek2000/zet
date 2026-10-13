@@ -4,10 +4,12 @@ use std::collections::HashMap;
 pub mod go;
 pub mod keys;
 pub mod mcp;
+pub mod metered;
 pub mod openai;
 
 pub use keys::KeyError;
 pub use mcp::McpError;
+pub use metered::Metered;
 pub use openai::{is_free_model, list_models};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

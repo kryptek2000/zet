@@ -20,6 +20,7 @@ fn main() {
         ["undo"] => undo(),
         ["run", rest @ ..] => run_cmd(rest),
         ["runs", rest @ ..] => runs(rest),
+        ["usage"] => usage(),
         ["__run_worker", id] => run_worker(id),
         // Known group, bad usage: hint the group, not the top level.
         // (Guarded by the shared list so dispatch and the window router
@@ -44,6 +45,7 @@ fn main() {
             eprintln!("  zet run <goal...>         run an agent turn here, unattended (never T3)");
             eprintln!("  zet run --background <g>  delegate it (log + bubble when done)");
             eprintln!("  zet runs                  list delegated runs");
+            eprintln!("  zet usage                 estimated model tokens (chars/4)");
             std::process::exit(2);
         }
     }
@@ -687,6 +689,57 @@ fn run_worker(id: &str) {
         .summary("ZET run done")
         .body(&format!("{id}: {first}"))
         .show();
+}
+
+/// Estimated model usage from ~/.zet/usage.jsonl: calls, tokens
+/// (chars/4 heuristic, clearly labeled), latency, per-model split.
+fn usage() {
+    let path = zet_models::metered::default_log();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => {
+            println!("no usage recorded yet");
+            return;
+        }
+    };
+    let mut calls = 0u64;
+    let (mut ink, mut outk) = (0u64, 0u64);
+    let (mut ms_total, mut ms_n) = (0u64, 0u64);
+    let mut per_label: std::collections::HashMap<String, (u64, u64, u64)> =
+        std::collections::HashMap::new();
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let (Some(i), Some(o)) = (v["in_est"].as_u64(), v["out_est"].as_u64()) else {
+            continue;
+        };
+        calls += 1;
+        ink += i;
+        outk += o;
+        if let Some(ms) = v["ms"].as_u64() {
+            ms_total += ms;
+            ms_n += 1;
+        }
+        let label = v["label"].as_str().unwrap_or("?").to_string();
+        let e = per_label.entry(label).or_insert((0, 0, 0));
+        e.0 += 1;
+        e.1 += i;
+        e.2 += o;
+    }
+    if calls == 0 {
+        println!("no usage recorded yet");
+        return;
+    }
+    println!("{calls} calls, ~{ink} in / ~{outk} out (estimated tokens, chars/4)");
+    if ms_n > 0 {
+        println!("avg latency: {}ms", ms_total.checked_div(ms_n).unwrap_or(0));
+    }
+    let mut labels: Vec<_> = per_label.into_iter().collect();
+    labels.sort_by_key(|(_, (_, i, o))| std::cmp::Reverse(i + o));
+    for (label, (n, i, o)) in labels {
+        println!("  {label}: {n} calls, ~{i} in / ~{o} out");
+    }
 }
 
 /// List delegated runs (oldest first): id, status, and goal.
