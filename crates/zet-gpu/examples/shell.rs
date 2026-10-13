@@ -460,10 +460,20 @@ impl App {
             Ok(()) => {
                 let (s, e) = sel.normalized();
                 let lines = e.row - s.row + 1;
+                let word = if lines == 1 { "line" } else { "lines" };
                 self.ghost.notify(
                     input,
                     format!("(copied {lines} line{})", if lines == 1 { "" } else { "s" }),
                 );
+                // OS bubble too (best effort, off-thread so D-Bus never
+                // hitches a frame; failures stay silent — the prompt
+                // notice above is the reliable channel).
+                std::thread::spawn(move || {
+                    let _ = notify_rust::Notification::new()
+                        .summary("Copied to clipboard")
+                        .body(&format!("{lines} {word} from ZET"))
+                        .show();
+                });
             }
             Err(e) => {
                 self.ghost.notify(input, format!("(copy failed: {e})"));
