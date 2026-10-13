@@ -11,7 +11,7 @@ Everything below describes the built window (`cargo run -p zet-gpu
 | `Esc` | Dismiss ghost / cancel an in-flight answer / exit goal mode. Swallowed only when it did something; otherwise passes to the shell. |
 | `Enter` | Known commands run. Anything else translates via the model (preview swaps in). In goal mode, starts the turn. While an answer is in flight, Enter waits. |
 | `Ctrl+Shift+V`, `Shift+Ins` | Paste (bracketed: multi-line pastes insert as text, Enter runs). |
-| Drag / `Ctrl+Shift+C` / right-click | Select text with the mouse; copy the selection (right-click copies too). Typing clears it. |
+| Drag / `Ctrl+Shift+C` / right-click | Drag selects and copies on release (with confirmation); `Ctrl+Shift+C` or right-click re-copies. Typing clears it. |
 | `Ctrl+Shift+A` then copy | Select the whole buffer (scrollback + screen); `Ctrl+Shift+C` or right-click copies it. Bare `Ctrl+A` stays readline's line-start. |
 | `Backspace` | Erase via the shell's own VERASE — works in every line discipline. |
 | `Del` | Forward-delete (`ESC[3~`), handled by the shell natively. |

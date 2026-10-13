@@ -1136,6 +1136,10 @@ impl ApplicationHandler for App {
                         self.selecting = false;
                         if self.selection.is_some_and(|s| s.is_empty()) {
                             self.selection = None;
+                        } else if self.selection.is_some() {
+                            // Select-to-copy: a finished drag lands in the
+                            // clipboard with confirmation, no second gesture.
+                            self.copy_selection();
                         }
                     }
                     // Right-click copies the selection (terminal convention).
