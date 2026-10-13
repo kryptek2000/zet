@@ -683,3 +683,34 @@ fn new_file_diff_shows_all_added() {
     assert!(out.contains("+x"), "{out}");
     assert!(out.contains("+y"), "{out}");
 }
+
+#[test]
+fn draft_plan_parses_numbered_steps() {
+    let model = Script::new(vec![Script::final_text(
+        "1. Create the file\n2. Verify contents\n3. Report done\n",
+    )]);
+    let plan = zet_agent::draft_plan(&model, "do the thing").unwrap();
+    assert_eq!(
+        plan,
+        vec!["Create the file", "Verify contents", "Report done"]
+    );
+}
+
+#[test]
+fn draft_plan_empty_means_run_directly() {
+    let model = Script::new(vec![Script::final_text("just do it")]);
+    let plan = zet_agent::draft_plan(&model, "hi").unwrap();
+    assert!(plan.is_empty(), "{plan:?}");
+}
+
+#[test]
+fn agreed_plan_reaches_the_system_prompt() {
+    let model = Script::new(vec![Script::final_text("done")]);
+    let mut agent = Agent::new(model, AllowAll, true, 8)
+        .with_plan(vec!["Create the file".to_string(), "Verify it".to_string()]);
+    agent.run("do it").unwrap();
+    let system = agent.model.seen.borrow()[0].system.clone().unwrap();
+    assert!(system.contains("Agreed plan"), "{system}");
+    assert!(system.contains("1. Create the file"), "{system}");
+    assert!(system.contains("2. Verify it"), "{system}");
+}

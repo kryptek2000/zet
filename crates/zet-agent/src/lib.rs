@@ -26,6 +26,57 @@ pub fn shell_tool_def() -> ToolDef {
     }
 }
 
+/// Draft a numbered plan for a goal (planner loop, phase one). One
+/// model call, no tools: the reply should be short numbered steps.
+/// Unparseable replies yield an empty plan (run directly, no gate).
+/// Capped at 10 steps; longer lists truncate (bounded tokens).
+pub fn draft_plan<M: ChatModel>(model: &M, goal: &str) -> Result<Vec<String>, ModelError> {
+    let req = ChatRequest {
+        model: String::new(),
+        system: Some(
+            "Break the goal into short numbered steps, one per line, no prose. \
+             Reply with ONLY the steps (e.g. '1. Create the file'). If the goal \
+             is trivial or conversational, reply with a single short line and \
+             no number."
+                .to_string(),
+        ),
+        messages: vec![Message {
+            role: Role::User,
+            text: goal.to_string(),
+            tool_call_id: None,
+            tool_calls: vec![],
+        }],
+        tools: vec![],
+        max_tokens: 256,
+    };
+    let res = model.chat(&req)?;
+    Ok(parse_plan(&res.text))
+}
+
+/// Numbered lines (`1. step`) become steps; anything else is ignored.
+/// Empty when the model saw no multi-step job.
+pub fn parse_plan(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|raw| {
+            let line = raw.trim();
+            let digits = line.chars().take_while(|c| c.is_ascii_digit()).count();
+            if digits == 0 {
+                return None;
+            }
+            let rest = line[digits..].trim_start();
+            let rest = rest
+                .strip_prefix(['.', ')'])
+                .map(str::trim_start)
+                .unwrap_or(rest);
+            if rest.is_empty() {
+                return None;
+            }
+            Some(rest.chars().take(160).collect())
+        })
+        .take(10)
+        .collect()
+}
+
 /// Runs an approved shell step. Returns (exit code, output text).
 /// DirectExec spawns hidden `sh -c` (default); window shells inject a
 /// PTY executor so every agent action is typed visibly and recorded.
@@ -130,6 +181,9 @@ pub struct Agent<M: ChatModel, A: Approver> {
     /// the system prompt when present. Built by the caller (window)
     /// from `zet_context`, so the agent sees what the user sees.
     context: Option<String>,
+    /// Agreed multi-step plan (planner loop): the user approved these
+    /// steps up front; the model works through them in order.
+    plan: Option<Vec<String>>,
 }
 
 impl<M: ChatModel, A: Approver> Agent<M, A> {
@@ -143,12 +197,20 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
             executor: Box::new(DirectExec),
             journal: Vec::new(),
             context: None,
+            plan: None,
         }
     }
 
     /// Terminal context for this turn (see `zet_context::Context::render`).
     pub fn with_context(mut self, context: String) -> Self {
         self.context = Some(context);
+        self
+    }
+
+    /// Agreed plan for this turn (planner loop, phase two): shown to
+    /// the model alongside the goal so multi-step runs hold together.
+    pub fn with_plan(mut self, plan: Vec<String>) -> Self {
+        self.plan = Some(plan);
         self
     }
 
@@ -206,6 +268,12 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
         }];
         for _ in 0..self.max_iters {
             let mut system = SYSTEM_PROMPT.to_string();
+            if let Some(plan) = &self.plan {
+                system.push_str("\nAgreed plan (approved up front, work through it in order):\n");
+                for (i, step) in plan.iter().enumerate() {
+                    system.push_str(&format!("{}. {}\n", i + 1, step));
+                }
+            }
             if let Some(context) = &self.context {
                 system.push_str("\nTerminal context (what the user sees):\n");
                 system.push_str(context);

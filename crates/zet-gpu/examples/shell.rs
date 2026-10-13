@@ -72,6 +72,10 @@ struct App {
     goal_mode: bool,
     agent_busy: bool,
     agent_rx: Option<Receiver<Option<AgentDone>>>,
+    /// Planner loop, phase one: plan being drafted (rx) or approved
+    /// plan awaiting one Enter (goal + steps). Esc drops both.
+    plan_rx: Option<Receiver<PlanDraft>>,
+    pending_plan: Option<(String, Vec<String>)>,
     exec_req_rx: Option<Receiver<String>>,
     exec_res_tx: Option<Sender<ExecRes>>,
     exec_pending: Option<PendingExec>,
@@ -99,6 +103,9 @@ struct PendingExec {
 
 type ExecRes = (Option<i32>, String);
 type AgentDone = (String, Vec<zet_agent::JournalEntry>);
+/// Planner loop phase one: the Enter-time goal plus its drafted steps
+/// (or the draft failure). Lives on the plan channel into poll_plan.
+type PlanDraft = (String, Result<Vec<String>, String>);
 
 /// Executor that runs agent steps in the visible shell: sends the command
 /// to the window (main loop types it) and blocks for the recorded result.
@@ -215,6 +222,7 @@ impl App {
         }
         self.service_exec();
         self.poll_agent_done();
+        self.poll_plan();
         self.poll_undo_done();
         self.poll_fix_offer();
         if let Some(code) = self.shell_state.last_exit() {
@@ -622,7 +630,8 @@ impl App {
     /// Start an agent turn on a thread: each approved step is typed
     /// visibly into the PTY and completed from its recorded block.
     /// Entering agent mode pre-consents T0-T2; T3 is never approved.
-    fn start_agent(&mut self, goal: String) {
+    /// `plan` is the approved step list (planner loop, phase two).
+    fn start_agent(&mut self, goal: String, plan: Option<Vec<String>>) {
         let spec = match self.resolve_spec() {
             Some(s) => s,
             None => {
@@ -676,6 +685,9 @@ impl App {
                 if let Some(context) = context {
                     agent = agent.with_context(context);
                 }
+                if let Some(plan) = plan {
+                    agent = agent.with_plan(plan);
+                }
                 let summary = agent
                     .run(&goal)
                     .unwrap_or_else(|e| format!("agent error: {e}"));
@@ -683,6 +695,79 @@ impl App {
             });
             let _ = done_tx.send(done);
         });
+    }
+
+    /// Planner loop, phase one: draft the step list on a thread. Trivial
+    /// goals (0-1 steps) run immediately; real plans wait for one Enter.
+    fn start_plan(&mut self, goal: String) {
+        let spec = match self.resolve_spec() {
+            Some(s) => s,
+            None => {
+                self.goal_mode = false;
+                self.retitle();
+                self.ghost.notify(
+                    goal,
+                    "(no model: `zet inline <spec>` or ZET_INLINE_SPEC)".to_string(),
+                );
+                return;
+            }
+        };
+        if let Err(e) = Self::check_spec(&spec) {
+            self.goal_mode = false;
+            self.retitle();
+            self.ghost.notify(goal, format!("({e})"));
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.plan_rx = Some(rx);
+        self.retitle();
+        std::thread::spawn(move || {
+            // Fail closed: a broken model must never skip the gate into
+            // an instant ungated run. Errors surface as notices.
+            let steps = match build_client(&spec) {
+                None => Err("model unavailable".to_string()),
+                Some(client) => zet_agent::draft_plan(&client, &goal).map_err(|e| e.to_string()),
+            };
+            let _ = tx.send((goal, steps));
+        });
+    }
+
+    /// Collect a drafted plan: trivial runs now, the rest waits for one
+    /// Enter (Esc drops it). Single lane with agent turns: a running
+    /// turn blocks planning like everything else.
+    fn poll_plan(&mut self) {
+        let Some(rx) = &self.plan_rx else {
+            return;
+        };
+        let (goal, ready) = match rx.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.plan_rx = None;
+                return;
+            }
+            Ok(ready) => ready,
+        };
+        self.plan_rx = None;
+        match ready {
+            Err(e) => {
+                self.ghost.notify(goal, format!("(plan failed: {e})"));
+            }
+            Ok(steps) => {
+                if steps.len() <= 1 {
+                    // Trivial: no gate worth holding. The Enter-time goal
+                    // runs (not whatever was typed during the draft).
+                    self.start_agent(goal, None);
+                } else {
+                    let mut text = String::from("plan:");
+                    for (i, step) in steps.iter().enumerate() {
+                        text.push_str(&format!("\n{}. {}", i + 1, step));
+                    }
+                    text.push_str("\n(Enter: run it, Esc: drop it)");
+                    self.ghost.notify(goal.clone(), text);
+                    self.pending_plan = Some((goal, steps));
+                }
+            }
+        }
     }
 
     /// Collect a finished agent turn: journal kept, summary as a sticky
@@ -924,6 +1009,10 @@ impl ApplicationHandler for App {
                     self.ghost.reset();
                     self.nl_rx = None;
                     self.nl_wake = false;
+                    // Leaving goal mode abandons any draft, or it could
+                    // land and launch after the mode is gone.
+                    self.plan_rx = None;
+                    self.pending_plan = None;
                     self.retitle();
                     return;
                 }
@@ -991,6 +1080,8 @@ impl ApplicationHandler for App {
                     }
                     self.nl_rx = None;
                     self.nl_wake = false;
+                    self.plan_rx = None;
+                    self.pending_plan = None;
                     if self.goal_mode {
                         self.goal_mode = false;
                         self.retitle();
@@ -1000,10 +1091,18 @@ impl ApplicationHandler for App {
                     }
                 }
                 // Enter in goal mode starts an agent turn on the line.
+                // With a pending plan, this Enter is the once-and-done
+                // approval: the agreed steps run under normal policy.
+                // The stored goal runs (approval was for it, not for
+                // whatever was typed since).
                 if is_enter && self.goal_mode {
                     let input = self.current_text().unwrap_or_default();
                     if !input.trim().is_empty() {
-                        self.start_agent(input);
+                        if let Some((goal, plan)) = self.pending_plan.take() {
+                            self.start_agent(goal, Some(plan));
+                        } else {
+                            self.start_plan(input);
+                        }
                     }
                     return;
                 }
@@ -1300,6 +1399,8 @@ fn main() {
         goal_mode: false,
         agent_busy: false,
         agent_rx: None,
+        plan_rx: None,
+        pending_plan: None,
         exec_req_rx: None,
         exec_res_tx: None,
         exec_pending: None,
