@@ -1,4 +1,3 @@
-use std::sync::{Arc, Mutex};
 use zet_models::{ChatModel, ChatRequest, ChatResponse, Message, Role};
 
 struct Stub;
@@ -40,7 +39,6 @@ fn metered_logs_estimated_tokens() {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let log = dir.join("usage.jsonl");
-    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let m = zet_models::Metered::new(Stub, "opencode:spark", log.clone());
     let res = m.chat(&req(&"a".repeat(400))).unwrap();
     assert_eq!(res.text.len(), 400);
@@ -51,5 +49,35 @@ fn metered_logs_estimated_tokens() {
     assert!(v["in_est"].as_u64().unwrap() >= 90, "{lines}");
     assert!(v["out_est"].as_u64().unwrap() >= 90, "{lines}");
     assert!(v["ms"].as_u64().is_some(), "{lines}");
-    drop(seen);
+}
+
+#[test]
+fn metered_rotates_past_1mb() {
+    let dir = std::env::temp_dir().join(format!(
+        "zet_meter_rot_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("usage.jsonl");
+    // Seed past the cap with 1KB lines (oldest first).
+    let mut seed = String::new();
+    for i in 0..1200 {
+        seed.push_str(&format!("{{\"seed\":{i},{}}}\n", "x".repeat(1000)));
+    }
+    std::fs::write(&log, &seed).unwrap();
+    assert!(std::fs::metadata(&log).unwrap().len() > 1 << 20);
+    let m = zet_models::Metered::new(Stub, "fresh", log.clone());
+    m.chat(&req("hi")).unwrap();
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        std::fs::metadata(&log).unwrap().len() <= 1 << 20,
+        "still oversized"
+    );
+    // Fresh line survived, oldest seeds did not.
+    assert!(text.contains("\"fresh\""), "new line lost");
+    assert!(!text.contains("\"seed\":0"), "oldest seed survived");
+    assert!(text.lines().count() <= 4001, "tail too long");
 }

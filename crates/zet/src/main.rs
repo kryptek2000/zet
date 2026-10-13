@@ -731,7 +731,9 @@ fn schedules() {
     }
 }
 
-/// Remove the schedule with the exact id (or unambiguous prefix).
+/// Remove the schedule with the exact id (or every id sharing the
+/// prefix — all matches are dropped, each printed, so a short prefix
+/// is loud about what it killed).
 fn unschedule(prefix: &str) {
     let path = schedules_path();
     let text = std::fs::read_to_string(&path).unwrap_or_default();

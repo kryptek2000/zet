@@ -2,7 +2,9 @@
 // (~/.zet/usage.jsonl) with estimated tokens (chars/4 — providers
 // report real counts in different shapes, estimates stay uniform).
 // Powers `zet usage`. Logging is best-effort: a bad log never fails
-// a model call.
+// a model call. The log rotates: past 1MB only the last 4000 lines
+// survive (ghost keystrokes log a line each — unbounded growth
+// would become a janitor ticket).
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -60,6 +62,34 @@ impl<M: ChatModel> Metered<M> {
     }
 }
 
+/// Rotation cap: past this size only the tail survives. Best-effort
+/// like the rest of logging (a concurrent append may lose a line;
+/// single-user, estimates only — acceptable).
+const MAX_LOG_BYTES: u64 = 1 << 20;
+const KEEP_LOG_LINES: usize = 4000;
+
+fn rotate_log(path: &std::path::Path) {
+    if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) <= MAX_LOG_BYTES {
+        return;
+    }
+    if let Ok(text) = std::fs::read_to_string(path) {
+        // Keep the newest lines that fit in ~3/4 of the cap (bounded
+        // by KEEP_LOG_LINES so a few giant lines can't wedge it).
+        let mut keep: Vec<&str> = Vec::new();
+        let mut bytes = 0u64;
+        for line in text.lines().rev() {
+            if keep.len() >= KEEP_LOG_LINES || bytes + line.len() as u64 > MAX_LOG_BYTES * 3 / 4 {
+                break;
+            }
+            bytes += line.len() as u64 + 1;
+            keep.push(line);
+        }
+        keep.reverse();
+        if keep.len() < text.lines().count() {
+            let _ = std::fs::write(path, keep.join("\n") + "\n");
+        }
+    }
+}
 impl<M: ChatModel> ChatModel for Metered<M> {
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, ModelError> {
         let t0 = Instant::now();
@@ -90,6 +120,7 @@ impl<M: ChatModel> ChatModel for Metered<M> {
                 use std::io::Write as _;
                 let _ = writeln!(f, "{line}");
             }
+            rotate_log(&self.log);
         }
         result
     }
