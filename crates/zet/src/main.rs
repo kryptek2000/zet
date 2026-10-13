@@ -476,15 +476,44 @@ fn run_cmd(argv: &[&str]) {
         .first()
         .is_some_and(|a| *a == "--background" || *a == "--bg" || *a == "-b");
     let argv = if background { &argv[1..] } else { argv };
-    if argv.is_empty() {
-        eprintln!("usage: zet run [--background] <goal...>");
+    // --arg k=v pairs fill recipe templates; everything else is goal.
+    let mut args = Vec::new();
+    let mut kv: Vec<(String, String)> = Vec::new();
+    let mut i = 0;
+    while i < argv.len() {
+        if argv[i] == "--arg" {
+            i += 1;
+            match argv.get(i) {
+                Some(pair) => match pair.split_once('=') {
+                    Some((k, v)) => kv.push((k.to_string(), v.to_string())),
+                    None => {
+                        eprintln!("--arg wants k=v, got {pair:?}");
+                        std::process::exit(2);
+                    }
+                },
+                None => {
+                    eprintln!("--arg needs k=v");
+                    std::process::exit(2);
+                }
+            }
+        } else {
+            args.push(argv[i]);
+        }
+        i += 1;
+    }
+    if args.is_empty() {
+        eprintln!("usage: zet run [--background] [--arg k=v ...] <goal... | recipe:name ...>");
         std::process::exit(2);
     }
-    if argv.iter().any(|a| a.starts_with('-')) {
+    if args.iter().any(|a| a.starts_with('-')) {
         eprintln!("zet run takes a goal, not flags");
         std::process::exit(2);
     }
-    let goal = argv.join(" ");
+    let mut goal = args.join(" ");
+    if let Some(name) = args.first().and_then(|w| w.strip_prefix("recipe:")) {
+        let extra = args[1..].join(" ");
+        goal = render_recipe(name, &extra, &kv);
+    }
     if background {
         delegate(&goal);
         return;
@@ -495,6 +524,72 @@ fn run_cmd(argv: &[&str]) {
             eprintln!("agent error: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+/// Named goal templates (`~/.zet/recipes/<name>.md`) with {{arg}}
+/// placeholders: `zet run recipe:triage --arg service=api`.
+/// Missing recipes list what's there; unfilled placeholders fail loud.
+fn render_recipe(name: &str, extra: &str, args: &[(String, String)]) -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let dir = std::path::Path::new(&home).join(".zet").join("recipes");
+    let path = dir.join(format!("{name}.md"));
+    let body = match std::fs::read_to_string(&path) {
+        Ok(b) => b,
+        Err(_) => {
+            let mut available: Vec<String> = std::fs::read_dir(&dir)
+                .map(|rd| {
+                    rd.filter_map(|e| {
+                        e.ok().and_then(|e| {
+                            e.path().extension().is_some_and(|x| x == "md").then(|| {
+                                e.path()
+                                    .file_stem()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .into_owned()
+                            })
+                        })
+                    })
+                    .collect()
+                })
+                .unwrap_or_default();
+            available.sort();
+            if available.is_empty() {
+                eprintln!("unknown recipe {name:?} (no recipes in {})", dir.display());
+            } else {
+                eprintln!("unknown recipe {name:?}; have: {}", available.join(", "));
+            }
+            std::process::exit(1);
+        }
+    };
+    let mut goal = body;
+    for (k, v) in args {
+        goal = goal.replace(&format!("{{{{{k}}}}}"), v);
+    }
+    // Unfilled placeholders fail loud (a silent {{name}} would confuse
+    // the model into asking or guessing).
+    let mut missing = Vec::new();
+    let mut rest = goal.as_str();
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        if let Some(end) = after.find("}}") {
+            missing.push(after[..end].to_string());
+            rest = &after[end + 2..];
+        } else {
+            break;
+        }
+    }
+    if !missing.is_empty() {
+        missing.sort();
+        missing.dedup();
+        let want: Vec<String> = missing.iter().map(|m| format!("--arg {m}=...")).collect();
+        eprintln!("recipe {name:?} needs {}", want.join(" "));
+        std::process::exit(1);
+    }
+    if extra.trim().is_empty() {
+        goal.trim().to_string()
+    } else {
+        format!("{}\n{}", goal.trim(), extra.trim())
     }
 }
 

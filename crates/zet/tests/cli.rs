@@ -414,3 +414,37 @@ fn run_bg_alias_delegates() {
     let out = zet().args(["run", "-b", "--foo"]).output().unwrap();
     assert_eq!(out.status.code(), Some(2));
 }
+
+fn seed_recipe(home: &std::path::Path, name: &str, body: &str) {
+    let dir = home.join(".zet").join("recipes");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{name}.md")), body).unwrap();
+}
+
+#[test]
+fn run_recipe_missing_arg_fails_loud() {
+    let home = temp_home("recipe_arg");
+    seed_recipe(&home, "greet", "Say hello to {{name}}");
+    let out = zet()
+        .env("HOME", &home)
+        .args(["run", "recipe:greet"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--arg name="), "{err}");
+}
+
+#[test]
+fn run_unknown_recipe_lists_available() {
+    let home = temp_home("recipe_unknown");
+    seed_recipe(&home, "greet", "Say hello");
+    let out = zet()
+        .env("HOME", &home)
+        .args(["run", "recipe:nope"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("greet"), "{err}");
+}
