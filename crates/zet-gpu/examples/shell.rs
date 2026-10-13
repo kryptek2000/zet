@@ -35,45 +35,26 @@ fn shell_program() -> (String, Option<String>) {
     (prog, hook)
 }
 
-struct App {
-    window: Option<Arc<Window>>,
-    renderer: Option<Renderer>,
+/// One terminal tab: everything bound to a single shell session.
+/// The window holds a Vec<Tab> + active index; shared chrome
+/// (renderer, key/mouse state, model specs, perf) stays on App.
+struct Tab {
     session: Option<Session>,
     term: Terminal,
     shell_state: ShellState,
-    mods: ModifiersState,
     rx: Option<Receiver<Vec<u8>>>,
-    cols: usize,
-    rows: usize,
-    shell_name: String,
     dead: bool,
     erase: u8,
     recorder: Option<zet_blocks::Recorder>,
-    env_spec: Option<String>,
-    startup_spec: Option<String>,
     ghost: zet_suggest::Ghost,
-    nl_rx: Option<Receiver<Result<Option<String>, String>>>,
-    /// The in-flight NL request came from the `zet` wake word: its
-    /// answer runs (unless T3), not just previews.
-    nl_wake: bool,
-    /// Commands that run without translation (PATH at startup +
-    /// shell-reported aliases/functions). Unknown first words route
-    /// to the model instead — no modes, no chords.
-    known: zet_pty::KnownCommands,
-    /// Mouse selection (absolute cells): drag to select, Ctrl+Shift+C
-    /// or right-click to copy. Typing clears it.
     selection: Option<Selection>,
     selecting: bool,
-    mouse_px: Option<(f64, f64)>,
-    was_alt: bool,
-    /// Computed fix for the last failure, offered as ghost preview once
-    /// the prompt is fresh. Tab takes it, Esc/typing clears it.
     pending_fix: Option<String>,
+    nl_rx: Option<Receiver<Result<Option<String>, String>>>,
+    nl_wake: bool,
     goal_mode: bool,
     agent_busy: bool,
     agent_rx: Option<Receiver<Option<AgentDone>>>,
-    /// Planner loop, phase one: plan being drafted (rx) or approved
-    /// plan awaiting one Enter (goal + steps). Esc drops both.
     plan_rx: Option<Receiver<PlanDraft>>,
     pending_plan: Option<(String, Vec<String>)>,
     exec_req_rx: Option<Receiver<String>>,
@@ -81,6 +62,110 @@ struct App {
     exec_pending: Option<PendingExec>,
     last_journal: Vec<zet_agent::JournalEntry>,
     undo_rx: Option<Receiver<Result<(), String>>>,
+    was_alt: bool,
+}
+
+impl Tab {
+    /// Spawn a shell + reader thread + recorder: the per-tab pieces
+    /// of what main() built inline. `wake` nudges the event loop when
+    /// PTY bytes land so output renders instantly.
+    fn spawn(
+        prog: &str,
+        hook: Option<String>,
+        wake: winit::event_loop::EventLoopProxy<()>,
+    ) -> Self {
+        let mut session =
+            Session::spawn("env", &["TERM=xterm-256color", prog, "-i"], 80, 24).unwrap();
+        zet_gpu::perf_mark("shell_spawn");
+        if let Some(hook) = hook {
+            let _ = session.write_all(format!("source {hook}\nclear\n").as_bytes());
+        }
+        let reader = session.clone_reader().unwrap();
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut reader = reader;
+            let mut buf = [0u8; 4096];
+            use std::io::Read;
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                        let _ = wake.send_event(());
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let session_id = format!(
+            "{}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            std::process::id()
+        );
+        let recorder = zet_blocks::Store::open_default()
+            .map(|store| zet_blocks::Recorder::new(store, &session_id))
+            .ok();
+        let ghost = zet_suggest::Ghost::new(
+            zet_blocks::Store::open_default()
+                .or_else(|_| zet_blocks::Store::open_in_memory())
+                .expect("in-memory store"),
+        );
+        let erase = session.erase_char();
+        Tab {
+            session: Some(session),
+            term: Terminal::new(80, 24),
+            shell_state: ShellState::new(),
+            rx: Some(rx),
+            dead: false,
+            erase,
+            recorder,
+            ghost,
+            selection: None,
+            selecting: false,
+            pending_fix: None,
+            nl_rx: None,
+            nl_wake: false,
+            goal_mode: false,
+            agent_busy: false,
+            agent_rx: None,
+            plan_rx: None,
+            pending_plan: None,
+            exec_req_rx: None,
+            exec_res_tx: None,
+            exec_pending: None,
+            last_journal: zet_agent::read_journal(&zet_agent::journal_path_default())
+                .map(|all| {
+                    let start = all.len().saturating_sub(50);
+                    all[start..].to_vec()
+                })
+                .unwrap_or_default(),
+            undo_rx: None,
+            was_alt: false,
+        }
+    }
+}
+
+struct App {
+    window: Option<Arc<Window>>,
+    renderer: Option<Renderer>,
+    tabs: Vec<Tab>,
+    active: usize,
+    shell_name: String,
+    mods: ModifiersState,
+    cols: usize,
+    rows: usize,
+    env_spec: Option<String>,
+    startup_spec: Option<String>,
+    /// Commands that run without translation (PATH at startup +
+    /// shell-reported aliases/functions). Unknown first words route
+    /// to the model instead — no modes, no chords.
+    known: zet_pty::KnownCommands,
+    mouse_px: Option<(f64, f64)>,
     last_frame: std::time::Instant,
     needs_draw: bool,
     perf_t0: Option<std::time::Instant>,
@@ -166,50 +251,62 @@ fn shell_cwd(session: &Option<Session>) -> String {
 impl App {
     fn pump(&mut self) {
         let mut died = false;
-        if let Some(rx) = &self.rx {
-            while let Ok(chunk) = rx.try_recv() {
-                self.term.feed(&chunk);
-            }
-            if let Some(s) = &mut self.session {
-                if let Ok(Some(_)) = s.try_exit() {
-                    died = true;
-                }
+        // Drain PTY bytes first (borrow ends), then feed the grid.
+        let chunks: Vec<Vec<u8>> = match &self.tabs[self.active].rx {
+            Some(rx) => std::iter::from_fn(|| rx.try_recv().ok()).collect(),
+            None => Vec::new(),
+        };
+        for chunk in chunks {
+            self.tabs[self.active].term.feed(&chunk);
+        }
+        if let Some(s) = &mut self.tabs[self.active].session {
+            if let Ok(Some(_)) = s.try_exit() {
+                died = true;
             }
         }
         if died {
-            self.dead = true;
+            self.tabs[self.active].dead = true;
             if let Some(w) = &self.window {
                 w.set_title(&format!("ZET — {} (exited)", self.shell_name));
             }
         }
-        for event in self.term.drain_events() {
-            self.shell_state.observe(&event);
+        let events = self.tabs[self.active].term.drain_events();
+        for event in events {
+            self.tabs[self.active].shell_state.observe(&event);
         }
-        if let Some(rec) = &mut self.recorder {
-            rec.pump(&mut self.term, &shell_cwd(&self.session));
-            // Shell-reported aliases/functions feed the router.
-            self.known.insert_names(rec.drain_cmd_names());
-            // Failures become did-you-mean offers (preview only).
-            if let Some((cmd, cwd, output, exit)) = rec.drain_failed() {
-                let fix = zet_pty::suggest_fix(&cmd, &cwd, &output, exit, &self.known);
-                if fix.is_some() {
-                    self.pending_fix = fix;
-                }
+        // Cwd owned before the recorder borrow; drains collected before
+        // shared App state (known) is touched.
+        let cwd = shell_cwd(&self.tabs[self.active].session);
+        let tab = &mut self.tabs[self.active];
+        let (names, failed) = match &mut tab.recorder {
+            Some(rec) => {
+                rec.pump(&mut tab.term, &cwd);
+                (rec.drain_cmd_names(), rec.drain_failed())
+            }
+            None => (Vec::new(), None),
+        };
+        // Shell-reported aliases/functions feed the router.
+        self.known.insert_names(names);
+        // Failures become did-you-mean offers (preview only).
+        if let Some((cmd, cwd, output, exit)) = failed {
+            let fix = zet_pty::suggest_fix(&cmd, &cwd, &output, exit, &self.known);
+            if fix.is_some() {
+                self.tabs[self.active].pending_fix = fix;
             }
         }
         // Alt switch swaps the visible grid: any selection addresses
         // stale rows, so drop it (both directions).
-        let alt = self.term.alt_active();
-        if alt != self.was_alt {
-            self.selection = None;
-            self.selecting = false;
-            self.was_alt = alt;
+        let alt = self.tabs[self.active].term.alt_active();
+        if alt != self.tabs[self.active].was_alt {
+            self.tabs[self.active].selection = None;
+            self.tabs[self.active].selecting = false;
+            self.tabs[self.active].was_alt = alt;
         }
         // Settle probe (ZET_PERF=1 only): Enter-to-block with a fully
         // drained channel. Parsed + recorded; pixels ≤1 frame behind
         // (the D chunk's proxy poke already requested the frame).
         if self.perf_t0.is_some() {
-            if let Some(rec) = &self.recorder {
+            if let Some(rec) = &self.tabs[self.active].recorder {
                 if let Ok(blocks) = rec.blocks() {
                     if blocks.len() > self.perf_blocks {
                         self.perf_blocks = blocks.len();
@@ -225,11 +322,11 @@ impl App {
         self.poll_plan();
         self.poll_undo_done();
         self.poll_fix_offer();
-        if let Some(code) = self.shell_state.last_exit() {
+        if let Some(code) = self.tabs[self.active].shell_state.last_exit() {
             if let Some(w) = &self.window {
-                let mode = if self.agent_busy {
+                let mode = if self.tabs[self.active].agent_busy {
                     " (agent…)"
-                } else if self.goal_mode {
+                } else if self.tabs[self.active].goal_mode {
                     " (agent)"
                 } else {
                     ""
@@ -244,16 +341,16 @@ impl App {
     /// recorded block. Single-lane: the agent waits, input is locked, so
     /// the newest block past `blocks_before` is our step's.
     fn service_exec(&mut self) {
-        if self.exec_pending.is_none() {
-            if let Some(rx) = &self.exec_req_rx {
+        if self.tabs[self.active].exec_pending.is_none() {
+            if let Some(rx) = &self.tabs[self.active].exec_req_rx {
                 if let Ok(cmd) = rx.try_recv() {
-                    let before = self
+                    let before = self.tabs[self.active]
                         .recorder
                         .as_ref()
                         .and_then(|r| r.blocks().ok())
                         .map(|b| b.len())
                         .unwrap_or(0);
-                    self.exec_pending = Some(PendingExec {
+                    self.tabs[self.active].exec_pending = Some(PendingExec {
                         cmd,
                         typed: false,
                         blocks_before: before,
@@ -267,11 +364,12 @@ impl App {
             }
         }
         let res: Option<ExecRes> = {
-            let Some(st) = &mut self.exec_pending else {
+            let tab = &mut self.tabs[self.active];
+            let Some(st) = &mut tab.exec_pending else {
                 return;
             };
             if !st.typed {
-                if let Some(s) = &mut self.session {
+                if let Some(s) = &mut tab.session {
                     let _ = s.write_all(&[0x15]);
                     let _ = s.write_all(st.cmd.as_bytes());
                     let _ = s.write_all(b"\r");
@@ -282,12 +380,12 @@ impl App {
                 self.cmd_t0 = None;
                 return;
             }
-            if self.dead {
+            if tab.dead {
                 Some((None, "shell exited".to_string()))
-            } else if self.recorder.is_none() {
+            } else if tab.recorder.is_none() {
                 Some((None, "block recorder unavailable".to_string()))
             } else {
-                let blocks = self
+                let blocks = tab
                     .recorder
                     .as_ref()
                     .and_then(|r| r.blocks().ok())
@@ -306,7 +404,7 @@ impl App {
                         // Stuck on stdin (pager, bat-on-stdin alias): ^C
                         // reclaims the prompt; the 130 block usually
                         // settles inside grace and completes normally.
-                        if let Some(s) = &mut self.session {
+                        if let Some(s) = &mut tab.session {
                             let _ = s.write_all(&[0x03]);
                         }
                         None
@@ -321,10 +419,10 @@ impl App {
             }
         };
         if let Some(res) = res {
-            if let Some(tx) = &self.exec_res_tx {
+            if let Some(tx) = &self.tabs[self.active].exec_res_tx {
                 let _ = tx.send(res);
             }
-            self.exec_pending = None;
+            self.tabs[self.active].exec_pending = None;
         }
     }
 
@@ -332,23 +430,28 @@ impl App {
     /// A dead worker (panicked thread) clears the channel with a failure
     /// notice instead of locking F12 forever.
     fn poll_undo_done(&mut self) {
-        let Some(rx) = &self.undo_rx else {
+        let Some(rx) = &self.tabs[self.active].undo_rx else {
             return;
         };
         match rx.try_recv() {
             Err(std::sync::mpsc::TryRecvError::Empty) => (),
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.undo_rx = None;
+                self.tabs[self.active].undo_rx = None;
                 let input = self.current_text().unwrap_or_default();
-                self.ghost
+                self.tabs[self.active]
+                    .ghost
                     .notify(input, "(undo failed: worker gone)".to_string());
             }
             Ok(res) => {
-                self.undo_rx = None;
+                self.tabs[self.active].undo_rx = None;
                 let input = self.current_text().unwrap_or_default();
                 match res {
-                    Ok(()) => self.ghost.notify(input, "(undone)".to_string()),
-                    Err(e) => self.ghost.notify(input, format!("(undo failed: {e})")),
+                    Ok(()) => self.tabs[self.active]
+                        .ghost
+                        .notify(input, "(undone)".to_string()),
+                    Err(e) => self.tabs[self.active]
+                        .ghost
+                        .notify(input, format!("(undo failed: {e})")),
                 }
             }
         }
@@ -358,36 +461,40 @@ impl App {
     /// (sync, sub-ms); the model runs solely on NL Enter, in a thread.
     fn update_ghost(&mut self) {
         // NL answer landed: swap the NL line for the command (the preview).
-        if let Some(rx) = &self.nl_rx {
+        if let Some(rx) = &self.tabs[self.active].nl_rx {
             match rx.try_recv() {
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    self.ghost.waiting();
+                    self.tabs[self.active].ghost.waiting();
                     return;
                 }
                 // Dead worker: drop back to history instead of "…" forever.
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.nl_rx = None;
-                    self.nl_wake = false;
+                    self.tabs[self.active].nl_rx = None;
+                    self.tabs[self.active].nl_wake = false;
                 }
                 // Model failures notice LOUD (rate limits, net, auth) —
                 // never dissolve into `(no command)` again.
                 Ok(Err(e)) => {
-                    self.nl_rx = None;
-                    self.nl_wake = false;
+                    self.tabs[self.active].nl_rx = None;
+                    self.tabs[self.active].nl_wake = false;
                     if let Some(input) = self.current_text() {
                         let short: String = e.chars().take(100).collect();
-                        self.ghost.notify(input, format!("(model error: {short})"));
+                        self.tabs[self.active]
+                            .ghost
+                            .notify(input, format!("(model error: {short})"));
                     }
                 }
                 Ok(Ok(answer)) => {
-                    self.nl_rx = None;
+                    self.tabs[self.active].nl_rx = None;
                     if let Some(cmd) = answer {
                         // Conversation, not a command: answer it on the
                         // prompt line instead of swapping. `hello` gets a
                         // reply, not an exit 127.
                         if let Some(chat) = zet_suggest::chat_reply(&cmd) {
                             if let Some(input) = self.current_text() {
-                                self.ghost.notify(input, format!("agent: {chat}"));
+                                self.tabs[self.active]
+                                    .ghost
+                                    .notify(input, format!("agent: {chat}"));
                             }
                         // Never strand the shell in a continuation prompt:
                         // syntactically broken replies notice instead of swap.
@@ -395,46 +502,55 @@ impl App {
                             self.accept_line(&cmd);
                             // Wake-word orders (`zet update linux`) run:
                             // explicit instruction, T3 never auto-passes.
-                            if self.nl_wake && zet_policy::classify(&cmd) != zet_policy::Tier::T3 {
-                                if let Some(s) = &mut self.session {
+                            if self.tabs[self.active].nl_wake
+                                && zet_policy::classify(&cmd) != zet_policy::Tier::T3
+                            {
+                                if let Some(s) = &mut self.tabs[self.active].session {
                                     let _ = s.write_all(b"\r");
                                 }
-                            } else if self.nl_wake {
-                                self.ghost.notify(
+                            } else if self.tabs[self.active].nl_wake {
+                                self.tabs[self.active].ghost.notify(
                                     cmd.clone(),
                                     "(review: critical command — Enter to run)".to_string(),
                                 );
                             }
                         } else if let Some(input) = self.current_text() {
                             let short: String = cmd.chars().take(60).collect();
-                            self.ghost.notify(input, format!("(invalid: {short})"));
+                            self.tabs[self.active]
+                                .ghost
+                                .notify(input, format!("(invalid: {short})"));
                         }
                     } else if let Some(input) = self.current_text() {
-                        self.ghost.notify(input, "(no command)".to_string());
+                        self.tabs[self.active]
+                            .ghost
+                            .notify(input, "(no command)".to_string());
                     }
-                    self.nl_wake = false;
+                    self.tabs[self.active].nl_wake = false;
                     self.retitle();
                 }
             }
         }
         let input = self.prompt_input();
-        self.ghost.update(input);
+        self.tabs[self.active].ghost.update(input);
     }
 
     /// Offer a pending did-you-mean fix once the prompt is fresh.
     /// Called every frame: waits for the empty line, then previews.
     fn poll_fix_offer(&mut self) {
-        if self.pending_fix.is_some() && self.current_text().is_some_and(|t| t.is_empty()) {
-            if let Some(fix) = self.pending_fix.take() {
-                self.ghost.preview(fix);
+        if self.tabs[self.active].pending_fix.is_some()
+            && self.current_text().is_some_and(|t| t.is_empty())
+        {
+            if let Some(fix) = self.tabs[self.active].pending_fix.take() {
+                self.tabs[self.active].ghost.preview(fix);
             }
         }
     }
 
     fn current_text(&self) -> Option<String> {
-        self.recorder
+        self.tabs[self.active]
+            .recorder
             .as_ref()
-            .and_then(|rec| rec.current_input(&self.term))
+            .and_then(|rec| rec.current_input(&self.tabs[self.active].term))
             .map(|(text, _, _)| text)
     }
 
@@ -450,16 +566,16 @@ impl App {
             ch,
             self.cols,
             self.rows,
-            self.term.visible_base(),
+            self.tabs[self.active].term.visible_base(),
         ))
     }
 
     /// Copy the mouse selection to the clipboard (no-op when empty).
     fn copy_selection(&mut self) {
-        let Some(sel) = &self.selection else {
+        let Some(sel) = &self.tabs[self.active].selection else {
             return;
         };
-        let text = sel.text(&self.term);
+        let text = sel.text(&self.tabs[self.active].term);
         if text.is_empty() {
             return;
         }
@@ -469,7 +585,7 @@ impl App {
                 let (s, e) = sel.normalized();
                 let lines = e.row - s.row + 1;
                 let word = if lines == 1 { "line" } else { "lines" };
-                self.ghost.notify(
+                self.tabs[self.active].ghost.notify(
                     input,
                     format!("(copied {lines} line{})", if lines == 1 { "" } else { "s" }),
                 );
@@ -484,7 +600,9 @@ impl App {
                 });
             }
             Err(e) => {
-                self.ghost.notify(input, format!("(copy failed: {e})"));
+                self.tabs[self.active]
+                    .ghost
+                    .notify(input, format!("(copy failed: {e})"));
             }
         }
     }
@@ -493,35 +611,35 @@ impl App {
     /// Follow with Ctrl+Shift+C or right-click to copy it.
     fn select_all(&mut self) {
         // Alt screen owns its grid: no scrollback above it.
-        let total = if self.term.alt_active() {
+        let total = if self.tabs[self.active].term.alt_active() {
             self.rows
         } else {
-            self.term.scrollback_len() + self.rows
+            self.tabs[self.active].term.scrollback_len() + self.rows
         };
         let sel = Selection::all(self.cols, total);
-        self.selection = if sel.is_empty() { None } else { Some(sel) };
-        self.selecting = false;
+        self.tabs[self.active].selection = if sel.is_empty() { None } else { Some(sel) };
+        self.tabs[self.active].selecting = false;
         self.needs_draw = true;
     }
 
     fn prompt_input(&self) -> Option<zet_suggest::PromptInput> {
-        let (text, col, abs) = self
+        let (text, col, abs) = self.tabs[self.active]
             .recorder
             .as_ref()
-            .and_then(|rec| rec.current_input(&self.term))?;
-        let (cx, cy) = self.term.cursor();
+            .and_then(|rec| rec.current_input(&self.tabs[self.active].term))?;
+        let (cx, cy) = self.tabs[self.active].term.cursor();
         Some(zet_suggest::PromptInput {
             text,
             prompt_col: col,
             prompt_row: abs,
-            cursor: (cx, self.term.scrollback_len() + cy),
+            cursor: (cx, self.tabs[self.active].term.scrollback_len() + cy),
         })
     }
 
     /// Replace the current line with `cmd` (Ctrl+U then type).
     fn accept_line(&mut self, cmd: &str) {
-        self.ghost.reset();
-        if let Some(s) = &mut self.session {
+        self.tabs[self.active].ghost.reset();
+        if let Some(s) = &mut self.tabs[self.active].session {
             let _ = s.write_all(&[0x15]);
             let _ = s.write_all(cmd.as_bytes());
         }
@@ -529,9 +647,9 @@ impl App {
 
     fn retitle(&self) {
         if let Some(w) = &self.window {
-            let mode = if self.agent_busy {
+            let mode = if self.tabs[self.active].agent_busy {
                 " (agent…)"
-            } else if self.goal_mode {
+            } else if self.tabs[self.active].goal_mode {
                 " (agent)"
             } else {
                 ""
@@ -587,7 +705,7 @@ impl App {
         let spec = match self.resolve_spec() {
             Some(s) => s,
             None => {
-                self.ghost.notify(
+                self.tabs[self.active].ghost.notify(
                     nl,
                     "(no model: `zet inline <spec>` or ZET_INLINE_SPEC)".to_string(),
                 );
@@ -595,17 +713,17 @@ impl App {
             }
         };
         if let Err(e) = Self::check_spec(&spec) {
-            self.ghost.notify(nl, format!("({e})"));
+            self.tabs[self.active].ghost.notify(nl, format!("({e})"));
             return false;
         }
         let (tx, rx) = mpsc::channel();
-        self.nl_rx = Some(rx);
-        self.nl_wake = wake;
+        self.tabs[self.active].nl_rx = Some(rx);
+        self.tabs[self.active].nl_wake = wake;
         // M1 for NL too: the request sees recent blocks + cwd + repo
         // state, so "fix this" needs no explaining. Gathered here (main
         // thread, needs the recorder), moved into the worker.
-        let cwd = shell_cwd(&self.session);
-        let context = self
+        let cwd = shell_cwd(&self.tabs[self.active].session);
+        let context = self.tabs[self.active]
             .recorder
             .as_ref()
             .and_then(|r| r.blocks().ok())
@@ -635,9 +753,9 @@ impl App {
         let spec = match self.resolve_spec() {
             Some(s) => s,
             None => {
-                self.goal_mode = false;
+                self.tabs[self.active].goal_mode = false;
                 self.retitle();
-                self.ghost.notify(
+                self.tabs[self.active].ghost.notify(
                     goal,
                     "(no model: `zet inline <spec>` or ZET_INLINE_SPEC)".to_string(),
                 );
@@ -645,17 +763,17 @@ impl App {
             }
         };
         if let Err(e) = Self::check_spec(&spec) {
-            self.goal_mode = false;
+            self.tabs[self.active].goal_mode = false;
             self.retitle();
-            self.ghost.notify(goal, format!("({e})"));
+            self.tabs[self.active].ghost.notify(goal, format!("({e})"));
             return;
         }
-        let cwd = shell_cwd(&self.session);
+        let cwd = shell_cwd(&self.tabs[self.active].session);
         let in_repo = zet_agent::detect_repo(std::path::Path::new(&cwd));
         // M1: the turn sees what the user sees — recent blocks (scrubbed,
         // budgeted), cwd, repo state. Best effort: failures degrade to
         // no-context rather than blocking the turn.
-        let context = self
+        let context = self.tabs[self.active]
             .recorder
             .as_ref()
             .and_then(|r| r.blocks().ok())
@@ -666,11 +784,11 @@ impl App {
         let (req_tx, req_rx) = mpsc::channel::<String>();
         let (res_tx, res_rx) = mpsc::channel::<ExecRes>();
         let (done_tx, done_rx) = mpsc::channel::<Option<AgentDone>>();
-        self.exec_req_rx = Some(req_rx);
-        self.exec_res_tx = Some(res_tx);
-        self.agent_rx = Some(done_rx);
-        self.goal_mode = false;
-        self.agent_busy = true;
+        self.tabs[self.active].exec_req_rx = Some(req_rx);
+        self.tabs[self.active].exec_res_tx = Some(res_tx);
+        self.tabs[self.active].agent_rx = Some(done_rx);
+        self.tabs[self.active].goal_mode = false;
+        self.tabs[self.active].agent_busy = true;
         self.retitle();
         let shell_name = self.shell_name.clone();
         std::thread::spawn(move || {
@@ -703,9 +821,9 @@ impl App {
         let spec = match self.resolve_spec() {
             Some(s) => s,
             None => {
-                self.goal_mode = false;
+                self.tabs[self.active].goal_mode = false;
                 self.retitle();
-                self.ghost.notify(
+                self.tabs[self.active].ghost.notify(
                     goal,
                     "(no model: `zet inline <spec>` or ZET_INLINE_SPEC)".to_string(),
                 );
@@ -713,13 +831,13 @@ impl App {
             }
         };
         if let Err(e) = Self::check_spec(&spec) {
-            self.goal_mode = false;
+            self.tabs[self.active].goal_mode = false;
             self.retitle();
-            self.ghost.notify(goal, format!("({e})"));
+            self.tabs[self.active].ghost.notify(goal, format!("({e})"));
             return;
         }
         let (tx, rx) = mpsc::channel();
-        self.plan_rx = Some(rx);
+        self.tabs[self.active].plan_rx = Some(rx);
         self.retitle();
         std::thread::spawn(move || {
             // Fail closed: a broken model must never skip the gate into
@@ -736,21 +854,23 @@ impl App {
     /// Enter (Esc drops it). Single lane with agent turns: a running
     /// turn blocks planning like everything else.
     fn poll_plan(&mut self) {
-        let Some(rx) = &self.plan_rx else {
+        let Some(rx) = &self.tabs[self.active].plan_rx else {
             return;
         };
         let (goal, ready) = match rx.try_recv() {
             Err(std::sync::mpsc::TryRecvError::Empty) => return,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.plan_rx = None;
+                self.tabs[self.active].plan_rx = None;
                 return;
             }
             Ok(ready) => ready,
         };
-        self.plan_rx = None;
+        self.tabs[self.active].plan_rx = None;
         match ready {
             Err(e) => {
-                self.ghost.notify(goal, format!("(plan failed: {e})"));
+                self.tabs[self.active]
+                    .ghost
+                    .notify(goal, format!("(plan failed: {e})"));
             }
             Ok(steps) => {
                 if steps.len() <= 1 {
@@ -763,8 +883,8 @@ impl App {
                         text.push_str(&format!("\n{}. {}", i + 1, step));
                     }
                     text.push_str("\n(Enter: run it, Esc: drop it)");
-                    self.ghost.notify(goal.clone(), text);
-                    self.pending_plan = Some((goal, steps));
+                    self.tabs[self.active].ghost.notify(goal.clone(), text);
+                    self.tabs[self.active].pending_plan = Some((goal, steps));
                 }
             }
         }
@@ -774,35 +894,36 @@ impl App {
     /// notice on the fresh prompt, modes cleared. A dead worker unlocks
     /// input with a failure notice instead of holding the lock forever.
     fn poll_agent_done(&mut self) {
-        let Some(rx) = &self.agent_rx else {
+        let Some(rx) = &self.tabs[self.active].agent_rx else {
             return;
         };
         match rx.try_recv() {
             Err(std::sync::mpsc::TryRecvError::Empty) => (),
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.agent_rx = None;
-                self.agent_busy = false;
-                self.exec_req_rx = None;
-                self.exec_res_tx = None;
-                self.exec_pending = None;
+                self.tabs[self.active].agent_rx = None;
+                self.tabs[self.active].agent_busy = false;
+                self.tabs[self.active].exec_req_rx = None;
+                self.tabs[self.active].exec_res_tx = None;
+                self.tabs[self.active].exec_pending = None;
                 self.retitle();
                 let input = self.current_text().unwrap_or_default();
-                self.ghost
+                self.tabs[self.active]
+                    .ghost
                     .notify(input, "(agent failed: worker gone)".to_string());
             }
             Ok(done) => {
-                self.agent_rx = None;
-                self.agent_busy = false;
-                self.exec_req_rx = None;
-                self.exec_res_tx = None;
-                self.exec_pending = None;
+                self.tabs[self.active].agent_rx = None;
+                self.tabs[self.active].agent_busy = false;
+                self.tabs[self.active].exec_req_rx = None;
+                self.tabs[self.active].exec_res_tx = None;
+                self.tabs[self.active].exec_pending = None;
                 self.retitle();
                 let (input, text) = match done {
                     Some((summary, journal)) => {
                         // Best effort: the turn survives the window via `zet journal`.
                         let _ =
                             zet_agent::append_journal(&zet_agent::journal_path_default(), &journal);
-                        self.last_journal = journal;
+                        self.tabs[self.active].last_journal = journal;
                         let first: String = summary
                             .lines()
                             .next()
@@ -820,7 +941,7 @@ impl App {
                         "(agent: no model — check spec/key)".to_string(),
                     ),
                 };
-                self.ghost.notify(input, text);
+                self.tabs[self.active].ghost.notify(input, text);
             }
         }
     }
@@ -906,8 +1027,8 @@ impl ApplicationHandler for App {
         let size = window.inner_size();
         let cols = ((size.width / cw).max(20) as usize).min(500);
         let rows = ((size.height / ch).max(10) as usize).min(200);
-        self.term.resize(cols, rows);
-        if let Some(s) = &self.session {
+        self.tabs[self.active].term.resize(cols, rows);
+        if let Some(s) = &self.tabs[self.active].session {
             let _ = s.resize(cols.min(32767) as u16, rows.min(32767) as u16);
         }
         self.cols = cols;
@@ -952,7 +1073,7 @@ impl ApplicationHandler for App {
                 self.needs_draw = true;
                 // Typing returns to live (the cursor is there, not in history).
                 if pressed {
-                    self.term.snap_to_bottom();
+                    self.tabs[self.active].term.snap_to_bottom();
                 }
                 if pressed && self.perf_t0.is_some() {
                     self.perf_input = Some(std::time::Instant::now());
@@ -962,7 +1083,7 @@ impl ApplicationHandler for App {
                 // disturbs the turn, so it stays available while busy.
                 // Ctrl+C still reaches the shell: the emergency brake that
                 // cancels the agent's running command (D fires, step ends).
-                if self.agent_busy {
+                if self.tabs[self.active].agent_busy {
                     if is_copy(&event.logical_key, pressed, &self.mods) {
                         self.copy_selection();
                         return;
@@ -979,7 +1100,7 @@ impl ApplicationHandler for App {
                         &self.mods,
                     ) {
                         if bytes == [0x03] {
-                            if let Some(s) = &mut self.session {
+                            if let Some(s) = &mut self.tabs[self.active].session {
                                 let _ = s.write_all(&bytes);
                             }
                         }
@@ -990,11 +1111,10 @@ impl ApplicationHandler for App {
                 if is_paste(&event.logical_key, pressed, &self.mods) {
                     if let Ok(mut clip) = arboard::Clipboard::new() {
                         if let Ok(text) = clip.get_text() {
-                            if let Some(s) = &mut self.session {
-                                let _ = s.write_all(&zet_gpu::input::paste_wrapped(
-                                    &text,
-                                    self.term.bracketed_paste(),
-                                ));
+                            let bracketed = self.tabs[self.active].term.bracketed_paste();
+                            if let Some(s) = &mut self.tabs[self.active].session {
+                                let _ =
+                                    s.write_all(&zet_gpu::input::paste_wrapped(&text, bracketed));
                             }
                         }
                     }
@@ -1013,14 +1133,14 @@ impl ApplicationHandler for App {
                 }
                 // Agent goal mode toggle: Ctrl+G would otherwise type BEL.
                 if is_agent_toggle(&event.logical_key, pressed, &self.mods) {
-                    self.goal_mode = !self.goal_mode;
-                    self.ghost.reset();
-                    self.nl_rx = None;
-                    self.nl_wake = false;
+                    self.tabs[self.active].goal_mode = !self.tabs[self.active].goal_mode;
+                    self.tabs[self.active].ghost.reset();
+                    self.tabs[self.active].nl_rx = None;
+                    self.tabs[self.active].nl_wake = false;
                     // Leaving goal mode abandons any draft, or it could
                     // land and launch after the mode is gone.
-                    self.plan_rx = None;
-                    self.pending_plan = None;
+                    self.tabs[self.active].plan_rx = None;
+                    self.tabs[self.active].pending_plan = None;
                     self.retitle();
                     return;
                 }
@@ -1032,26 +1152,29 @@ impl ApplicationHandler for App {
                 // Runs on a thread: git in a giant repo must not hitch frames.
                 if pressed && matches!(&event.logical_key, Key::Named(NamedKey::F12)) {
                     let input = self.current_text().unwrap_or_default();
-                    if self.undo_rx.is_some() {
+                    if self.tabs[self.active].undo_rx.is_some() {
                         // Never swallow silently: a stuck undo used to eat
                         // every later F12 with zero feedback.
-                        self.ghost
+                        self.tabs[self.active]
+                            .ghost
                             .notify(input, "(undo already running)".to_string());
                         return;
                     }
-                    let cp = self
+                    let cp = self.tabs[self.active]
                         .last_journal
                         .iter()
                         .rev()
                         .find_map(|e| e.checkpoint.clone());
                     match cp {
                         None => {
-                            self.ghost.notify(input, "(nothing to undo)".to_string());
+                            self.tabs[self.active]
+                                .ghost
+                                .notify(input, "(nothing to undo)".to_string());
                         }
                         Some(cp) => {
-                            let cwd = shell_cwd(&self.session);
+                            let cwd = shell_cwd(&self.tabs[self.active].session);
                             let (tx, rx) = mpsc::channel();
-                            self.undo_rx = Some(rx);
+                            self.tabs[self.active].undo_rx = Some(rx);
                             std::thread::spawn(move || {
                                 // Wrong-repo use fails closed: reset --hard
                                 // with an unknown SHA errors, touching nothing.
@@ -1069,8 +1192,8 @@ impl ApplicationHandler for App {
                 // Tab accepts only a completable history ghost; notices
                 // ("…", hints) fall through to the shell untouched.
                 if is_tab {
-                    if let Some(suffix) = self.ghost.accept() {
-                        if let Some(s) = &mut self.session {
+                    if let Some(suffix) = self.tabs[self.active].ghost.accept() {
+                        if let Some(s) = &mut self.tabs[self.active].session {
                             let _ = s.write_all(suffix.as_bytes());
                         }
                         return;
@@ -1079,19 +1202,19 @@ impl ApplicationHandler for App {
                 // Escape clears ghost / cancels an in-flight answer / exits
                 // goal mode; swallowed only when it did something.
                 if is_esc {
-                    let was_pending = self.nl_rx.is_some();
-                    let was_goal = self.goal_mode;
-                    let had_fix = self.pending_fix.take().is_some();
-                    let swallowed = self.ghost.cancel();
+                    let was_pending = self.tabs[self.active].nl_rx.is_some();
+                    let was_goal = self.tabs[self.active].goal_mode;
+                    let had_fix = self.tabs[self.active].pending_fix.take().is_some();
+                    let swallowed = self.tabs[self.active].ghost.cancel();
                     if was_pending || was_goal {
-                        self.ghost.dismiss_current();
+                        self.tabs[self.active].ghost.dismiss_current();
                     }
-                    self.nl_rx = None;
-                    self.nl_wake = false;
-                    self.plan_rx = None;
-                    self.pending_plan = None;
-                    if self.goal_mode {
-                        self.goal_mode = false;
+                    self.tabs[self.active].nl_rx = None;
+                    self.tabs[self.active].nl_wake = false;
+                    self.tabs[self.active].plan_rx = None;
+                    self.tabs[self.active].pending_plan = None;
+                    if self.tabs[self.active].goal_mode {
+                        self.tabs[self.active].goal_mode = false;
                         self.retitle();
                     }
                     if swallowed || was_pending || was_goal || had_fix {
@@ -1103,10 +1226,10 @@ impl ApplicationHandler for App {
                 // approval: the agreed steps run under normal policy.
                 // The stored goal runs (approval was for it, not for
                 // whatever was typed since).
-                if is_enter && self.goal_mode {
+                if is_enter && self.tabs[self.active].goal_mode {
                     let input = self.current_text().unwrap_or_default();
                     if !input.trim().is_empty() {
-                        if let Some((goal, plan)) = self.pending_plan.take() {
+                        if let Some((goal, plan)) = self.tabs[self.active].pending_plan.take() {
                             self.start_agent(goal, Some(plan));
                         } else {
                             self.start_plan(input);
@@ -1118,7 +1241,7 @@ impl ApplicationHandler for App {
                 // known commands run; unknown first words translate
                 // (preview swaps in, never runs blind). The line stays
                 // put when there's no model (notice shown).
-                if is_enter && self.nl_rx.is_none() {
+                if is_enter && self.tabs[self.active].nl_rx.is_none() {
                     let input = self.current_text().unwrap_or_default();
                     if !input.trim().is_empty() {
                         if let Some(rest) = zet_pty::zet_fallback(&input) {
@@ -1133,7 +1256,7 @@ impl ApplicationHandler for App {
                     }
                 }
                 // Enter while an NL answer is in flight: wait for it.
-                if is_enter && self.nl_rx.is_some() {
+                if is_enter && self.tabs[self.active].nl_rx.is_some() {
                     return;
                 }
                 if let Some(mut bytes) = translate(
@@ -1144,13 +1267,13 @@ impl ApplicationHandler for App {
                 ) {
                     // Typing clears the mouse selection.
                     if pressed {
-                        self.selection = None;
+                        self.tabs[self.active].selection = None;
                     }
                     // Send exactly what the line discipline erases with.
                     if bytes == [0x7f] {
-                        bytes = vec![self.erase];
+                        bytes = vec![self.tabs[self.active].erase];
                     }
-                    if let Some(s) = &mut self.session {
+                    if let Some(s) = &mut self.tabs[self.active].session {
                         let _ = s.write_all(&bytes);
                     }
                     // Settle-probe stamps (ZET_PERF=1 only): Enter on a
@@ -1176,8 +1299,8 @@ impl ApplicationHandler for App {
                     r.resize(size.width, size.height);
                     let cols = ((size.width / cw).max(20) as usize).min(500);
                     let rows = ((size.height / ch).max(10) as usize).min(200);
-                    self.term.resize(cols, rows);
-                    if let Some(s) = &self.session {
+                    self.tabs[self.active].term.resize(cols, rows);
+                    if let Some(s) = &self.tabs[self.active].session {
                         let _ = s.resize(cols.min(32767) as u16, rows.min(32767) as u16);
                     }
                     self.cols = cols;
@@ -1186,7 +1309,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 self.pump();
-                if self.dead {
+                if self.tabs[self.active].dead {
                     event_loop.exit();
                     return;
                 }
@@ -1194,21 +1317,23 @@ impl ApplicationHandler for App {
                 // top/bottom edge walks the view each frame so the
                 // selection reaches off-screen text. needs_draw only
                 // when something moved, or the loop would spin.
-                if self.selecting {
+                if self.tabs[self.active].selecting {
                     if let (Some((_, my)), Some(r)) = (self.mouse_px, self.renderer.as_ref()) {
                         let (_, ch) = r.cell_px();
                         let view_h = self.rows as f64 * ch.max(1) as f64;
                         let lines =
                             zet_gpu::selection::drag_scroll_lines(my, view_h, ch.max(1) as f64);
                         if lines != 0 {
-                            let before = self.term.view_offset();
+                            let before = self.tabs[self.active].term.view_offset();
                             if lines > 0 {
-                                self.term.scroll_view_up(lines as usize);
+                                self.tabs[self.active].term.scroll_view_up(lines as usize);
                             } else {
-                                self.term.scroll_view_down((-lines) as usize);
+                                self.tabs[self.active]
+                                    .term
+                                    .scroll_view_down((-lines) as usize);
                             }
                             if let Some(cell) = self.mouse_cell() {
-                                if let Some(sel) = &mut self.selection {
+                                if let Some(sel) = &mut self.tabs[self.active].selection {
                                     let next = zet_gpu::selection::CellPos {
                                         col: cell.col,
                                         row: cell.row,
@@ -1219,16 +1344,21 @@ impl ApplicationHandler for App {
                                     }
                                 }
                             }
-                            if self.term.view_offset() != before {
+                            if self.tabs[self.active].term.view_offset() != before {
                                 self.needs_draw = true;
                             }
                         }
                     }
                 }
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
-                    r.draw_terminal(&self.term, self.cols, self.rows, self.selection);
-                    if let Some(g) = self.ghost.visible() {
-                        let (cx, cy) = self.term.cursor();
+                    r.draw_terminal(
+                        &self.tabs[self.active].term,
+                        self.cols,
+                        self.rows,
+                        self.tabs[self.active].selection,
+                    );
+                    if let Some(g) = self.tabs[self.active].ghost.visible() {
+                        let (cx, cy) = self.tabs[self.active].term.cursor();
                         r.draw_ghost(cy, cx, g, self.cols, self.rows);
                     }
                     r.render();
@@ -1244,16 +1374,19 @@ impl ApplicationHandler for App {
                     // Left-drag selects; click without drag clears.
                     (MouseButton::Left, ElementState::Pressed) => {
                         if let Some(cell) = self.mouse_cell() {
-                            self.selecting = true;
-                            self.selection =
+                            self.tabs[self.active].selecting = true;
+                            self.tabs[self.active].selection =
                                 Some(Selection::new((cell.col, cell.row), (cell.col, cell.row)));
                         }
                     }
                     (MouseButton::Left, ElementState::Released) => {
-                        self.selecting = false;
-                        if self.selection.is_some_and(|s| s.is_empty()) {
-                            self.selection = None;
-                        } else if self.selection.is_some() {
+                        self.tabs[self.active].selecting = false;
+                        if self.tabs[self.active]
+                            .selection
+                            .is_some_and(|s| s.is_empty())
+                        {
+                            self.tabs[self.active].selection = None;
+                        } else if self.tabs[self.active].selection.is_some() {
                             // Select-to-copy: a finished drag lands in the
                             // clipboard with confirmation, no second gesture.
                             self.copy_selection();
@@ -1273,10 +1406,10 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, y) => (y * 3.0).round() as isize,
                     MouseScrollDelta::PixelDelta(p) => (p.y / 20.0).round() as isize,
                 };
-                if self.term.alt_active() {
+                if self.tabs[self.active].term.alt_active() {
                     // App owns the screen (vim/helix): wheel becomes
                     // arrow keys, the xterm alternateScroll convention.
-                    if let Some(s) = &mut self.session {
+                    if let Some(s) = &mut self.tabs[self.active].session {
                         let seq = if lines >= 0 { b"\x1b[A" } else { b"\x1b[B" };
                         for _ in 0..lines.abs().min(10) {
                             let _ = s.write_all(seq);
@@ -1285,19 +1418,21 @@ impl ApplicationHandler for App {
                     return;
                 }
                 // Scrolling drops the selection (it belongs to the old view).
-                self.selection = None;
-                self.selecting = false;
+                self.tabs[self.active].selection = None;
+                self.tabs[self.active].selecting = false;
                 if lines >= 0 {
-                    self.term.scroll_view_up(lines as usize);
+                    self.tabs[self.active].term.scroll_view_up(lines as usize);
                 } else {
-                    self.term.scroll_view_down((-lines) as usize);
+                    self.tabs[self.active]
+                        .term
+                        .scroll_view_down((-lines) as usize);
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_px = Some((position.x, position.y));
-                if self.selecting {
+                if self.tabs[self.active].selecting {
                     if let Some(cell) = self.mouse_cell() {
-                        if let Some(sel) = &mut self.selection {
+                        if let Some(sel) = &mut self.tabs[self.active].selection {
                             sel.active = zet_gpu::selection::CellPos {
                                 col: cell.col,
                                 row: cell.row,
@@ -1316,56 +1451,11 @@ fn main() {
     zet_gpu::perf_mark("main");
     let (prog, hook) = shell_program();
     let shell_name = prog.clone();
-    // Guarantee a sane TERM even under GUI launchers.
-    let mut session = Session::spawn("env", &["TERM=xterm-256color", &prog, "-i"], 80, 24).unwrap();
-    zet_gpu::perf_mark("shell_spawn");
-    if let Some(hook) = hook {
-        let _ = session.write_all(format!("source {hook}\nclear\n").as_bytes());
-    }
-    let reader = session.clone_reader().unwrap();
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
     let event_loop = EventLoop::new().unwrap();
     // Wake the loop the moment PTY bytes land: output renders instantly
     // instead of waiting for the heartbeat.
     let proxy = event_loop.create_proxy();
-    std::thread::spawn(move || {
-        let mut reader = reader;
-        let mut buf = [0u8; 4096];
-        use std::io::Read;
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if tx.send(buf[..n].to_vec()).is_err() {
-                        break;
-                    }
-                    let _ = proxy.send_event(());
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
-    let session_id = format!(
-        "{}-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-        std::process::id()
-    );
-    let recorder = zet_blocks::Store::open_default()
-        .map(|store| zet_blocks::Recorder::new(store, &session_id))
-        .ok();
-    // Second handle on the same store for instant history suggestions
-    // (owned by the ghost controller; borrows would fight the
-    // recorder's &mut pump). In-memory fallback: ghost degrades to
-    // empty suggestions instead of disabling the shell.
-    let ghost = zet_suggest::Ghost::new(
-        zet_blocks::Store::open_default()
-            .or_else(|_| zet_blocks::Store::open_in_memory())
-            .expect("in-memory store"),
-    );
+    let tab = Tab::spawn(&prog, hook, proxy);
     // Model for plain-language input: explicit ZET_INLINE_SPEC (launch config)
     // wins; else the persisted `zet inline` choice re-read per request;
     // else zero-config local when ollama serves a preferred model.
@@ -1382,46 +1472,16 @@ fn main() {
     let mut app = App {
         window: None,
         renderer: None,
-        session: Some(session),
-        term: Terminal::new(80, 24),
-        shell_state: ShellState::new(),
+        tabs: vec![tab],
+        active: 0,
+        shell_name,
         mods: ModifiersState::empty(),
-        rx: Some(rx),
         cols: 80,
         rows: 24,
-        shell_name,
-        dead: false,
-        erase: 0x7f,
-        recorder,
         env_spec,
         startup_spec,
-        ghost,
         known: zet_pty::KnownCommands::from_env(),
-        selection: None,
-        selecting: false,
         mouse_px: None,
-        was_alt: false,
-        pending_fix: None,
-        nl_rx: None,
-        nl_wake: false,
-        goal_mode: false,
-        agent_busy: false,
-        agent_rx: None,
-        plan_rx: None,
-        pending_plan: None,
-        exec_req_rx: None,
-        exec_res_tx: None,
-        exec_pending: None,
-        // F12 must work across restarts: the disk journal outlives the
-        // window, so hydrate from it (recent tail; checkpoints are what
-        // matter). Without this a restart silently disarms undo.
-        last_journal: zet_agent::read_journal(&zet_agent::journal_path_default())
-            .map(|all| {
-                let start = all.len().saturating_sub(50);
-                all[start..].to_vec()
-            })
-            .unwrap_or_default(),
-        undo_rx: None,
         last_frame: std::time::Instant::now(),
         needs_draw: true,
         perf_t0,
@@ -1430,8 +1490,5 @@ fn main() {
         cmd_t0: None,
         perf_blocks: 0,
     };
-    if let Some(s) = &app.session {
-        app.erase = s.erase_char();
-    }
     event_loop.run_app(&mut app).unwrap();
 }
