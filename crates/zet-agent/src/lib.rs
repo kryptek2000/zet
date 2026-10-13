@@ -314,6 +314,24 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
                 });
             }
             if res.tool_calls.is_empty() {
+                // Verify leg: turns that mutated something get one model
+                // self-check (goal + step list, no full outputs). VERIFIED
+                // ends the turn; ISSUES feeds back into the loop while
+                // iterations remain. Read-only turns skip it entirely.
+                if self.mutated() {
+                    match self.verify(goal) {
+                        Ok(()) => return Ok(res.text),
+                        Err(issues) => {
+                            messages.push(Message {
+                                role: Role::User,
+                                text: issues,
+                                tool_call_id: None,
+                                tool_calls: vec![],
+                            });
+                            continue;
+                        }
+                    }
+                }
                 return Ok(res.text);
             }
             // Single lane: first call runs this turn, the rest are deferred.
@@ -511,6 +529,78 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
             checkpoint,
         });
         (call.id.clone(), zet_context::scrub(&output))
+    }
+
+    /// True once the turn mutated something (non-T0 step executed):
+    /// only these pay for the verify leg.
+    fn mutated(&self) -> bool {
+        self.journal
+            .iter()
+            .any(|e| e.executed && e.tier != Tier::T0)
+    }
+
+    /// Verify leg: goal + compact step list back to the model. Ok on
+    /// VERIFIED (journaled); Err(issues text) otherwise, also journaled,
+    /// for the caller to feed back into the loop. A failed verification
+    /// call degrades to unverified-done rather than failing the turn.
+    fn verify(&mut self, goal: &str) -> Result<(), String> {
+        let mut steps = String::new();
+        for e in self.journal.iter().take(20) {
+            let code = e
+                .exit_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "?".to_string());
+            steps.push_str(&format!("- {} (exit {})\n", e.command, code));
+        }
+        let req = ChatRequest {
+            model: String::new(),
+            system: Some(
+                "You verify completed work. Given the goal and the steps taken, \
+                 reply with exactly VERIFIED if the goal is accomplished, or \
+                 ISSUES: followed by the specific gaps if not. No tools."
+                    .to_string(),
+            ),
+            messages: vec![Message {
+                role: Role::User,
+                text: format!("Goal: {goal}\nSteps taken:\n{steps}"),
+                tool_call_id: None,
+                tool_calls: vec![],
+            }],
+            tools: vec![],
+            max_tokens: 128,
+        };
+        let verdict = match self.model.chat(&req) {
+            Ok(res) => res.text.trim().to_string(),
+            Err(e) => {
+                self.journal.push(JournalEntry {
+                    command: "verify".to_string(),
+                    tier: Tier::T0,
+                    approval: Approval::Auto,
+                    approved: true,
+                    executed: false,
+                    exit_code: None,
+                    output: format!("verification call failed: {e}"),
+                    checkpoint: None,
+                });
+                return Ok(());
+            }
+        };
+        let passed = verdict.to_uppercase().starts_with("VERIFIED");
+        self.journal.push(JournalEntry {
+            command: "verify".to_string(),
+            tier: Tier::T0,
+            approval: Approval::Auto,
+            approved: true,
+            executed: passed,
+            exit_code: Some(if passed { 0 } else { 1 }),
+            output: verdict.chars().take(800).collect(),
+            checkpoint: None,
+        });
+        if passed {
+            Ok(())
+        } else {
+            Err(format!("Verification found issues:\n{verdict}"))
+        }
     }
 
     fn step(&mut self, call: &zet_models::ToolCall) -> (String, String) {

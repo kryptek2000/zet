@@ -227,12 +227,14 @@ fn agent_mutation_then_undo_restores_repo() {
     let model = Script::new(vec![
         Script::shell_call("c1", "echo v2 > f.txt && echo new > new.txt"),
         Script::final_text("wrote it"),
+        Script::final_text("VERIFIED"),
     ]);
     let mut agent = Agent::new(model, AllowAll, true, 8).with_workdir(dir.clone());
     agent.run("write v2").unwrap();
     assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "v2\n");
     assert!(dir.join("new.txt").exists());
-    assert_eq!(agent.journal.len(), 1);
+    // Step + verify entries.
+    assert_eq!(agent.journal.len(), 2);
     let cp = agent.journal[0].checkpoint.clone();
     assert!(cp.is_some());
 
@@ -255,6 +257,7 @@ fn dirty_tree_checkpoint_pops_the_stash() {
     let model = Script::new(vec![
         Script::shell_call("c1", "echo v3 > f.txt"),
         Script::final_text("wrote it"),
+        Script::final_text("VERIFIED"),
     ]);
     let mut agent = Agent::new(model, AllowAll, true, 8).with_workdir(dir.clone());
     agent.run("write v3").unwrap();
@@ -591,6 +594,7 @@ fn write_file_tool_writes_inside_workdir() {
             r#"{"path":"new.txt","content":"hello-write\n"}"#,
         ),
         Script::final_text("wrote it"),
+        Script::final_text("VERIFIED"),
     ]);
     let mut agent = Agent::new(model, AllowAll, true, 8).with_workdir(dir.clone());
     assert_eq!(agent.run("write it").unwrap(), "wrote it");
@@ -661,6 +665,7 @@ fn write_result_carries_diff_for_review() {
             r#"{"path":"f.txt","content":"a\nB\nc\nd\n"}"#,
         ),
         Script::final_text("done"),
+        Script::final_text("VERIFIED"),
     ]);
     let mut agent = Agent::new(model, AllowAll, true, 8).with_workdir(dir);
     agent.run("edit it").unwrap();
@@ -676,6 +681,7 @@ fn new_file_diff_shows_all_added() {
     let model = Script::new(vec![
         tool_call("c1", "write_file", r#"{"path":"n.txt","content":"x\ny\n"}"#),
         Script::final_text("done"),
+        Script::final_text("VERIFIED"),
     ]);
     let mut agent = Agent::new(model, AllowAll, true, 8).with_workdir(dir);
     agent.run("create it").unwrap();
@@ -725,4 +731,59 @@ fn unattended_approves_up_to_t2_never_t3() {
     assert!(a.approve(Tier::T1, "echo hi > f"));
     assert!(a.approve(Tier::T2, "rm one-file"));
     assert!(!a.approve(Tier::T3, "rm -rf /"));
+}
+
+#[test]
+fn verify_leg_confirms_mutations() {
+    let dir = temp_workdir("verify_ok");
+    let model = Script::new(vec![
+        tool_call("c1", "write_file", r#"{"path":"v.txt","content":"hi\n"}"#),
+        Script::final_text("wrote it"),
+        Script::final_text("VERIFIED"),
+    ]);
+    let mut agent = Agent::new(model, AllowAll, true, 8).with_workdir(dir);
+    assert_eq!(agent.run("write v").unwrap(), "wrote it");
+    let verify = agent
+        .journal
+        .iter()
+        .find(|e| e.command == "verify")
+        .expect("verify entry");
+    assert!(verify.executed);
+    assert!(verify.output.contains("VERIFIED"));
+}
+
+#[test]
+fn verify_issues_send_the_loop_back() {
+    let dir = temp_workdir("verify_fix");
+    let model = Script::new(vec![
+        tool_call("c1", "write_file", r#"{"path":"v.txt","content":"half\n"}"#),
+        Script::final_text("wrote it"),
+        Script::final_text("ISSUES: file missing second line"),
+        tool_call(
+            "c2",
+            "write_file",
+            r#"{"path":"v.txt","content":"half\nfull\n"}"#,
+        ),
+        Script::final_text("fixed"),
+        Script::final_text("VERIFIED"),
+    ]);
+    let mut agent = Agent::new(model, AllowAll, true, 10).with_workdir(dir.clone());
+    assert_eq!(agent.run("write v fully").unwrap(), "fixed");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("v.txt")).unwrap(),
+        "half\nfull\n"
+    );
+}
+
+#[test]
+fn read_only_turns_skip_verification() {
+    let dir = temp_workdir("verify_skip");
+    std::fs::write(dir.join("a.txt"), "A").unwrap();
+    let model = Script::new(vec![
+        tool_call("c1", "read_file", r#"{"path":"a.txt"}"#),
+        Script::final_text("saw A"),
+    ]);
+    let mut agent = Agent::new(model, AllowAll, true, 8).with_workdir(dir);
+    assert_eq!(agent.run("read a").unwrap(), "saw A");
+    assert!(agent.journal.iter().all(|e| e.command != "verify"));
 }
