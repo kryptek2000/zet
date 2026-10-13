@@ -24,6 +24,9 @@ fn main() {
         ["schedules"] => schedules(),
         ["unschedule", id] => unschedule(id),
         ["daemon"] => daemon(),
+        ["daemon", flag] if flag == &"--install" || flag == &"--uninstall" => {
+            daemon_service(flag == &"--install")
+        }
         ["__run_worker", id] => run_worker(id),
         // Known group, bad usage: hint the group, not the top level.
         // (Guarded by the shared list so dispatch and the window router
@@ -53,6 +56,8 @@ fn main() {
             eprintln!("  zet schedules             list repeating goals");
             eprintln!("  zet unschedule <id>       drop a repeating goal");
             eprintln!("  zet daemon                run due schedules (Ctrl+C stops)");
+            eprintln!("  zet daemon --install     autostart on login (systemd user unit)");
+            eprintln!("  zet daemon --uninstall   remove autostart");
             std::process::exit(2);
         }
     }
@@ -774,6 +779,66 @@ fn daemon() {
         daemon_tick();
         std::thread::sleep(std::time::Duration::from_secs(60));
     }
+}
+
+/// Autostart: a systemd user unit that runs `zet daemon` on login.
+/// --install writes the unit (ExecStart = this binary) and enables it;
+/// --uninstall disables and removes it. systemctl failures are loud
+/// notes, not silent: the file is the install, activation is reported.
+fn daemon_service(install: bool) {
+    let config = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        format!("{home}/.config")
+    });
+    let unit = std::path::Path::new(&config)
+        .join("systemd")
+        .join("user")
+        .join("zet-daemon.service");
+    if !install {
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "disable", "--now", "zet-daemon.service"])
+            .output();
+        if std::fs::remove_file(&unit).is_ok() {
+            println!("removed {}", unit.display());
+        } else {
+            eprintln!("no autostart installed at {}", unit.display());
+            std::process::exit(1);
+        }
+        return;
+    }
+    let exe = std::env::current_exe().unwrap_or_else(|_| "zet".into());
+    let body = format!(
+        "[Unit]\nDescription=ZET scheduled runs daemon\nAfter=network-online.target\n\n\
+         [Service]\nExecStart={} daemon\nRestart=on-failure\nRestartSec=60\n\n\
+         [Install]\nWantedBy=default.target\n",
+        exe.display()
+    );
+    if let Some(parent) = unit.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            eprintln!("cannot create {}", parent.display());
+            std::process::exit(1);
+        }
+    }
+    if std::fs::write(&unit, &body).is_err() {
+        eprintln!("cannot write {}", unit.display());
+        std::process::exit(1);
+    }
+    println!("wrote {}", unit.display());
+    for step in [
+        vec!["--user", "daemon-reload"],
+        vec!["--user", "enable", "--now", "zet-daemon.service"],
+    ] {
+        match std::process::Command::new("systemctl").args(&step).output() {
+            Ok(o) if o.status.success() => {}
+            _ => {
+                eprintln!("systemctl {} failed — enable manually:", step.join(" "));
+                eprintln!("  systemctl --user daemon-reload");
+                eprintln!("  systemctl --user enable --now zet-daemon.service");
+                return;
+            }
+        }
+    }
+    println!("zet daemon autostart enabled");
 }
 
 fn daemon_tick() {

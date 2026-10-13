@@ -636,3 +636,53 @@ fn run_quoted_recipe_hints_unquoted_form() {
     assert!(err.contains("unknown recipe"), "{err}");
     assert!(err.contains("no quotes"), "{err}");
 }
+
+#[test]
+fn daemon_install_writes_unit() {
+    let home = temp_home("daemon_install");
+    let out = zet()
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .args(["daemon", "--install"])
+        .output()
+        .unwrap();
+    // Install product is the file (activation may fail without a bus).
+    let unit = home
+        .join(".config")
+        .join("systemd")
+        .join("user")
+        .join("zet-daemon.service");
+    let body = std::fs::read_to_string(&unit).unwrap();
+    assert!(body.contains(" daemon"), "{body}");
+    assert!(body.contains("WantedBy=default.target"), "{body}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("wrote"), "{text}");
+}
+
+#[test]
+fn daemon_uninstall_removes_unit() {
+    let home = temp_home("daemon_uninstall");
+    let unit_dir = home.join(".config").join("systemd").join("user");
+    std::fs::create_dir_all(&unit_dir).unwrap();
+    std::fs::write(unit_dir.join("zet-daemon.service"), "x").unwrap();
+    let out = zet()
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .args(["daemon", "--uninstall"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(!unit_dir.join("zet-daemon.service").exists());
+}
+
+#[test]
+fn daemon_uninstall_missing_fails_loud() {
+    let home = temp_home("daemon_uninstall_missing");
+    let out = zet()
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .args(["daemon", "--uninstall"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+}
