@@ -590,6 +590,10 @@ fn render_recipe(name: &str, extra: &str, args: &[(String, String)]) -> String {
             } else {
                 eprintln!("unknown recipe {name:?}; have: {}", available.join(", "));
             }
+            if name.contains(char::is_whitespace) {
+                eprintln!("hint: pass recipe and --arg as separate words, no quotes:");
+                eprintln!("  zet run recipe:greet --arg name=world");
+            }
             std::process::exit(1);
         }
     };

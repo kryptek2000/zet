@@ -620,3 +620,19 @@ fn daemon_fires_due_schedule() {
     }
     assert!(done, "daemon never delegated the due schedule");
 }
+
+#[test]
+fn run_quoted_recipe_hints_unquoted_form() {
+    let home = temp_home("recipe_hint");
+    seed_recipe(&home, "greet", "Say hi {{name}}");
+    // One quoted word (beginner trap): fail loud AND show the fix.
+    let out = zet()
+        .env("HOME", &home)
+        .args(["run", "recipe:greet --arg name=world"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unknown recipe"), "{err}");
+    assert!(err.contains("no quotes"), "{err}");
+}
