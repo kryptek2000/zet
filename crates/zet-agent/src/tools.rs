@@ -274,3 +274,142 @@ pub fn write_file(workdir: &Path, path: &str, content: &str) -> Result<String, S
     std::fs::write(&target, content).map_err(|e| format!("cannot write {path}: {e}"))?;
     Ok(format!("wrote {} bytes to {path}", content.len()))
 }
+
+const DIFF_LINE_CAP: usize = 400;
+const DIFF_CHAR_CAP: usize = 2000;
+
+/// Line diff for review (unified hunks, 3 lines context). Small inputs
+/// only: past the line cap it degrades to line counts, never hangs.
+pub fn unified_diff(old: &str, new: &str) -> String {
+    let a: Vec<&str> = old.lines().collect();
+    let b: Vec<&str> = new.lines().collect();
+    if a.len() + b.len() > DIFF_LINE_CAP {
+        return format!(
+            "({} -> {} lines: too large for inline diff)",
+            a.len(),
+            b.len()
+        );
+    }
+    // LCS table (inputs are capped, quadratic is fine).
+    let (n, m) = (a.len(), b.len());
+    let mut dp = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i][j] = if a[i] == b[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+    // Walk the table into ops: (keep/del/ins, line).
+    enum Op<'x> {
+        Keep(&'x str),
+        Del(&'x str),
+        Ins(&'x str),
+    }
+    let mut ops = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < n && j < m {
+        if a[i] == b[j] {
+            ops.push(Op::Keep(a[i]));
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            ops.push(Op::Del(a[i]));
+            i += 1;
+        } else {
+            ops.push(Op::Ins(b[j]));
+            j += 1;
+        }
+    }
+    while i < n {
+        ops.push(Op::Del(a[i]));
+        i += 1;
+    }
+    while j < m {
+        ops.push(Op::Ins(b[j]));
+        j += 1;
+    }
+    if ops.iter().all(|o| matches!(o, Op::Keep(_))) {
+        return "(no changes)".to_string();
+    }
+    // Group into hunks with 3 lines of context.
+    let mut out = String::new();
+    let mut hunk_start = 0;
+    while hunk_start < ops.len() {
+        // Next change.
+        let Some(first_change) = ops[hunk_start..]
+            .iter()
+            .position(|o| !matches!(o, Op::Keep(_)))
+        else {
+            break;
+        };
+        let change = hunk_start + first_change;
+        let from = change.saturating_sub(3);
+        // Extend through trailing context (3 keeps past last change).
+        let mut keeps_after = 0;
+        let mut to = ops.len();
+        for (k, o) in ops.iter().enumerate().skip(change) {
+            match o {
+                Op::Keep(_) => {
+                    keeps_after += 1;
+                    if keeps_after > 3 {
+                        to = k - 3;
+                        break;
+                    }
+                }
+                _ => keeps_after = 0,
+            }
+        }
+        let (mut ao, mut bo) = (0usize, 0usize);
+        for o in &ops[..from] {
+            match o {
+                Op::Keep(_) => {
+                    ao += 1;
+                    bo += 1;
+                }
+                Op::Del(_) => ao += 1,
+                Op::Ins(_) => bo += 1,
+            }
+        }
+        let (mut ac, mut bc) = (0usize, 0usize);
+        for o in &ops[from..to] {
+            match o {
+                Op::Keep(_) => {
+                    ac += 1;
+                    bc += 1;
+                }
+                Op::Del(_) => ac += 1,
+                Op::Ins(_) => bc += 1,
+            }
+        }
+        out.push_str(&format!("@@ -{},{} +{},{} @@\n", ao + 1, ac, bo + 1, bc));
+        for o in &ops[from..to] {
+            match o {
+                Op::Keep(l) => {
+                    out.push(' ');
+                    out.push_str(l);
+                    out.push('\n');
+                }
+                Op::Del(l) => {
+                    out.push('-');
+                    out.push_str(l);
+                    out.push('\n');
+                }
+                Op::Ins(l) => {
+                    out.push('+');
+                    out.push_str(l);
+                    out.push('\n');
+                }
+            }
+        }
+        if out.len() > DIFF_CHAR_CAP {
+            out.truncate(DIFF_CHAR_CAP);
+            out.push_str("\n…(diff truncated)");
+            break;
+        }
+        hunk_start = to;
+    }
+    out
+}

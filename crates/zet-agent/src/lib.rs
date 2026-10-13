@@ -410,8 +410,15 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
         } else {
             None
         };
+        // Review needs before-and-after: snapshot first via the confined
+        // reader (missing/unreadable means created-new; only the diff
+        // uses it, and failures never reach it).
+        let before = tools::read_file(&self.workdir, &path, None).unwrap_or_default();
         let (executed, output) = match tools::write_file(&self.workdir, &path, &content) {
-            Ok(note) => (true, note),
+            Ok(note) => {
+                let diff = tools::unified_diff(&before, &content);
+                (true, format!("{note}\nDiff:\n{diff}"))
+            }
             Err(problem) => (false, format!("error: {problem}")),
         };
         self.journal.push(JournalEntry {

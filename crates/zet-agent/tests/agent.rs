@@ -649,3 +649,37 @@ fn write_file_denied_for_read_only_approver() {
     assert!(!agent.journal[0].executed);
     assert!(!dir.join("new.txt").exists());
 }
+
+#[test]
+fn write_result_carries_diff_for_review() {
+    let dir = temp_workdir("write_diff");
+    std::fs::write(dir.join("f.txt"), "a\nb\nc\n").unwrap();
+    let model = Script::new(vec![
+        tool_call(
+            "c1",
+            "write_file",
+            r#"{"path":"f.txt","content":"a\nB\nc\nd\n"}"#,
+        ),
+        Script::final_text("done"),
+    ]);
+    let mut agent = Agent::new(model, AllowAll, true, 8).with_workdir(dir);
+    agent.run("edit it").unwrap();
+    let out = &agent.journal[0].output;
+    assert!(out.contains("-b"), "{out}");
+    assert!(out.contains("+B"), "{out}");
+    assert!(out.contains("+d"), "{out}");
+}
+
+#[test]
+fn new_file_diff_shows_all_added() {
+    let dir = temp_workdir("write_new_diff");
+    let model = Script::new(vec![
+        tool_call("c1", "write_file", r#"{"path":"n.txt","content":"x\ny\n"}"#),
+        Script::final_text("done"),
+    ]);
+    let mut agent = Agent::new(model, AllowAll, true, 8).with_workdir(dir);
+    agent.run("create it").unwrap();
+    let out = &agent.journal[0].output;
+    assert!(out.contains("+x"), "{out}");
+    assert!(out.contains("+y"), "{out}");
+}
