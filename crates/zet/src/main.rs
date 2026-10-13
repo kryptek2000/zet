@@ -19,6 +19,8 @@ fn main() {
         ["journal", rest @ ..] => journal(rest),
         ["undo"] => undo(),
         ["run", rest @ ..] => run_cmd(rest),
+        ["runs", rest @ ..] => runs(rest),
+        ["__run_worker", id] => run_worker(id),
         // Known group, bad usage: hint the group, not the top level.
         // (Guarded by the shared list so dispatch and the window router
         // can't drift apart — see zet_pty::CLI_SUBCOMMANDS.)
@@ -40,6 +42,8 @@ fn main() {
             eprintln!("  zet journal [--limit N]   agent turns + recent commands (one history)");
             eprintln!("  zet undo                  undo the last checkpointed agent step here");
             eprintln!("  zet run <goal...>         run an agent turn here, unattended (never T3)");
+            eprintln!("  zet run --background <g>  delegate it (log + bubble when done)");
+            eprintln!("  zet runs                  list delegated runs");
             std::process::exit(2);
         }
     }
@@ -425,19 +429,9 @@ fn blocks(argv: &[&str]) {
     }
 }
 
-/// Delegated run: an agent turn in this directory, unattended. T3 is
-/// never approved (no human to type-confirm); the turn is journaled
-/// so `zet journal` shows it and `zet undo` reaches it.
-fn run_cmd(argv: &[&str]) {
-    if argv.is_empty() {
-        eprintln!("usage: zet run <goal...>");
-        std::process::exit(2);
-    }
-    if argv.iter().any(|a| a.starts_with('-')) {
-        eprintln!("zet run takes a goal, not flags");
-        std::process::exit(2);
-    }
-    let goal = argv.join(" ");
+/// One agent turn in this directory, journaled. Shared by foreground
+/// `zet run` and the background worker.
+fn execute_turn(goal: &str) -> Result<String, String> {
     let path = zet_models::keys::inline_spec_path();
     let spec = match std::env::var("ZET_INLINE_SPEC") {
         Ok(s) => s,
@@ -446,17 +440,13 @@ fn run_cmd(argv: &[&str]) {
             None => match zet_models::keys::autodetect_local() {
                 Some(s) => s,
                 None => {
-                    eprintln!("no model: set ZET_INLINE_SPEC or `zet inline <spec>`");
-                    std::process::exit(1);
+                    return Err("no model: set ZET_INLINE_SPEC or `zet inline <spec>`".to_string());
                 }
             },
         },
     };
     let provider =
-        keychains(|c| zet_models::keys::resolve_provider(&spec, c)).unwrap_or_else(|e| {
-            eprintln!("{e}");
-            std::process::exit(1);
-        });
+        keychains(|c| zet_models::keys::resolve_provider(&spec, c)).map_err(|e| e.to_string())?;
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let in_repo = zet_agent::detect_repo(&cwd);
     let git = zet_context::git_state(&cwd);
@@ -471,15 +461,172 @@ fn run_cmd(argv: &[&str]) {
         zet_agent::Agent::new(provider.into_client(), zet_agent::Unattended, in_repo, 8)
             .with_workdir(cwd)
             .with_context(context);
-    match agent.run(&goal) {
-        Ok(summary) => {
-            println!("{summary}");
-            let _ = zet_agent::append_journal(&zet_agent::journal_path_default(), &agent.journal);
-        }
+    let summary = agent.run(goal).map_err(|e| e.to_string())?;
+    let _ = zet_agent::append_journal(&zet_agent::journal_path_default(), &agent.journal);
+    Ok(summary)
+}
+
+/// Delegated run: an agent turn in this directory, unattended. T3 is
+/// never approved (no human to type-confirm); the turn is journaled
+/// so `zet journal` shows it and `zet undo` reaches it.
+/// `--background` detaches: the turn outlives this shell, the summary
+/// lands in the run log + journal, and an OS bubble announces it.
+fn run_cmd(argv: &[&str]) {
+    let background = argv
+        .first()
+        .is_some_and(|a| *a == "--background" || *a == "--bg" || *a == "-b");
+    let argv = if background { &argv[1..] } else { argv };
+    if argv.is_empty() {
+        eprintln!("usage: zet run [--background] <goal...>");
+        std::process::exit(2);
+    }
+    if argv.iter().any(|a| a.starts_with('-')) {
+        eprintln!("zet run takes a goal, not flags");
+        std::process::exit(2);
+    }
+    let goal = argv.join(" ");
+    if background {
+        delegate(&goal);
+        return;
+    }
+    match execute_turn(&goal) {
+        Ok(summary) => println!("{summary}"),
         Err(e) => {
             eprintln!("agent error: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+/// Runs directory: one subdir per delegated turn (goal, log, status).
+fn runs_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    std::path::Path::new(&home).join(".zet").join("runs")
+}
+
+/// Detach a worker for the goal; print the run id and exit now. The
+/// worker survives shell exit (own session); output streams to its log.
+fn delegate(goal: &str) {
+    let id = format!(
+        "{}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+        std::process::id()
+    );
+    let dir = runs_dir().join(&id);
+    if std::fs::create_dir_all(&dir).is_err() {
+        eprintln!("cannot create run dir");
+        std::process::exit(1);
+    }
+    if std::fs::write(dir.join("goal.txt"), goal).is_err() {
+        eprintln!("cannot write run goal");
+        std::process::exit(1);
+    }
+    let _ = std::fs::write(dir.join("status"), "running");
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("cannot find zet binary: {e}");
+            std::process::exit(1);
+        }
+    };
+    let log = std::fs::File::create(dir.join("log.txt")).unwrap_or_else(|e| {
+        eprintln!("cannot create run log: {e}");
+        std::process::exit(1);
+    });
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        let log_err = log
+            .try_clone()
+            .unwrap_or_else(|_| std::fs::File::create("/dev/null").expect("devnull"));
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("__run_worker")
+            .arg(&id)
+            .stdin(std::process::Stdio::null())
+            .stdout(log)
+            .stderr(log_err);
+        // Own session: outlives the delegating shell and its terminal.
+        unsafe {
+            cmd.pre_exec(|| {
+                nix::unistd::setsid()
+                    .map(|_| ())
+                    .map_err(std::io::Error::other)
+            });
+        }
+        if cmd.spawn().is_err() {
+            eprintln!("cannot spawn worker");
+            std::process::exit(1);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (exe, log);
+        eprintln!("background runs need unix");
+        std::process::exit(1);
+    }
+    println!("delegated {id} (log: {})", dir.join("log.txt").display());
+}
+
+/// Background worker: run the recorded goal, then log + journal +
+/// notify. Never touches the terminal that delegated it.
+fn run_worker(id: &str) {
+    let dir = runs_dir().join(id);
+    let goal = std::fs::read_to_string(dir.join("goal.txt")).unwrap_or_default();
+    let summary = match execute_turn(goal.trim()) {
+        Ok(s) => s,
+        Err(e) => format!("agent error: {e}"),
+    };
+    let _ = std::fs::write(dir.join("log.txt"), &summary);
+    let _ = std::fs::write(dir.join("status"), "done");
+    let first: String = summary
+        .lines()
+        .next()
+        .unwrap_or("done")
+        .chars()
+        .take(120)
+        .collect();
+    let _ = notify_rust::Notification::new()
+        .summary("ZET run done")
+        .body(&format!("{id}: {first}"))
+        .show();
+}
+
+/// List delegated runs (oldest first): id, status, and goal.
+fn runs(argv: &[&str]) {
+    if argv.iter().any(|a| a.starts_with('-')) {
+        eprintln!("zet runs takes no flags");
+        std::process::exit(2);
+    }
+    let dir = runs_dir();
+    let mut ids: Vec<String> = std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.filter_map(|e| {
+                e.ok().and_then(|e| {
+                    if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        e.file_name().into_string().ok()
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect()
+        })
+        .unwrap_or_default();
+    if ids.is_empty() {
+        println!("no background runs");
+        return;
+    }
+    ids.sort();
+    for id in ids {
+        let sub = dir.join(&id);
+        let status =
+            std::fs::read_to_string(sub.join("status")).unwrap_or_else(|_| "?".to_string());
+        let goal = std::fs::read_to_string(sub.join("goal.txt")).unwrap_or_default();
+        let goal: String = goal.chars().take(80).collect();
+        println!("{} [{}] {}", id, status.trim(), goal.trim());
     }
 }
 /// One-key undo behind `zet undo`: the last checkpointed agent step,

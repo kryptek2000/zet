@@ -4490,6 +4490,7 @@ name = "zet"
 version = "0.1.0"
 dependencies = [
  "nix",
+ "notify-rust",
  "zet-agent",
  "zet-blocks",
  "zet-context",

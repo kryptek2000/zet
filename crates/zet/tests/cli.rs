@@ -375,3 +375,42 @@ fn run_rejects_flags_and_empty_goal() {
     let out = zet().args(["run"]).output().unwrap();
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn run_background_needs_goal() {
+    let out = zet().args(["run", "--background"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn run_background_rejects_flags_after() {
+    let out = zet()
+        .args(["run", "--background", "--foo"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn runs_empty_reports_none() {
+    let home = temp_home("runs_empty");
+    let out = zet().env("HOME", &home).args(["runs"]).output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("no background runs"), "{text}");
+}
+
+#[test]
+fn runs_rejects_flags() {
+    let out = zet().args(["runs", "--all"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn run_bg_alias_delegates() {
+    // --bg (spec §5) behaves like --background: needs a goal, not flags.
+    let out = zet().args(["run", "--bg"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let out = zet().args(["run", "-b", "--foo"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}

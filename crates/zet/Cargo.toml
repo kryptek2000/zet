@@ -10,6 +10,7 @@ zet-models = { path = "../zet-models" }
 zet-blocks = { path = "../zet-blocks" }
 zet-pty = { path = "../zet-pty" }
 zet-context = { path = "../zet-context" }
+notify-rust = "4"
 
 [dev-dependencies]
 zet-policy = { path = "../zet-policy" }
