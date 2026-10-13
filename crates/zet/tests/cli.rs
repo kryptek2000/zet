@@ -477,3 +477,33 @@ fn usage_empty_reports_none() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("no usage recorded"), "{text}");
 }
+
+#[test]
+fn run_recipe_traversal_rejected() {
+    let home = temp_home("recipe_trav");
+    std::fs::write(home.join("secret.md"), "Say pwned").unwrap();
+    for evil in ["recipe:../secret", "recipe:/etc/hostname", "recipe:.."] {
+        let out = zet()
+            .env("HOME", &home)
+            .args(["run", evil])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{evil}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("bad recipe name"), "{evil}: {err}");
+    }
+}
+
+#[test]
+fn run_recipe_unterminated_placeholder_fails() {
+    let home = temp_home("recipe_unterm");
+    seed_recipe(&home, "broken", "Say {{oops");
+    let out = zet()
+        .env("HOME", &home)
+        .args(["run", "recipe:broken"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unterminated"), "{err}");
+}

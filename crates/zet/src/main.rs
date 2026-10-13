@@ -533,6 +533,12 @@ fn run_cmd(argv: &[&str]) {
 /// placeholders: `zet run recipe:triage --arg service=api`.
 /// Missing recipes list what's there; unfilled placeholders fail loud.
 fn render_recipe(name: &str, extra: &str, args: &[(String, String)]) -> String {
+    // Jail the name: dir.join with an absolute or ../ name escapes the
+    // recipes dir into arbitrary *.md reads. Fail loud, not canonical.
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        eprintln!("bad recipe name {name:?}: plain names only");
+        std::process::exit(1);
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let dir = std::path::Path::new(&home).join(".zet").join("recipes");
     let path = dir.join(format!("{name}.md"));
@@ -569,17 +575,23 @@ fn render_recipe(name: &str, extra: &str, args: &[(String, String)]) -> String {
         goal = goal.replace(&format!("{{{{{k}}}}}"), v);
     }
     // Unfilled placeholders fail loud (a silent {{name}} would confuse
-    // the model into asking or guessing).
+    // the model into asking or guessing). Unterminated {{ fails too.
     let mut missing = Vec::new();
     let mut rest = goal.as_str();
+    let mut unterminated = false;
     while let Some(start) = rest.find("{{") {
         let after = &rest[start + 2..];
         if let Some(end) = after.find("}}") {
             missing.push(after[..end].to_string());
             rest = &after[end + 2..];
         } else {
+            unterminated = true;
             break;
         }
+    }
+    if unterminated {
+        eprintln!("recipe {name:?} has unterminated {{{{...}}}} placeholder");
+        std::process::exit(1);
     }
     if !missing.is_empty() {
         missing.sort();
