@@ -1081,7 +1081,8 @@ impl ApplicationHandler for App {
                     if let (Some((_, my)), Some(r)) = (self.mouse_px, self.renderer.as_ref()) {
                         let (_, ch) = r.cell_px();
                         let view_h = self.rows as f64 * ch.max(1) as f64;
-                        let lines = zet_gpu::selection::drag_scroll_lines(my, view_h);
+                        let lines =
+                            zet_gpu::selection::drag_scroll_lines(my, view_h, ch.max(1) as f64);
                         if lines != 0 {
                             let before = self.term.view_offset();
                             if lines > 0 {

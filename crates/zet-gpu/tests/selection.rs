@@ -97,9 +97,15 @@ fn drag_past_edge_scrolls_view() {
     use zet_gpu::selection::drag_scroll_lines;
     // Mouse above the view (y<0) scrolls up; below scrolls down;
     // inside stays put.
-    assert!(drag_scroll_lines(-4.0, 400.0) > 0);
-    assert!(drag_scroll_lines(404.0, 400.0) < 0);
-    assert_eq!(drag_scroll_lines(0.0, 400.0), 0);
-    assert_eq!(drag_scroll_lines(200.0, 400.0), 0);
-    assert_eq!(drag_scroll_lines(399.0, 400.0), 0);
+    assert!(drag_scroll_lines(-4.0, 400.0, 20.0) > 0);
+    assert!(drag_scroll_lines(404.0, 400.0, 20.0) < 0);
+    assert_eq!(drag_scroll_lines(0.0, 400.0, 20.0), 0);
+    assert_eq!(drag_scroll_lines(200.0, 400.0, 20.0), 0);
+    assert_eq!(drag_scroll_lines(399.0, 400.0, 20.0), 0);
+    // Acceleration: further past the edge scrolls faster, capped.
+    let near = drag_scroll_lines(-4.0, 400.0, 20.0);
+    let far = drag_scroll_lines(-400.0, 400.0, 20.0);
+    assert!(far > near, "{near} vs {far}");
+    assert!(drag_scroll_lines(-10000.0, 400.0, 20.0) <= 24);
+    assert!(drag_scroll_lines(10000.0, 400.0, 20.0) >= -24);
 }

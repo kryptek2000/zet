@@ -130,13 +130,15 @@ pub fn pix_to_cell(
 
 /// Drag-select autoscroll: holding the mouse past the top/bottom edge
 /// of the view walks it so the selection reaches off-screen text.
-/// Positive scrolls up (into history), negative back toward live,
-/// scaled per frame; zero inside the view.
-pub fn drag_scroll_lines(mouse_y: f64, view_h: f64) -> isize {
+/// Positive scrolls up (into history), negative back toward live.
+/// Accelerates with distance past the edge (2 lines at the edge, up to
+/// 24 far out); zero inside the view.
+pub fn drag_scroll_lines(mouse_y: f64, view_h: f64, cell_h: f64) -> isize {
+    let cell_h = cell_h.max(1.0);
     if mouse_y < 0.0 {
-        2
+        (2.0 + (-mouse_y / cell_h)).min(24.0) as isize
     } else if mouse_y >= view_h {
-        -2
+        -((2.0 + ((mouse_y - view_h) / cell_h)).min(24.0) as isize)
     } else {
         0
     }
