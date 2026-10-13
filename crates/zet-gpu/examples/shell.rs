@@ -10,8 +10,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::Window;
 use zet_gpu::input::{
-    is_agent_toggle, is_close_tab, is_copy, is_cycle_tab, is_new_tab, is_paste, is_select_all,
-    translate,
+    is_agent_toggle, is_close_tab, is_copy, is_cycle_tab, is_new_tab, is_paste, is_search,
+    is_select_all, translate,
 };
 use zet_gpu::selection::{pix_to_cell, Selection};
 use zet_gpu::Renderer;
@@ -66,6 +66,16 @@ struct Tab {
     last_journal: Vec<zet_agent::JournalEntry>,
     undo_rx: Option<Receiver<Result<(), String>>>,
     was_alt: bool,
+    search: SearchState,
+}
+
+/// Scrollback find state (per tab): the query, absolute-row matches,
+/// and the current hit. Typing goes to the query, never the PTY.
+struct SearchState {
+    on: bool,
+    query: String,
+    matches: Vec<(usize, usize, usize)>,
+    current: usize,
 }
 
 impl Tab {
@@ -145,6 +155,12 @@ impl Tab {
                 .unwrap_or_default(),
             undo_rx: None,
             was_alt: false,
+            search: SearchState {
+                on: false,
+                query: String::new(),
+                matches: Vec::new(),
+                current: 0,
+            },
         }
     }
 }
@@ -553,6 +569,63 @@ impl App {
         }
         let input = self.prompt_input();
         self.tabs[self.active].ghost.update(input);
+    }
+
+    /// Recompute matches for the search query, jump to the first hit,
+    /// and show the count on the prompt line.
+    fn research(&mut self) {
+        let active = self.active;
+        let query = self.tabs[active].search.query.clone();
+        let matches = self.tabs[active].term.search_matches(&query);
+        let input = self.text_at(active).unwrap_or_default();
+        let tab = &mut self.tabs[active];
+        tab.search.matches = matches;
+        tab.search.current = 0;
+        if let Some(&(r, _, _)) = tab.search.matches.first() {
+            tab.term.reveal_row(r);
+        }
+        let msg = if tab.search.query.is_empty() {
+            "search: (type to find)".to_string()
+        } else if tab.search.matches.is_empty() {
+            format!("search: {} (no match)", tab.search.query)
+        } else {
+            format!(
+                "search: {} (1/{})",
+                tab.search.query,
+                tab.search.matches.len()
+            )
+        };
+        tab.ghost.notify(input, msg);
+        self.needs_draw = true;
+    }
+
+    /// Step the current hit (dir = +1 next, -1 previous), wrapping.
+    fn search_step(&mut self, dir: isize) {
+        let active = self.active;
+        let n = self.tabs[active].search.matches.len();
+        if n == 0 {
+            return;
+        }
+        let input = self.text_at(active).unwrap_or_default();
+        let tab = &mut self.tabs[active];
+        tab.search.current = (tab.search.current as isize + dir).rem_euclid(n as isize) as usize;
+        let (r, _, _) = tab.search.matches[tab.search.current];
+        tab.term.reveal_row(r);
+        let msg = format!(
+            "search: {} ({}/{})",
+            tab.search.query,
+            tab.search.current + 1,
+            n
+        );
+        tab.ghost.notify(input, msg);
+        self.needs_draw = true;
+    }
+
+    /// Leave search mode (view stays where it landed).
+    fn search_exit(&mut self) {
+        self.tabs[self.active].search.on = false;
+        self.tabs[self.active].ghost.reset();
+        self.needs_draw = true;
     }
 
     /// Offer a pending did-you-mean fix once the prompt is fresh.
@@ -1228,7 +1301,8 @@ impl ApplicationHandler for App {
                 // Any key gets a prompt frame; the heartbeat covers the rest.
                 self.needs_draw = true;
                 // Typing returns to live (the cursor is there, not in history).
-                if pressed {
+                // Search mode keeps its revealed view (snap would fight it).
+                if pressed && !self.tabs[self.active].search.on {
                     self.tabs[self.active].term.snap_to_bottom();
                 }
                 if pressed && self.perf_t0.is_some() {
@@ -1298,6 +1372,40 @@ impl ApplicationHandler for App {
                 }
                 if let Some(dir) = is_cycle_tab(&event.logical_key, pressed, &self.mods) {
                     self.cycle_tab(dir);
+                    return;
+                }
+                // Scrollback find: typing goes to the query, never the PTY.
+                if is_search(&event.logical_key, pressed, &self.mods)
+                    && !self.tabs[self.active].search.on
+                {
+                    self.tabs[self.active].search.on = true;
+                    self.tabs[self.active].search.query.clear();
+                    self.research();
+                    return;
+                }
+                if self.tabs[self.active].search.on {
+                    if !pressed {
+                        return;
+                    }
+                    let shift = self.mods.contains(ModifiersState::SHIFT);
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => self.search_exit(),
+                        Key::Named(NamedKey::Enter) => self.search_step(if shift { -1 } else { 1 }),
+                        Key::Named(NamedKey::Backspace) => {
+                            self.tabs[self.active].search.query.pop();
+                            self.research();
+                        }
+                        Key::Character(_) => {
+                            let ctrl = self.mods.contains(ModifiersState::CONTROL);
+                            if !ctrl {
+                                if let Some(text) = event.text.as_deref() {
+                                    self.tabs[self.active].search.query.push_str(text);
+                                    self.research();
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                     return;
                 }
                 // Agent goal mode toggle: Ctrl+G would otherwise type BEL.
@@ -1527,6 +1635,15 @@ impl ApplicationHandler for App {
                     let (cx, cy) = self.tabs[self.active].term.cursor();
                     (cx, cy, g.to_string())
                 });
+                // Search hits snapshot (owned; renderer borrows below).
+                let search = if self.tabs[self.active].search.on {
+                    Some((
+                        self.tabs[self.active].search.matches.clone(),
+                        self.tabs[self.active].search.current,
+                    ))
+                } else {
+                    None
+                };
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
                     r.draw_terminal(
                         &self.tabs[self.active].term,
@@ -1540,6 +1657,9 @@ impl ApplicationHandler for App {
                     }
                     if let Some((cx, cy, g)) = ghost {
                         r.draw_ghost(cy + bar, cx, &g, cols, self.rows);
+                    }
+                    if let Some((hits, cur)) = &search {
+                        r.draw_search(&self.tabs[self.active].term, hits, *cur, bar as u32);
                     }
                     r.render();
                     self.last_frame = std::time::Instant::now();

@@ -498,3 +498,50 @@ fn bracketed_paste_mode_tracks_decset() {
     t.feed(b"\x1b[?2004l");
     assert!(!t.bracketed_paste());
 }
+
+#[test]
+fn search_matches_scrollback_case_insensitive() {
+    let mut t = Terminal::with_scrollback(20, 4, 100);
+    t.feed(b"hello world\nfoo BAR baz\nnothing here\n");
+    // Scrollback holds the first lines; grid holds the rest.
+    let m = t.search_matches("bar");
+    assert_eq!(m.len(), 1, "{m:?}");
+    assert_eq!(&m[0].0, &1);
+    let m2 = t.search_matches("HELLO");
+    assert_eq!(m2.len(), 1, "{m2:?}");
+    assert!(t.search_matches("").is_empty());
+    assert!(t.search_matches("zzz").is_empty());
+}
+
+#[test]
+fn reveal_row_centers_and_keeps_visible() {
+    let mut t = Terminal::with_scrollback(20, 4, 100);
+    for i in 0..30 {
+        t.feed(format!("line {i:02}\n").as_bytes());
+    }
+    let base = t.abs_base();
+    // Already-visible row: no scroll.
+    t.reveal_row(base);
+    assert_eq!(t.view_offset(), 0);
+    // Ancient row: scrolls up and centers.
+    t.reveal_row(2);
+    assert!(t.view_offset() > 0, "offset={}", t.view_offset());
+    let vis_top = base - t.view_offset();
+    assert!(2 >= vis_top && 2 < vis_top + 4, "vis_top={vis_top}");
+}
+
+#[test]
+fn search_matches_multibyte_without_panicking() {
+    // ẞ lowercases to ß (byte length changes): byte offsets must never
+    // slice the original text (main-thread panic on attacker output).
+    let mut t = Terminal::with_scrollback(20, 4, 100);
+    t.feed("AẞBx\nAİBx\n".as_bytes());
+    let m = t.search_matches("x");
+    assert_eq!(m.len(), 2, "{m:?}");
+    assert_eq!(m[0].1, 3, "col past ẞ: {m:?}");
+    assert_eq!(m[1].1, 3, "col past İ: {m:?}");
+    // Case-insensitive across the fold: ß matches ẞ.
+    let m2 = t.search_matches("ß");
+    assert_eq!(m2.len(), 1, "{m2:?}");
+    assert_eq!(m2[0].1, 1, "{m2:?}");
+}

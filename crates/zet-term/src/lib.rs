@@ -781,6 +781,81 @@ impl Terminal {
             .map(|row| row.iter().map(|c| c.c).collect())
     }
 
+    /// Case-insensitive substring search over scrollback + live grid.
+    /// Returns (absolute row, char col, char len), oldest first,
+    /// capped so a huge buffer can't stall a keystroke. Matching runs
+    /// in char space throughout: lowercasing can change byte length
+    /// (ẞ/İ), so byte offsets must never slice the original text.
+    pub fn search_matches(&self, query: &str) -> Vec<(usize, usize, usize)> {
+        const CAP: usize = 1000;
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let q: Vec<char> = query.to_lowercase().chars().collect();
+        let mut out = Vec::new();
+        let push_line = |abs: usize, text: &str, out: &mut Vec<(usize, usize, usize)>| {
+            // Lowercase expansion (İ → i + combining dot) shifts char
+            // positions: align every lowered char back to its original
+            // grid cell so reported cols match the screen.
+            let mut lower: Vec<char> = Vec::new();
+            let mut idx: Vec<usize> = Vec::new();
+            for (i, c) in text.chars().enumerate() {
+                for lc in c.to_lowercase() {
+                    lower.push(lc);
+                    idx.push(i);
+                }
+            }
+            if q.len() > lower.len() {
+                return;
+            }
+            for (p, window) in lower.windows(q.len()).enumerate() {
+                if out.len() >= CAP {
+                    break;
+                }
+                if window == q.as_slice() {
+                    let col = idx[p];
+                    let len = idx[p + q.len() - 1] - col + 1;
+                    out.push((abs, col, len));
+                }
+            }
+        };
+        // Alt screen: grid only (scrollback is stale, reveal no-ops).
+        if !self.alt_active {
+            for (i, row) in self.scrollback.iter().enumerate() {
+                let text: String = row.iter().map(|c| c.c).collect();
+                push_line(i, text.trim_end(), &mut out);
+                if out.len() >= CAP {
+                    return out;
+                }
+            }
+        }
+        for y in 0..self.rows {
+            let abs = self.abs_base() + y;
+            push_line(abs, self.line_text(y).trim_end(), &mut out);
+            if out.len() >= CAP {
+                break;
+            }
+        }
+        out
+    }
+
+    /// Scroll so absolute row r lands mid-view (no-op when already
+    /// visible or on the alt screen).
+    pub fn reveal_row(&mut self, r: usize) {
+        if self.alt_active {
+            return;
+        }
+        let base = self.abs_base();
+        // Visible absolute rows are [base - view_offset, +rows).
+        let vis_top = base.saturating_sub(self.view_offset);
+        let vis_bot = vis_top + self.rows;
+        if r >= vis_top && r < vis_bot {
+            return;
+        }
+        let want_top = r.saturating_sub(self.rows / 2);
+        self.view_offset = base.saturating_sub(want_top).min(self.scrollback.len());
+    }
+
     pub fn drain_events(&mut self) -> Vec<Event> {
         std::mem::take(&mut self.events)
     }

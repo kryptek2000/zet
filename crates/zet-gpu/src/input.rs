@@ -96,6 +96,16 @@ pub fn is_close_tab(logical: &Key, pressed: bool, mods: &ModifiersState) -> bool
     matches!(logical, Key::Character(s) if ctrl && shift && s.eq_ignore_ascii_case("w"))
 }
 
+/// True on Ctrl+Shift+F: find in scrollback. Checked before [`translate`].
+pub fn is_search(logical: &Key, pressed: bool, mods: &ModifiersState) -> bool {
+    if !pressed {
+        return false;
+    }
+    let ctrl = mods.contains(ModifiersState::CONTROL);
+    let shift = mods.contains(ModifiersState::SHIFT);
+    matches!(logical, Key::Character(s) if ctrl && shift && s.eq_ignore_ascii_case("f"))
+}
+
 /// True on Ctrl+PageDown / Ctrl+PageUp: cycle tabs. Checked before
 /// [`translate`] (which would emit scrolling escapes).
 pub fn is_cycle_tab(logical: &Key, pressed: bool, mods: &ModifiersState) -> Option<isize> {

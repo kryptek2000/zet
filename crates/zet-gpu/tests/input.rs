@@ -188,3 +188,15 @@ fn tab_shortcuts_match_only_with_modifiers() {
     );
     assert_eq!(is_cycle_tab(&Key::Character("a".into()), true, &ctrl), None);
 }
+
+#[test]
+fn search_chord_is_detected_not_typed() {
+    use winit::keyboard::{Key, ModifiersState};
+    use zet_gpu::input::is_search;
+    let cs = ModifiersState::CONTROL | ModifiersState::SHIFT;
+    let ctrl = ModifiersState::CONTROL;
+    assert!(is_search(&Key::Character("f".into()), true, &cs));
+    // Bare Ctrl+F is readline forward-char: never steal.
+    assert!(!is_search(&Key::Character("f".into()), true, &ctrl));
+    assert!(!is_search(&Key::Character("f".into()), false, &cs));
+}

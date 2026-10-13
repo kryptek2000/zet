@@ -110,6 +110,21 @@ const TAB_DIM_INK: Rgba = Rgba {
     a: 1.0,
 };
 
+/// Search hits: amber wash for matches, orange for the current one
+/// (white ink, selection precedent — fill + re-inked glyphs).
+const SEARCH_RGBA: Rgba = Rgba {
+    r: 0.35,
+    g: 0.26,
+    b: 0.08,
+    a: 1.0,
+};
+const SEARCH_CUR_RGBA: Rgba = Rgba {
+    r: 0.65,
+    g: 0.35,
+    b: 0.08,
+    a: 1.0,
+};
+
 /// Map a terminal cell color to linear display RGB.
 /// M0 palette: classic 16 ANSI colors picked as sRGB display values and
 /// converted to linear (the swapchain is an sRGB format); Rgb passes
@@ -569,6 +584,64 @@ impl Renderer {
                             (slot.x, slot.y),
                             self.atlas_size,
                             if is_active { Rgba::WHITE } else { TAB_DIM_INK },
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Search hits over the visible grid: absolute (row, col, len)
+    /// triples mapped through the current view; current hit orange,
+    /// the rest amber. Follows the selection precedent (fill quad +
+    /// re-inked glyph so text stays readable).
+    pub fn draw_search(
+        &mut self,
+        term: &zet_term::Terminal,
+        matches: &[(usize, usize, usize)],
+        current: usize,
+        y_off: u32,
+    ) {
+        let sb = term.visible_base();
+        let rows = term.rows();
+        for (k, &(abs, col, len)) in matches.iter().enumerate() {
+            let y = abs as isize - sb as isize;
+            if y < 0 || y >= rows as isize {
+                continue;
+            }
+            let fill = if k == current {
+                SEARCH_CUR_RGBA
+            } else {
+                SEARCH_RGBA
+            };
+            let line: Vec<char> = term.visible_line_text(y as usize).chars().collect();
+            for dx in 0..len {
+                let x = col + dx;
+                if x >= line.len() {
+                    break;
+                }
+                if let Some(bg_slot) = self.bg_slot {
+                    self.quads.extend(cell_quad(
+                        x as u32,
+                        y as u32 + y_off,
+                        self.cell_w,
+                        self.cell_h,
+                        (bg_slot.x, bg_slot.y),
+                        self.atlas_size,
+                        fill,
+                    ));
+                }
+                let c = line[x];
+                if c != ' ' {
+                    if let Some(slot) = self.slot_for(c) {
+                        self.quads.extend(cell_quad(
+                            x as u32,
+                            y as u32 + y_off,
+                            self.cell_w,
+                            self.cell_h,
+                            (slot.x, slot.y),
+                            self.atlas_size,
+                            Rgba::WHITE,
                         ));
                     }
                 }
