@@ -460,14 +460,14 @@ impl App {
             Err(std::sync::mpsc::TryRecvError::Empty) => (),
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.tabs[i].undo_rx = None;
-                let input = self.current_text().unwrap_or_default();
+                let input = self.text_at(i).unwrap_or_default();
                 self.tabs[i]
                     .ghost
                     .notify(input, "(undo failed: worker gone)".to_string());
             }
             Ok(res) => {
                 self.tabs[i].undo_rx = None;
-                let input = self.current_text().unwrap_or_default();
+                let input = self.text_at(i).unwrap_or_default();
                 match res {
                     Ok(()) => self.tabs[i].ghost.notify(input, "(undone)".to_string()),
                     Err(e) => self.tabs[i]
@@ -568,10 +568,16 @@ impl App {
     }
 
     fn current_text(&self) -> Option<String> {
-        self.tabs[self.active]
+        self.text_at(self.active)
+    }
+
+    /// Prompt-line text of a specific tab (poll fns use this: bg-tab
+    /// completions must read their own line, not the visible one).
+    fn text_at(&self, i: usize) -> Option<String> {
+        self.tabs[i]
             .recorder
             .as_ref()
-            .and_then(|rec| rec.current_input(&self.tabs[self.active].term))
+            .and_then(|rec| rec.current_input(&self.tabs[i].term))
             .map(|(text, _, _)| text)
     }
 
@@ -726,26 +732,30 @@ impl App {
         self.retitle();
     }
 
-    /// Close the active tab (dropping its session kills the shell).
-    /// The last tab closes the window instead of stranding it.
+    /// Close the active tab: the session is shut down (kill + wait,
+    /// no zombies) before the tab drops. The last tab closes the
+    /// window instead of stranding it.
     fn close_tab(&mut self, event_loop: &ActiveEventLoop) {
         if self.tabs.len() <= 1 {
             event_loop.exit();
             return;
         }
-        self.tabs.remove(self.active);
+        let mut tab = self.tabs.remove(self.active);
+        if let Some(s) = tab.session.as_mut() {
+            s.shutdown();
+        }
         self.active = self.active.min(self.tabs.len() - 1);
         self.needs_draw = true;
         self.retitle();
     }
 
     /// Cycle tabs (dir = +1 next, -1 previous). No-op solo.
-    fn cycle_tab(&mut self, dir: i8) {
+    fn cycle_tab(&mut self, dir: isize) {
         if self.tabs.len() <= 1 {
             return;
         }
-        let n = self.tabs.len() as i8;
-        self.active = (self.active as i8 + dir).rem_euclid(n) as usize;
+        let n = self.tabs.len() as isize;
+        self.active = (self.active as isize + dir).rem_euclid(n) as usize;
         self.needs_draw = true;
         self.retitle();
     }
@@ -1010,7 +1020,7 @@ impl App {
                 self.tabs[i].exec_res_tx = None;
                 self.tabs[i].exec_pending = None;
                 self.retitle();
-                let input = self.current_text().unwrap_or_default();
+                let input = self.text_at(i).unwrap_or_default();
                 self.tabs[i]
                     .ghost
                     .notify(input, "(agent failed: worker gone)".to_string());
@@ -1036,12 +1046,12 @@ impl App {
                             .take(120)
                             .collect();
                         (
-                            self.current_text().unwrap_or_default(),
+                            self.text_at(i).unwrap_or_default(),
                             format!("agent: {first}"),
                         )
                     }
                     None => (
-                        self.current_text().unwrap_or_default(),
+                        self.text_at(i).unwrap_or_default(),
                         "(agent: no model — check spec/key)".to_string(),
                     ),
                 };

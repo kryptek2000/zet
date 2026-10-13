@@ -98,7 +98,7 @@ pub fn is_close_tab(logical: &Key, pressed: bool, mods: &ModifiersState) -> bool
 
 /// True on Ctrl+PageDown / Ctrl+PageUp: cycle tabs. Checked before
 /// [`translate`] (which would emit scrolling escapes).
-pub fn is_cycle_tab(logical: &Key, pressed: bool, mods: &ModifiersState) -> Option<i8> {
+pub fn is_cycle_tab(logical: &Key, pressed: bool, mods: &ModifiersState) -> Option<isize> {
     if !pressed {
         return None;
     }

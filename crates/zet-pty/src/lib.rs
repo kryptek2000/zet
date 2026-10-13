@@ -96,6 +96,14 @@ impl Session {
         Ok(self.child.try_wait()?.map(|s| s.exit_code()))
     }
 
+    /// Reap the shell: SIGKILL-grade kill, then wait. Dropping a Tab
+    /// without this would strand a zombie until zet itself exits
+    /// (nobody else waits on the child).
+    pub fn shutdown(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
     /// Shell child pid, for /proc/cwd lookup and supervision.
     pub fn child_id(&self) -> Option<u32> {
         self.child.process_id()

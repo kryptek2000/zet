@@ -105,3 +105,17 @@ fn syntax_gate_parses_without_executing() {
     assert!(zet_pty::syntax_ok("nushell", "for $x in [] {}"));
     assert!(zet_pty::syntax_ok("/bin/nonexistent-sh-xyz", "rm -rf /"));
 }
+
+#[test]
+fn shutdown_reaps_the_child() {
+    // A sleeping shell must die and reap (no zombie): kill + wait.
+    let mut s = Session::spawn("sh", &["-c", "sleep 30"], 80, 24).unwrap();
+    let pid = s.child_id().expect("child pid");
+    s.shutdown();
+    assert!(s.try_exit().unwrap().is_some(), "child not reaped");
+    // Truly gone, not zombie: kill -0 fails.
+    assert!(
+        !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        "process {pid} lingers"
+    );
+}
