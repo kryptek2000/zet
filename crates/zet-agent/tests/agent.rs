@@ -63,9 +63,9 @@ fn live_echo_hello_end_to_end() {
     let out = agent.run("say hi").unwrap();
     assert_eq!(out, "said it");
 
-    // Model was offered the shell + read-only tools.
+    // Model was offered the shell + read/write tools.
     let first_req = &agent.model.seen.borrow()[0];
-    assert_eq!(first_req.tools.len(), 4);
+    assert_eq!(first_req.tools.len(), 5);
     assert_eq!(first_req.tools[0].name, "run_shell");
 
     // One step executed, output captured live.
@@ -578,4 +578,74 @@ fn tool_results_reach_model_scrubbed() {
     let dumped = format!("{second:?}");
     assert!(!dumped.contains("sk-abc123XYZ4567890qrs"), "{dumped}");
     assert!(dumped.contains("[REDACTED]"), "{dumped}");
+}
+
+#[test]
+fn write_file_tool_writes_inside_workdir() {
+    let dir = temp_workdir("write");
+    std::fs::write(dir.join("old.txt"), "old").unwrap();
+    let model = Script::new(vec![
+        tool_call(
+            "c1",
+            "write_file",
+            r#"{"path":"new.txt","content":"hello-write\n"}"#,
+        ),
+        Script::final_text("wrote it"),
+    ]);
+    let mut agent = Agent::new(model, AllowAll, true, 8).with_workdir(dir.clone());
+    assert_eq!(agent.run("write it").unwrap(), "wrote it");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("new.txt")).unwrap(),
+        "hello-write\n"
+    );
+    assert!(agent.journal[0].executed);
+    assert_eq!(agent.journal[0].tier, Tier::T1);
+}
+
+#[test]
+fn write_file_denied_outside_workdir() {
+    let dir = temp_workdir("write_jail");
+    let model = Script::new(vec![
+        tool_call(
+            "c1",
+            "write_file",
+            r#"{"path":"/tmp/zet-nope.txt","content":"x"}"#,
+        ),
+        Script::final_text("done"),
+    ]);
+    let mut agent = Agent::new(model, AllowAll, true, 8).with_workdir(dir);
+    agent.run("write it").unwrap();
+    assert!(!agent.journal[0].executed);
+    assert!(!std::path::Path::new("/tmp/zet-nope.txt").exists());
+}
+
+#[test]
+fn write_file_missing_content_fails_loud() {
+    let dir = temp_workdir("write_nocontent");
+    let model = Script::new(vec![
+        tool_call("c1", "write_file", r#"{"path":"new.txt"}"#),
+        Script::final_text("done"),
+    ]);
+    let mut agent = Agent::new(model, AllowAll, true, 8).with_workdir(dir.clone());
+    agent.run("write it").unwrap();
+    assert!(!dir.join("new.txt").exists(), "empty file written on slip");
+    // The model is told loudly (no journal: arg errors never run).
+    let seen = agent.model.seen.borrow();
+    let dumped = format!("{:?}", seen[1].messages);
+    assert!(dumped.contains("missing 'content'"), "{dumped}");
+}
+
+#[test]
+fn write_file_denied_for_read_only_approver() {
+    let dir = temp_workdir("write_deny");
+    let model = Script::new(vec![
+        tool_call("c1", "write_file", r#"{"path":"new.txt","content":"x"}"#),
+        Script::final_text("done"),
+    ]);
+    // in_repo=false so T1 asks; DenyNonRead refuses non-T0.
+    let mut agent = Agent::new(model, DenyNonRead, false, 8).with_workdir(dir.clone());
+    agent.run("write it").unwrap();
+    assert!(!agent.journal[0].approved);
+    assert!(!agent.journal[0].executed);
+    assert!(!dir.join("new.txt").exists());
 }

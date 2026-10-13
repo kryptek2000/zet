@@ -219,6 +219,7 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
                     tools::read_tool_def(),
                     tools::glob_tool_def(),
                     tools::grep_tool_def(),
+                    tools::write_tool_def(),
                 ],
                 max_tokens: 1024,
             };
@@ -335,11 +336,105 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
         (call.id.clone(), zet_context::scrub(&output))
     }
 
+    /// Native write: T1 mutation with the same approval + checkpoint
+    /// flow as a shell write. Confined to the workdir like reads.
+    fn step_write(&mut self, call: &zet_models::ToolCall) -> (String, String) {
+        let tier = Tier::T1;
+        let args: serde_json::Value = match serde_json::from_str(&call.arguments) {
+            Ok(v) => v,
+            Err(_) => {
+                return (call.id.clone(), "error: arguments are not JSON".to_string());
+            }
+        };
+        let path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let content = match args.get("content").and_then(|v| v.as_str()) {
+            Some(c) => c.to_string(),
+            // Absent content is a model slip (present-but-empty is a
+            // deliberate truncate and stays legal).
+            None => {
+                return (
+                    call.id.clone(),
+                    "error: missing 'content' string".to_string(),
+                )
+            }
+        };
+        if path.is_empty() {
+            return (call.id.clone(), "error: missing 'path' string".to_string());
+        }
+        let label = format!("write_file {path}");
+        let approval = decide(tier, self.in_repo);
+        let approved = match approval {
+            Approval::Auto => true,
+            Approval::Ask | Approval::ConfirmType => self.approver.approve(tier, &label),
+        };
+        if !approved {
+            self.journal.push(JournalEntry {
+                command: label.clone(),
+                tier,
+                approval,
+                approved: false,
+                executed: false,
+                exit_code: None,
+                output: format!("denied ({approval:?}): {label}"),
+                checkpoint: None,
+            });
+            return (
+                call.id.clone(),
+                format!("denied by policy ({tier:?}): file was not written"),
+            );
+        }
+        let checkpoint = if self.in_repo {
+            match self.checkpoint() {
+                Ok(cp) => cp,
+                Err(e) => {
+                    self.journal.push(JournalEntry {
+                        command: label.clone(),
+                        tier,
+                        approval,
+                        approved: true,
+                        executed: false,
+                        exit_code: None,
+                        output: format!("checkpoint failed, step blocked: {e}"),
+                        checkpoint: None,
+                    });
+                    return (
+                        call.id.clone(),
+                        format!("checkpoint failed, step blocked: {e}"),
+                    );
+                }
+            }
+        } else {
+            None
+        };
+        let (executed, output) = match tools::write_file(&self.workdir, &path, &content) {
+            Ok(note) => (true, note),
+            Err(problem) => (false, format!("error: {problem}")),
+        };
+        self.journal.push(JournalEntry {
+            command: label,
+            tier,
+            approval,
+            approved: true,
+            executed,
+            exit_code: if executed { Some(0) } else { None },
+            output: output.clone(),
+            checkpoint,
+        });
+        (call.id.clone(), zet_context::scrub(&output))
+    }
+
     fn step(&mut self, call: &zet_models::ToolCall) -> (String, String) {
-        // Native read-only tools run in-process (no shell, no aliases),
-        // confined to the workdir, results scrubbed before the model.
+        // Native tools run in-process (no shell, no aliases). Reads are
+        // T0 and confined; writes are T1 with approval + checkpoint.
         if matches!(call.name.as_str(), "read_file" | "glob" | "grep") {
             return self.step_read(call);
+        }
+        if call.name.as_str() == "write_file" {
+            return self.step_write(call);
         }
         if call.name != "run_shell" {
             return (

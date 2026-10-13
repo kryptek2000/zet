@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use zet_models::ToolDef;
 
 pub const READ_CAP_BYTES: usize = 32_768;
+pub const WRITE_CAP_BYTES: usize = 262_144;
 pub const GLOB_CAP: usize = 200;
 pub const GREP_CAP: usize = 50;
 pub const GREP_LINE_CAP: usize = 300;
@@ -56,6 +57,22 @@ pub fn grep_tool_def() -> ToolDef {
                 "include": {"type": "string"},
             },
             "required": ["pattern"],
+        }),
+    }
+}
+
+pub fn write_tool_def() -> ToolDef {
+    ToolDef {
+        name: "write_file".to_string(),
+        description: "Write full file content inside the working directory (creates parents). Read first, then write whole. Capped at 256KB."
+            .to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+            },
+            "required": ["path", "content"],
         }),
     }
 }
@@ -236,4 +253,24 @@ pub fn grep(workdir: &Path, pattern: &str, include: Option<&str>) -> Result<Stri
     } else {
         Ok(hits.join("\n"))
     }
+}
+
+/// Write full content to a workdir-confined path (parents created).
+/// Refuses past the byte cap rather than truncating silently.
+pub fn write_file(workdir: &Path, path: &str, content: &str) -> Result<String, String> {
+    if content.len() > WRITE_CAP_BYTES {
+        return Err(format!(
+            "content is {} bytes, cap is {WRITE_CAP_BYTES}: split the write",
+            content.len()
+        ));
+    }
+    let target = resolve(workdir, path)?;
+    if let Some(parent) = target.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create parent dirs for {path}: {e}"))?;
+        }
+    }
+    std::fs::write(&target, content).map_err(|e| format!("cannot write {path}: {e}"))?;
+    Ok(format!("wrote {} bytes to {path}", content.len()))
 }
