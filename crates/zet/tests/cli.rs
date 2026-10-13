@@ -153,6 +153,11 @@ fn every_cli_group_dispatches() {
     // with the match arms: bogus flags exit 2 through dispatch, never
     // top-level usage, never success, never panic.
     for group in zet_pty::CLI_SUBCOMMANDS {
+        // unschedule takes a free id prefix: a miss is exit 1 (like rm),
+        // asserted below — not a usage error.
+        if *group == "unschedule" {
+            continue;
+        }
         let out = zet().args([group, "--definitely-bogus"]).output().unwrap();
         assert_eq!(out.status.code(), Some(2), "{group}");
     }
@@ -161,6 +166,14 @@ fn every_cli_group_dispatches() {
     assert_eq!(out.status.code(), Some(2));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("bad usage for `zet auth`"), "{err}");
+    // unschedule miss: well-formed but nothing matches (exit 1, like rm).
+    let home = temp_home("unschedule_miss");
+    let out = zet()
+        .env("HOME", &home)
+        .args(["unschedule", "--definitely-bogus"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
 }
 
 fn temp_home(tag: &str) -> std::path::PathBuf {
@@ -506,4 +519,104 @@ fn run_recipe_unterminated_placeholder_fails() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("unterminated"), "{err}");
+}
+
+#[test]
+fn run_every_creates_schedule() {
+    let home = temp_home("sched_create");
+    let out = zet()
+        .env("HOME", &home)
+        .env("ZET_INLINE_SPEC", "local:http://127.0.0.1:9/dead")
+        .args(["run", "--every", "1h", "say hi"])
+        .output()
+        .unwrap();
+    // No model here: delegation must still record the schedule first.
+    let sched =
+        std::fs::read_to_string(home.join(".zet").join("schedules.jsonl")).unwrap_or_default();
+    assert!(sched.contains("say hi"), "{sched}");
+    assert!(sched.contains("\"every_secs\":3600"), "{sched}");
+    let _ = out;
+}
+
+#[test]
+fn run_every_bad_value_fails_loud() {
+    for args in [&["run", "--every"][..], &["run", "--every", "soon"][..]] {
+        let out = zet().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+    }
+}
+
+#[test]
+fn schedules_empty_reports_none() {
+    let home = temp_home("sched_empty");
+    let out = zet()
+        .env("HOME", &home)
+        .args(["schedules"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("no schedules"), "{text}");
+}
+
+#[test]
+fn unschedule_removes_by_prefix() {
+    let home = temp_home("sched_rm");
+    std::fs::create_dir_all(home.join(".zet")).unwrap();
+    std::fs::write(
+        home.join(".zet").join("schedules.jsonl"),
+        "{\"id\":\"abc123\",\"goal\":\"say hi\",\"every_secs\":3600,\"last_run\":0}\n",
+    )
+    .unwrap();
+    let out = zet()
+        .env("HOME", &home)
+        .args(["unschedule", "abc"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let left = std::fs::read_to_string(home.join(".zet").join("schedules.jsonl")).unwrap();
+    assert!(!left.contains("abc123"), "{left}");
+}
+
+#[test]
+fn daemon_fires_due_schedule() {
+    let home = temp_home("daemon_fire");
+    std::fs::create_dir_all(home.join(".zet")).unwrap();
+    std::fs::write(
+        home.join(".zet").join("schedules.jsonl"),
+        "{\"id\":\"sch-due-1\",\"goal\":\"say scheduled\",\"every_secs\":60,\"last_run\":0}\n",
+    )
+    .unwrap();
+    // Daemon runs forever; timeout kills it. Worker is detached and fails
+    // fast with no model here (no keys, localhost refused) — deterministic.
+    let _ = std::process::Command::new("timeout")
+        .args(["-s", "KILL", "4"])
+        .arg(env!("CARGO_BIN_EXE_zet"))
+        .arg("daemon")
+        .env("HOME", &home)
+        // Hermetic: dead local endpoint fails fast (refused) instead of
+        // autodetecting a real server and burning minutes on a model call.
+        .env("ZET_INLINE_SPEC", "local:http://127.0.0.1:9/dead")
+        .output();
+    let runs = home.join(".zet").join("runs");
+    let mut done = false;
+    for _ in 0..40 {
+        if let Ok(entries) = std::fs::read_dir(&runs) {
+            for e in entries.flatten() {
+                let status = e.path().join("status");
+                if std::fs::read_to_string(&status)
+                    .unwrap_or_default()
+                    .contains("done")
+                {
+                    done = true;
+                    break;
+                }
+            }
+        }
+        if done {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    assert!(done, "daemon never delegated the due schedule");
 }

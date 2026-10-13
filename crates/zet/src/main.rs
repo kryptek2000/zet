@@ -21,6 +21,9 @@ fn main() {
         ["run", rest @ ..] => run_cmd(rest),
         ["runs", rest @ ..] => runs(rest),
         ["usage"] => usage(),
+        ["schedules"] => schedules(),
+        ["unschedule", id] => unschedule(id),
+        ["daemon"] => daemon(),
         ["__run_worker", id] => run_worker(id),
         // Known group, bad usage: hint the group, not the top level.
         // (Guarded by the shared list so dispatch and the window router
@@ -46,6 +49,10 @@ fn main() {
             eprintln!("  zet run --background <g>  delegate it (log + bubble when done)");
             eprintln!("  zet runs                  list delegated runs");
             eprintln!("  zet usage                 estimated model tokens (chars/4)");
+            eprintln!("  zet run --every 1h <g>    repeat on schedule (daemon fires)");
+            eprintln!("  zet schedules             list repeating goals");
+            eprintln!("  zet unschedule <id>       drop a repeating goal");
+            eprintln!("  zet daemon                run due schedules (Ctrl+C stops)");
             std::process::exit(2);
         }
     }
@@ -478,6 +485,17 @@ fn run_cmd(argv: &[&str]) {
         .first()
         .is_some_and(|a| *a == "--background" || *a == "--bg" || *a == "-b");
     let argv = if background { &argv[1..] } else { argv };
+    // Optional repeat: --every 1h (s/m/h/d suffixes, bare seconds).
+    let mut every_secs: Option<u64> = None;
+    let mut argv = argv;
+    if argv.first().is_some_and(|a| *a == "--every") {
+        let dur = argv.get(1).copied().unwrap_or("");
+        every_secs = Some(parse_duration(dur).unwrap_or_else(|| {
+            eprintln!("bad --every {dur:?}: want like 30m, 1h, 1d, 3600");
+            std::process::exit(2);
+        }));
+        argv = &argv[2.min(argv.len())..];
+    }
     // --arg k=v pairs fill recipe templates; everything else is goal.
     let mut args = Vec::new();
     let mut kv: Vec<(String, String)> = Vec::new();
@@ -515,6 +533,11 @@ fn run_cmd(argv: &[&str]) {
     if let Some(name) = args.first().and_then(|w| w.strip_prefix("recipe:")) {
         let extra = args[1..].join(" ");
         goal = render_recipe(name, &extra, &kv);
+    }
+    // Repeating goal: record the schedule, then run now like a normal
+    // run (foreground or delegated). The daemon fires repeats.
+    if let Some(secs) = every_secs {
+        schedule_add(&goal, secs);
     }
     if background {
         delegate(&goal);
@@ -607,6 +630,175 @@ fn render_recipe(name: &str, extra: &str, args: &[(String, String)]) -> String {
     }
 }
 
+/// Durations for --every: bare seconds or s/m/h/d suffixes.
+fn parse_duration(text: &str) -> Option<u64> {
+    if text.is_empty() {
+        return None;
+    }
+    let (num, mult) = match text.chars().last() {
+        Some('s') => (&text[..text.len() - 1], 1),
+        Some('m') => (&text[..text.len() - 1], 60),
+        Some('h') => (&text[..text.len() - 1], 3600),
+        Some('d') => (&text[..text.len() - 1], 86400),
+        Some(c) if c.is_ascii_digit() => (text, 1),
+        _ => return None,
+    };
+    let n: u64 = num.parse().ok()?;
+    if n == 0 {
+        return None;
+    }
+    n.checked_mul(mult)
+}
+
+/// Schedules file: one JSON object per line (no locking — single
+/// writer per command invocation; the daemon rewrites whole).
+fn schedules_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    std::path::Path::new(&home)
+        .join(".zet")
+        .join("schedules.jsonl")
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Record a repeating goal; first repeat fires one interval out (this
+/// run already covers now).
+fn schedule_add(goal: &str, every_secs: u64) {
+    let id = format!("sch-{}-{}", now_secs(), std::process::id());
+    let line = serde_json::json!({
+        "id": id,
+        "goal": goal,
+        "every_secs": every_secs,
+        "last_run": now_secs(),
+    });
+    let path = schedules_path();
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            eprintln!("cannot create schedules dir");
+            std::process::exit(1);
+        }
+    }
+    use std::io::Write as _;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .unwrap_or_else(|e| {
+            eprintln!("cannot write schedule: {e}");
+            std::process::exit(1);
+        });
+    if writeln!(f, "{line}").is_err() {
+        eprintln!("cannot write schedule");
+        std::process::exit(1);
+    }
+    println!("scheduled {id} every {every_secs}s");
+}
+
+/// List schedules: id, interval, goal.
+fn schedules() {
+    let text = std::fs::read_to_string(schedules_path()).unwrap_or_default();
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let (Some(id), Some(goal), Some(every)) = (
+            v["id"].as_str(),
+            v["goal"].as_str(),
+            v["every_secs"].as_u64(),
+        ) else {
+            continue;
+        };
+        rows.push((id.to_string(), every, goal.to_string()));
+    }
+    if rows.is_empty() {
+        println!("no schedules");
+        return;
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    for (id, every, goal) in rows {
+        let goal: String = goal.chars().take(80).collect();
+        println!("{id} every {every}s: {}", goal.trim());
+    }
+}
+
+/// Remove the schedule with the exact id (or unambiguous prefix).
+fn unschedule(prefix: &str) {
+    let path = schedules_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut kept = Vec::new();
+    let mut dropped = Vec::new();
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match v["id"].as_str() {
+            Some(id) if id.starts_with(prefix) => dropped.push(id.to_string()),
+            _ => kept.push(line.to_string()),
+        }
+    }
+    if dropped.is_empty() {
+        eprintln!("no schedule matching {prefix:?}");
+        std::process::exit(1);
+    }
+    if std::fs::write(
+        &path,
+        kept.join("\n") + if kept.is_empty() { "" } else { "\n" },
+    )
+    .is_err()
+    {
+        eprintln!("cannot update schedules");
+        std::process::exit(1);
+    }
+    for id in dropped {
+        println!("unscheduled {id}");
+    }
+}
+
+/// Foreground scheduler loop: every 60s, delegate due goals as
+/// background runs (log + bubble on done). Ctrl+C stops it.
+fn daemon() {
+    println!("zet daemon: watching schedules (Ctrl+C stops)");
+    loop {
+        daemon_tick();
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+}
+
+fn daemon_tick() {
+    let path = schedules_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let now = now_secs();
+    let mut changed = false;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Ok(mut v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let (Some(goal), Some(every), Some(last)) = (
+            v["goal"].as_str().map(str::to_string),
+            v["every_secs"].as_u64(),
+            v["last_run"].as_u64(),
+        ) else {
+            out.push(line.to_string());
+            continue;
+        };
+        if every > 0 && now.saturating_sub(last) >= every {
+            delegate(&goal);
+            v["last_run"] = serde_json::Value::from(now);
+            changed = true;
+        }
+        out.push(v.to_string());
+    }
+    if changed {
+        let _ = std::fs::write(&path, out.join("\n") + "\n");
+    }
+}
 /// Runs directory: one subdir per delegated turn (goal, log, status).
 fn runs_dir() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
