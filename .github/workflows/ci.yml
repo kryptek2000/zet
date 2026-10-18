@@ -16,6 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install zsh (needed for zet-pty zsh integration test)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
