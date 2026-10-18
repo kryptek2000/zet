@@ -8,6 +8,10 @@ if (( ${+__ZET_SOURCED} )); then
 fi
 typeset -g __ZET_SOURCED=1
 
+# Best-effort: names reporting needs zsh/parameter. Guarded so a missing
+# module never aborts precmd (D/A markers are the critical part).
+zmodload zsh/parameter 2>/dev/null
+
 __zet_precmd() {
     local code=$?
     printf '\e]133;D;%s\a' "$code"
@@ -15,11 +19,13 @@ __zet_precmd() {
     # Report aliases/functions (once per change): ZET routes unknown
     # first words to the model, so it must know shell-defined names.
     # Parameter expansion only: no fork. Change-gated: silent prompt.
-    local names
-    names="${(j: :)${(k)aliases}} ${(j: :)${(k)functions}}"
-    if [[ "$names" != "${__ZET_CMDS_SENT:-}" ]]; then
-        __ZET_CMDS_SENT="$names"
-        printf '\e]133;X;%s\a' "$names"
+    if (( ${+aliases} && ${+functions} )); then
+        local names
+        names="${(j: :)${(k)aliases}} ${(j: :)${(k)functions}}"
+        if [[ "$names" != "${__ZET_CMDS_SENT:-}" ]]; then
+            __ZET_CMDS_SENT="$names"
+            printf '\e]133;X;%s\a' "$names"
+        fi
     fi
 }
 

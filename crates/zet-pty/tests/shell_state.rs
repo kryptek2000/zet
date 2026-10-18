@@ -173,7 +173,11 @@ fn zsh_hook_reports_exit_code_end_to_end() {
         }
         st.observe(&e);
     }
-    assert!(exits.contains(&"1".to_string()), "exits seen: {exits:?}");
+    assert!(
+        exits.contains(&"1".to_string()),
+        "exits seen: {exits:?}; raw: {}",
+        String::from_utf8_lossy(&out)
+    );
     assert_eq!(exits.last().map(String::as_str), Some("0"));
     assert!(saw_c, "no pre-exec C marker observed");
     assert_eq!(st.last_exit(), Some(0));
