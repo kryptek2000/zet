@@ -105,30 +105,43 @@ pub const SECRET_KEY_MIN_TAIL: usize = 16;
 /// zet-blocks, so it must not sail through the gate at T1.
 pub const BEARER_MIN_TAIL: usize = 8;
 
-/// Length of the credential-looking tail at the start of `s` (quotes
-/// included: a header value arrives quoted).
+/// Length of the credential-looking tail at the start of `s`. Same
+/// character set the scrubber uses (`is_token_char` in zet-blocks), so
+/// the two measure a tail identically — quotes are not token characters
+/// here either, and `unquote` is what looks past them.
 fn key_tail_len(s: &str) -> usize {
     s.chars()
         .take_while(|c| {
-            c.is_ascii_alphanumeric()
-                || matches!(c, '_' | '-' | '~' | '+' | '/' | '=' | '.' | '\'' | '"')
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '~' | '+' | '/' | '=' | '.')
         })
         .count()
 }
 
-/// One layer of surrounding quotes. A key reaches the command line
-/// quoted far more often than not (`export K='sk-…'`, `echo 'sk-…'`),
-/// and the scrubber matches it positionally regardless of quotes — so
-/// the gate has to look past them or the two disagree about what a
-/// secret is. One layer only, `'`, `"` only.
+/// Peels every layer of surrounding quotes. A key reaches the command
+/// line quoted more often than not (`export K='sk-…'`), and quoted twice
+/// when the author hedged between quote styles (`"'sk-…'"`), while the
+/// scrubber matches it positionally regardless — so the gate has to look
+/// past all of them or the two disagree about what a secret is.
+///
+/// A layer is stripped only when it actually pairs: `'sk-…"` (mismatched,
+/// and a shell syntax error besides) comes back untouched. That is the
+/// point — unquoting must never manufacture a key match out of text that
+/// was not one.
 fn unquote(tok: &str) -> &str {
-    let t = tok
-        .strip_prefix('\'')
-        .or_else(|| tok.strip_prefix('"'))
-        .unwrap_or(tok);
-    t.strip_suffix('\'')
-        .or_else(|| t.strip_suffix('"'))
-        .unwrap_or(t)
+    let mut t = tok;
+    loop {
+        let Some(first) = t.chars().next() else {
+            return t;
+        };
+        if !matches!(first, '\'' | '"') || t.len() < 2 {
+            return t;
+        }
+        // Byte slicing is safe: both ends are ASCII quotes.
+        if t.as_bytes()[t.len() - 1] != first as u8 {
+            return t;
+        }
+        t = &t[1..t.len() - 1];
+    }
 }
 
 /// True when a token is a credential on sight: a known key prefix with a

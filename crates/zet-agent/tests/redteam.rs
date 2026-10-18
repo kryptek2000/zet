@@ -433,6 +433,35 @@ fn the_approver_is_consulted_with_the_real_tier() {
     assert!(tool_message(&agent, 1).text.contains("denied by policy"));
 }
 
+#[test]
+fn the_approver_is_consulted_on_the_critical_path_too() {
+    // The T2 case above pins the Ask path; T3 must reach the approver as
+    // well, at its own tier, with the real command. A gate that skipped
+    // the approver on T3 would auto-run a critical step, and only this
+    // assertion notices — the canary proves the outcome, not the path.
+    let (approver, log) = RecordingApprover::refusing();
+    let dir = temp_workdir("asked_t3");
+    let canary = canary(&dir, "asked_t3");
+    let attack = format!("sudo rm -f {}", canary.display());
+    let model = Script::new(vec![
+        Script::call("c1", &attack),
+        Script::final_text("denied"),
+    ]);
+    let mut agent = Agent::new(model, approver, true, 8).with_workdir(dir);
+    agent.run("clean up").unwrap();
+
+    assert_alive(&canary);
+    assert_eq!(
+        log.borrow().as_slice(),
+        &[(Tier::T3, attack.clone())],
+        "the approver was not consulted at T3 with the exact command"
+    );
+    let step = agent.journal.first().expect("journal entry");
+    assert_eq!(step.tier, Tier::T3, "{step:?}");
+    assert_eq!(step.approval, Approval::ConfirmType, "{step:?}");
+    assert!(!step.approved && !step.executed, "{step:?}");
+}
+
 /// An *executed* T1+ step in a repo must carry a checkpoint: the gate and
 /// the snapshot are one mechanism, not two. Runs for real (AllowAll) in a
 /// real repo, so the assertion is about the coupling, not a mock.

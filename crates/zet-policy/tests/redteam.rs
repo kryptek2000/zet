@@ -108,12 +108,22 @@ fn quoted_keys_are_still_keys() {
             ("export K=\"sk-or-v1-abcdefghij1234567890\"", Tier::T3),
             ("echo 'ghp_abcdefghij1234567890'", Tier::T3),
             ("echo \"xoxb-abcdefghij1234567890\"", Tier::T3),
+            // Hedged quoting: the author unsure which quote to use, so
+            // the key lands two layers deep. One layer was not enough.
+            ("echo \"'sk-or-v1-abcdefghij1234567890'\"", Tier::T3),
+            ("echo '\"sk-or-v1-abcdefghij1234567890\"'", Tier::T3),
+            ("export K=\"'sk-or-v1-abcdefghij1234567890'\"", Tier::T3),
         ],
     );
     // Quoting does not launder a short fragment either — it stays what
     // it is (a T0 echo, a T1 export). Not floored: these are not secrets.
     assert_eq!(classify("echo 'sk-folders'"), Tier::T0);
     assert_eq!(classify("export K='sk-folders'"), Tier::T1);
+    // A layer is peeled only when it pairs. `'sk-…"` is a shell syntax
+    // error, and unquoting it must not manufacture a key match out of
+    // text that was not one: zero layers come off, so this stays T0.
+    assert_eq!(classify("echo 'sk-or-v1-abcdefghij1234567890\""), Tier::T0);
+    assert_eq!(classify("echo \"'sk-or-v1-abcdefghij1234567890'"), Tier::T0);
 }
 
 #[test]

@@ -11,6 +11,18 @@
 
 use zet_policy::{classify, Tier};
 
+/// Quote wraps under test: bare, single, double, and the two hedged
+/// two-layer forms. Mismatched pairs are excluded on purpose — they are
+/// shell syntax errors, and the policy corpus pins that they are left
+/// alone rather than peeled into a match.
+const QUOTE_LAYERS: &[(&str, &str)] = &[
+    ("", ""),
+    ("'", "'"),
+    ("\"", "\""),
+    ("\"'", "'\""),
+    ("'\"", "\"'"),
+];
+
 fn prefixes() -> Vec<(&'static str, usize)> {
     // (prefix, minimum tail the scrubber needs) — mirrors
     // zet_blocks::scrub_secrets' SECRET_PREFIXES table.
@@ -45,8 +57,10 @@ fn everything_the_scrubber_hides_is_refused_by_the_gate() {
             "{prefix:?} does not redact at its documented tail of {min_tail}"
         );
         for tail in 0..24 {
-            for quoted in ["", "'", "\""] {
-                let token = format!("{quoted}{prefix}{}{quoted}", "a".repeat(tail));
+            // Zero, one and two quote layers: the scrubber matches the
+            // key positionally, so every layer must be seen through.
+            for (open, close) in QUOTE_LAYERS {
+                let token = format!("{open}{prefix}{}{close}", "a".repeat(tail));
                 let cmd = format!("echo {token}");
                 let scrubbed = zet_blocks::scrub_secrets(&cmd);
                 if scrubbed == cmd {
@@ -64,13 +78,15 @@ fn everything_the_scrubber_hides_is_refused_by_the_gate() {
 #[test]
 fn the_var_assignment_form_is_covered_too() {
     for tail in 0..24 {
-        let token = format!("sk-{}", "a".repeat(tail));
-        let cmd = format!("export K='{token}'");
-        if zet_blocks::scrub_secrets(&cmd) != cmd {
-            assert!(
-                classify(&cmd) >= Tier::T3,
-                "store redacts {cmd:?} but the gate allows it"
-            );
+        for (open, close) in QUOTE_LAYERS {
+            let token = format!("sk-{}", "a".repeat(tail));
+            let cmd = format!("export K={open}{token}{close}");
+            if zet_blocks::scrub_secrets(&cmd) != cmd {
+                assert!(
+                    classify(&cmd) >= Tier::T3,
+                    "store redacts {cmd:?} but the gate allows it"
+                );
+            }
         }
     }
 }
