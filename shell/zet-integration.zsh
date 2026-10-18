@@ -32,5 +32,5 @@ preexec_functions+=(__zet_preexec)
 
 # Mark end-of-prompt (command input begins). %{ %} keep ZLE width right.
 if [[ "$PS1" != *"]133;B"* ]]; then
-    PS1+='%{\e]133;B\a%}'
+    PS1+='%{'$'\e]133;B\a''%}'
 fi
