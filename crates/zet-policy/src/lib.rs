@@ -33,9 +33,105 @@ pub fn decide(tier: Tier, in_repo: bool) -> Approval {
     }
 }
 
+/// Interpreters and script runners whose arguments are code, not data:
+/// `python3 -c '...'`, `perl -e`, `bash payload.sh`, `node -e`. The body
+/// is arbitrary and unreadable at a glance, exactly like `sh -c`, so it
+/// floors at T2. Version suffixes match (`python3.12`, `ruby3.3`).
+fn runs_undisclosed_code(first: &str, core: &str) -> bool {
+    let name: String = first
+        .chars()
+        .take_while(char::is_ascii_alphabetic)
+        .collect();
+    if !matches!(
+        name.as_str(),
+        // Shells: a script file is code too, not just `-c`.
+        "sh" | "bash" | "dash" | "zsh" | "ksh" | "fish"
+            // Interpreters.
+            | "python" | "perl" | "ruby" | "node" | "php" | "lua" | "deno" | "bun"
+            | "osascript" | "irb" | "wish" | "tclsh" | "expect"
+    ) {
+        return false;
+    }
+    let args: Vec<&str> = core.split_whitespace().skip(1).collect();
+    // A bare interpreter opens a REPL: code without a command line.
+    if args.is_empty() {
+        return true;
+    }
+    // Inline code flags (-c, -e, program on stdin), or any plain argument:
+    // a script path is undisclosed code with no flag to mark it.
+    args.iter().any(|a| {
+        !a.starts_with('-') || matches!(*a, "-c" | "-e" | "-E" | "--eval" | "--command" | "-")
+    })
+}
+
+/// Key prefixes that identify a credential on sight. Matches the scrubber
+/// in zet-blocks, so the two agree on what a secret looks like: a command
+/// carrying one is T3 whether or not the token looks like a path.
+const SECRET_KEY_PREFIXES: &[&str] = &[
+    "github_pat_",
+    "sk-or-",
+    "sk-ant-",
+    "sk-proj-",
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+    "xoxo-",
+    "ghp_",
+    "gho_",
+    "AKIA",
+    "sk-",
+];
+
+/// Minimum tail after a key prefix before it counts as a credential
+/// (`sk-folders` and other short fragments are not keys).
+const SECRET_KEY_MIN_TAIL: usize = 16;
+
+/// Length of the credential-looking tail at the start of `s` (quotes
+/// included: a header value arrives quoted).
+fn key_tail_len(s: &str) -> usize {
+    s.chars()
+        .take_while(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '-' | '~' | '+' | '/' | '=' | '.' | '\'' | '"')
+        })
+        .count()
+}
+
+/// True when a token is a credential on sight: a known key prefix with a
+/// real-looking tail.
+fn looks_like_key(tok: &str) -> bool {
+    SECRET_KEY_PREFIXES.iter().any(|prefix| {
+        tok.strip_prefix(prefix)
+            .is_some_and(|tail| key_tail_len(tail) >= SECRET_KEY_MIN_TAIL)
+    })
+}
+
+/// `Authorization: Bearer <key>` does not survive shell word-splitting:
+/// the header name and the value are separate tokens, so this check needs
+/// the whole line. Same shape as the position-independent `sudo` rule.
+fn carries_bearer_key(cmd: &str) -> bool {
+    const HEADER: &str = "Bearer ";
+    let mut rest = cmd;
+    while let Some(at) = rest.find(HEADER) {
+        let tail = &rest[at + HEADER.len()..];
+        if key_tail_len(tail) >= SECRET_KEY_MIN_TAIL {
+            return true;
+        }
+        rest = tail;
+    }
+    false
+}
+
 /// Path-like tokens that smell like secrets. Requires a `/`, `.`, or `~`
 /// so commit messages like "secret fix" don't false-positive.
 fn is_secret_token(tok: &str) -> bool {
+    // Key prefixes identify themselves wherever they appear — checked on
+    // the whole token and on the value half of `VAR=value`, which is how
+    // a key actually reaches the shell (`export K=sk-or-v1-…`).
+    let value = tok.split_once('=').map(|(_, v)| v).unwrap_or("");
+    if looks_like_key(tok) || (!value.is_empty() && looks_like_key(value)) {
+        return true;
+    }
     let lower = tok.to_lowercase();
     let pathy = tok.contains('/') || tok.contains('.') || tok.contains('~');
     pathy
@@ -347,7 +443,7 @@ pub fn classify(cmd: &str) -> Tier {
         }
         return Tier::T1;
     }
-    if cmd.split_whitespace().any(is_secret_token) {
+    if cmd.split_whitespace().any(is_secret_token) || carries_bearer_key(cmd) {
         return Tier::T3;
     }
     if first == "env" || first == "printenv" {
@@ -412,6 +508,14 @@ pub fn classify(cmd: &str) -> Tier {
                 .skip(1)
                 .any(|a| a == "-c" || a.starts_with("-c")))
     {
+        return Tier::T2;
+    }
+    // Interpreters and script runners: everything after the binary is
+    // code the gate cannot read. Found by the red-team suite, which
+    // showed `python3 -c 'shutil.rmtree("/")'` falling to T1 — which
+    // AUTO-APPROVES inside a repo, i.e. an unprompted mass delete. T2 is
+    // the same floor `sh -c` and `find -exec` already get.
+    if runs_undisclosed_code(first, core) {
         return Tier::T2;
     }
     if first == "docker" {
