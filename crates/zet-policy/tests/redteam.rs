@@ -95,6 +95,66 @@ fn direct_critical_attacks_never_below_t3() {
 }
 
 #[test]
+fn quoted_keys_are_still_keys() {
+    // A key arrives quoted more often than not, and the store's
+    // positional scrubber does not care about quotes. Neither may the
+    // gate, or `echo 'sk-…'` runs unflagged while the transcript shows
+    // [REDACTED] and the command line shows the real key.
+    assert_floored(
+        "quoted-secrets",
+        &[
+            ("echo 'sk-or-v1-abcdefghij1234567890'", Tier::T3),
+            ("export K='sk-or-v1-abcdefghij1234567890'", Tier::T3),
+            ("export K=\"sk-or-v1-abcdefghij1234567890\"", Tier::T3),
+            ("echo 'ghp_abcdefghij1234567890'", Tier::T3),
+            ("echo \"xoxb-abcdefghij1234567890\"", Tier::T3),
+        ],
+    );
+    // Quoting does not launder a short fragment either — it stays what
+    // it is (a T0 echo, a T1 export). Not floored: these are not secrets.
+    assert_eq!(classify("echo 'sk-folders'"), Tier::T0);
+    assert_eq!(classify("export K='sk-folders'"), Tier::T1);
+}
+
+#[test]
+fn attached_interpreter_flags_are_inline_code() {
+    // `-c'payload'` is ONE shell token: the exact-flag match missed it,
+    // and the whole vector classified T1 — auto-approved in a repo.
+    assert_floored(
+        "attached-flags",
+        &[
+            (
+                "python3 -c'__import__(\"os\").remove(\"/etc/passwd\")'",
+                Tier::T2,
+            ),
+            ("perl -e'unlink \"/etc/passwd\"'", Tier::T2),
+            ("node -e\"require('fs').rmSync('/')\"", Tier::T2),
+            ("ruby -e'system \"rm -rf /\"'", Tier::T2),
+            ("sh -c'rm -rf /'", Tier::T2),
+            ("python3 --eval='print(1)'", Tier::T2),
+            // Exact and attached forms agree.
+            ("python3 -c 'print(1)'", Tier::T2),
+        ],
+    );
+}
+
+#[test]
+fn short_bearer_tokens_are_refused_like_the_scrubber_hides_them() {
+    // zet-blocks redacts `Bearer ` + 8; the gate used to want 16, so an
+    // 8-15 character token was scrubbed from the transcript yet allowed
+    // to run. Thresholds must agree — see zet-blocks'
+    // gate_scrub_agreement.rs, which checks every length around both.
+    assert_floored(
+        "bearer",
+        &[
+            ("curl -H 'Authorization: Bearer abcdefgh' x", Tier::T3),
+            ("curl -H \"Authorization: Bearer abcdefghij\" x", Tier::T3),
+            ("curl -H 'Authorization: Bearer abcdefghijklm' x", Tier::T3),
+        ],
+    );
+}
+
+#[test]
 fn evasion_never_drops_below_the_hidden_command() {
     // Each of these hides the real command without changing what it does.
     // The floor is the tier of the command being hidden.

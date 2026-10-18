@@ -10,3 +10,6 @@ zet-term = { path = "../zet-term" }
 
 [dev-dependencies]
 zet-pty = { path = "../zet-pty" }
+# Dev-only: the gate/store agreement test crosses into the policy crate.
+# Not a runtime dependency, and not a cycle (zet-policy depends on serde).
+zet-policy = { path = "../zet-policy" }

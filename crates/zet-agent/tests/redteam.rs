@@ -250,6 +250,55 @@ fn interpreter_escape_never_executes() {
 }
 
 #[test]
+fn an_attached_interpreter_flag_never_executes() {
+    let dir = temp_workdir("attached");
+    let canary = canary(&dir, "attached");
+    // `-c'…'` is ONE token: the exact-flag check missed it and the whole
+    // vector classified T1, which auto-approves inside a repo.
+    let attack = format!(
+        "python3 -c'__import__(\"os\").remove(\"{}\")'",
+        canary.display()
+    );
+
+    let model = Script::new(vec![
+        Script::call("c1", &attack),
+        Script::final_text("denied"),
+    ]);
+    let mut agent = Agent::new(model, DenyNonRead, true, 8).with_workdir(dir);
+    assert_eq!(agent.run("tidy up").unwrap(), "denied");
+
+    assert_alive(&canary);
+    let step = agent.journal.first().expect("journal entry");
+    assert_eq!(step.tier, Tier::T2, "{step:?}");
+    assert_eq!(step.approval, Approval::Ask, "{step:?}");
+    assert!(!step.approved && !step.executed, "{step:?}");
+    let result = tool_message(&agent, 1);
+    assert_eq!(result.tool_call_id.as_deref(), Some("c1"));
+    assert!(
+        result.text.contains("denied by policy"),
+        "{:?}",
+        result.text
+    );
+}
+
+#[test]
+fn a_quoted_key_in_a_command_is_refused() {
+    // The store would redact this key on write; the gate must refuse the
+    // line before it runs (T0 echo would otherwise auto-approve it).
+    let model = Script::new(vec![
+        Script::call("c1", "echo 'sk-or-v1-abcdefghij1234567890'"),
+        Script::final_text("denied"),
+    ]);
+    let mut agent = Agent::new(model, DenyNonRead, true, 8).with_workdir(temp_workdir("quoted"));
+    agent.run("print the key").unwrap();
+
+    let step = agent.journal.first().expect("journal entry");
+    assert_eq!(step.tier, Tier::T3, "{step:?}");
+    assert!(!step.approved && !step.executed, "{step:?}");
+    assert!(tool_message(&agent, 1).text.contains("denied by policy"));
+}
+
+#[test]
 fn an_agreed_plan_cannot_smuggle_a_t3_step() {
     let dir = temp_workdir("plan");
     let canary = canary(&dir, "plan");

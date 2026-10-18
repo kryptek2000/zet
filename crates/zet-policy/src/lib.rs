@@ -57,11 +57,22 @@ fn runs_undisclosed_code(first: &str, core: &str) -> bool {
     if args.is_empty() {
         return true;
     }
-    // Inline code flags (-c, -e, program on stdin), or any plain argument:
-    // a script path is undisclosed code with no flag to mark it.
-    args.iter().any(|a| {
-        !a.starts_with('-') || matches!(*a, "-c" | "-e" | "-E" | "--eval" | "--command" | "-")
-    })
+    // Inline-code flags (attached or not), program on stdin, or any plain
+    // argument: a script path is undisclosed code with no flag to mark it.
+    args.iter()
+        .any(|a| !a.starts_with('-') || is_inline_code_flag(a))
+}
+
+/// Inline-code flags, in every spelling the wild uses: `-c`, and the
+/// attached form `-c'payload'` that is one shell token. Attached short
+/// flags are not exotic — they are how people write them by hand.
+fn is_inline_code_flag(arg: &str) -> bool {
+    matches!(arg, "-" | "--eval" | "--command")
+        || arg.starts_with("-c")
+        || arg.starts_with("-e")
+        || arg.starts_with("-E")
+        || arg.starts_with("--eval=")
+        || arg.starts_with("--command=")
 }
 
 /// Key prefixes that identify a credential on sight. Matches the scrubber
@@ -83,8 +94,16 @@ const SECRET_KEY_PREFIXES: &[&str] = &[
 ];
 
 /// Minimum tail after a key prefix before it counts as a credential
-/// (`sk-folders` and other short fragments are not keys).
-const SECRET_KEY_MIN_TAIL: usize = 16;
+/// (`sk-folders` and other short fragments are not keys). Mirrors the
+/// per-prefix minimums in `zet_blocks::SECRET_PREFIXES`; the two must
+/// agree, or the store redacts text the gate let through.
+/// `crates/zet-blocks/tests/gate_scrub_agreement.rs` checks that for real.
+pub const SECRET_KEY_MIN_TAIL: usize = 16;
+
+/// `Bearer ` carries its own, lower floor (8), exactly as the scrubber
+/// does: an 8-character bearer token is redacted from the transcript by
+/// zet-blocks, so it must not sail through the gate at T1.
+pub const BEARER_MIN_TAIL: usize = 8;
 
 /// Length of the credential-looking tail at the start of `s` (quotes
 /// included: a header value arrives quoted).
@@ -97,9 +116,25 @@ fn key_tail_len(s: &str) -> usize {
         .count()
 }
 
+/// One layer of surrounding quotes. A key reaches the command line
+/// quoted far more often than not (`export K='sk-…'`, `echo 'sk-…'`),
+/// and the scrubber matches it positionally regardless of quotes — so
+/// the gate has to look past them or the two disagree about what a
+/// secret is. One layer only, `'`, `"` only.
+fn unquote(tok: &str) -> &str {
+    let t = tok
+        .strip_prefix('\'')
+        .or_else(|| tok.strip_prefix('"'))
+        .unwrap_or(tok);
+    t.strip_suffix('\'')
+        .or_else(|| t.strip_suffix('"'))
+        .unwrap_or(t)
+}
+
 /// True when a token is a credential on sight: a known key prefix with a
-/// real-looking tail.
+/// real-looking tail, looking past surrounding quotes.
 fn looks_like_key(tok: &str) -> bool {
+    let tok = unquote(tok);
     SECRET_KEY_PREFIXES.iter().any(|prefix| {
         tok.strip_prefix(prefix)
             .is_some_and(|tail| key_tail_len(tail) >= SECRET_KEY_MIN_TAIL)
@@ -114,7 +149,7 @@ fn carries_bearer_key(cmd: &str) -> bool {
     let mut rest = cmd;
     while let Some(at) = rest.find(HEADER) {
         let tail = &rest[at + HEADER.len()..];
-        if key_tail_len(tail) >= SECRET_KEY_MIN_TAIL {
+        if key_tail_len(unquote(tail)) >= BEARER_MIN_TAIL {
             return true;
         }
         rest = tail;
