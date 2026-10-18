@@ -15,6 +15,12 @@ pub struct McpTool {
     pub input_schema: Value,
 }
 
+/// Namespace for MCP tools offered to the model: `mcp__{server}__{tool}`.
+/// Lives with the protocol, not with either host: `zet-mcp` names tools
+/// this way when it lists them, `zet-agent` recognises them when the model
+/// calls one.
+pub const PREFIX: &str = "mcp__";
+
 #[derive(Debug)]
 pub enum McpError {
     Spawn(String),

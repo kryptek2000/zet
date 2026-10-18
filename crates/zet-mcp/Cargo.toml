@@ -3,3 +3,11 @@ name = "zet-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+zet-models = { path = "../zet-models" }
+zet-agent = { path = "../zet-agent" }
+zet-policy = { path = "../zet-policy" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"

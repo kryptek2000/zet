@@ -1,9 +1,16 @@
 // OpenAI-compatible chat client: OpenAI, OpenRouter, Together, Groq,
 // DeepSeek, xAI, self-hosted gateways — anything behind /chat/completions.
+// Speaks both shapes of the gateway: blocking `chat`, and `chat_stream`
+// over SSE for anything that implements `stream: true`.
+
+use std::io::BufRead;
 
 use serde_json::{json, Value};
 
-use crate::{ChatModel, ChatRequest, ChatResponse, ModelError, Role, ToolCall};
+use crate::stream::{SseAccumulator, SseStep};
+use crate::{
+    ChatModel, ChatRequest, ChatResponse, ChatStream, ModelError, Role, StreamEvent, ToolCall,
+};
 
 pub struct OpenAICompat {
     base_url: String,
@@ -33,6 +40,85 @@ impl OpenAICompat {
             Role::Assistant => "assistant",
             Role::Tool => "tool",
         }
+    }
+
+    /// `messages` + `tools` in the OpenAI shape. Shared by the blocking
+    /// and the streaming call: the wire body is the same either way, only
+    /// `stream` differs.
+    fn chat_body(&self, req: &ChatRequest) -> Value {
+        let mut messages = Vec::with_capacity(req.messages.len() + 1);
+        if let Some(system) = &req.system {
+            messages.push(json!({"role": "system", "content": system}));
+        }
+        for m in &req.messages {
+            let mut msg = serde_json::Map::new();
+            msg.insert(
+                "role".to_string(),
+                Value::String(Self::role(m.role).to_string()),
+            );
+            msg.insert("content".to_string(), Value::String(m.text.clone()));
+            if let Some(id) = &m.tool_call_id {
+                msg.insert("tool_call_id".to_string(), Value::String(id.clone()));
+            }
+            if !m.tool_calls.is_empty() {
+                let calls: Vec<Value> = m
+                    .tool_calls
+                    .iter()
+                    .map(|c| {
+                        json!({
+                            "id": c.id,
+                            "type": "function",
+                            "function": {"name": c.name, "arguments": c.arguments},
+                        })
+                    })
+                    .collect();
+                msg.insert("tool_calls".to_string(), Value::Array(calls));
+            }
+            messages.push(Value::Object(msg));
+        }
+        let tools: Vec<Value> = req
+            .tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    }
+                })
+            })
+            .collect();
+        json!({
+            "model": self.model,
+            "messages": messages,
+            "tools": tools,
+            "max_tokens": req.max_tokens,
+        })
+    }
+
+    fn post(&self, body: Value) -> Result<ureq::http::Response<ureq::Body>, ModelError> {
+        self.agent
+            .post(format!("{}/chat/completions", self.base_url))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .send_json(body)
+            .map_err(|e| ModelError::Network(e.to_string()))
+    }
+}
+
+/// Provider status -> typed error, shared by chat, the stream and the
+/// model list. `what` names the call in the "everything else" branch —
+/// a bad status is nearly always a request we shaped wrong.
+/// 401/403 credentials, 429 quota, 5xx their fault.
+pub(crate) fn status_error(status: u16, snippet: String, what: &str) -> ModelError {
+    match status {
+        401 | 403 => ModelError::Auth(format!("provider rejected the credentials: {snippet}")),
+        429 => ModelError::RateLimited(format!("provider rate limit hit: {snippet}")),
+        500.. => ModelError::Server(format!("provider status {status}: {snippet}")),
+        _ => ModelError::Protocol(format!("{what}: status {status}: {snippet}")),
     }
 }
 
@@ -84,79 +170,13 @@ pub(crate) fn flatten(text: &str) -> String {
 
 impl ChatModel for OpenAICompat {
     fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, ModelError> {
-        let mut messages = Vec::with_capacity(req.messages.len() + 1);
-        if let Some(system) = &req.system {
-            messages.push(json!({"role": "system", "content": system}));
-        }
-        for m in &req.messages {
-            let mut msg = serde_json::Map::new();
-            msg.insert(
-                "role".to_string(),
-                Value::String(Self::role(m.role).to_string()),
-            );
-            msg.insert("content".to_string(), Value::String(m.text.clone()));
-            if let Some(id) = &m.tool_call_id {
-                msg.insert("tool_call_id".to_string(), Value::String(id.clone()));
-            }
-            if !m.tool_calls.is_empty() {
-                let calls: Vec<Value> = m
-                    .tool_calls
-                    .iter()
-                    .map(|c| {
-                        json!({
-                            "id": c.id,
-                            "type": "function",
-                            "function": {"name": c.name, "arguments": c.arguments},
-                        })
-                    })
-                    .collect();
-                msg.insert("tool_calls".to_string(), Value::Array(calls));
-            }
-            messages.push(Value::Object(msg));
-        }
-        let tools: Vec<Value> = req
-            .tools
-            .iter()
-            .map(|t| {
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters,
-                    }
-                })
-            })
-            .collect();
-        let body = json!({
-            "model": self.model,
-            "messages": messages,
-            "tools": tools,
-            "max_tokens": req.max_tokens,
-        });
-
-        let mut resp = self
-            .agent
-            .post(format!("{}/chat/completions", self.base_url))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .send_json(body)
-            .map_err(|e| ModelError::Network(e.to_string()))?;
+        let mut resp = self.post(self.chat_body(req))?;
         // Provider error bodies carry the real reason (bad model id, bad
         // payload shape); surface a snippet instead of a bare status.
         let status = resp.status().as_u16();
         if status != 200 {
             let snippet = snippet(resp.body_mut());
-            return Err(match status {
-                401 | 403 => {
-                    ModelError::Auth(format!("provider rejected the credentials: {snippet}"))
-                }
-                429 => ModelError::RateLimited(format!("provider rate limit hit: {snippet}")),
-                500.. => ModelError::Server(format!("provider status {status}: {snippet}")),
-                _ => ModelError::Protocol(format!(
-                    "provider rejected request: status {status}: {snippet}"
-                )),
-            });
+            return Err(status_error(status, snippet, "provider rejected request"));
         }
         let payload: Value = resp
             .body_mut()
@@ -206,6 +226,53 @@ impl ChatModel for OpenAICompat {
     }
 }
 
+impl ChatStream for OpenAICompat {
+    /// SSE: same body plus `"stream": true`, then `data:` frames read
+    /// line by line until `[DONE]`. Deltas go out through `on_event` as
+    /// they arrive; the returned response is the whole assembled answer,
+    /// so a streaming caller and a blocking caller see the same thing.
+    fn chat_stream(
+        &self,
+        req: &ChatRequest,
+        on_event: &mut dyn FnMut(StreamEvent),
+    ) -> Result<ChatResponse, ModelError> {
+        let mut body = self.chat_body(req);
+        body["stream"] = json!(true);
+        let mut resp = self.post(body)?;
+        let status = resp.status().as_u16();
+        if status != 200 {
+            let snippet = snippet(resp.body_mut());
+            return Err(status_error(status, snippet, "provider rejected request"));
+        }
+
+        let mut acc = SseAccumulator::new();
+        let mut lines = std::io::BufReader::new(resp.body_mut().as_reader());
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = lines
+                .read_line(&mut line)
+                .map_err(|e| ModelError::Network(e.to_string()))?;
+            // Connection closed without [DONE]: keep what arrived. A
+            // half-answer plus a truncation error would hide the text
+            // the user already paid for.
+            if n == 0 {
+                break;
+            }
+            match acc.push_line(&line)? {
+                SseStep::Events(events) => {
+                    for event in events {
+                        on_event(event);
+                    }
+                }
+                SseStep::Done => break,
+            }
+        }
+        on_event(StreamEvent::Done);
+        acc.finish()
+    }
+}
+
 /// `GET {base}/models` ids (OpenAI shape: `{"data":[{"id":…}]}`).
 /// Powers `zet models`: OpenRouter, Go, any compat endpoint. 10s bound.
 pub fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, crate::ModelError> {
@@ -224,12 +291,7 @@ pub fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, crate::
     let status = resp.status().as_u16();
     if status != 200 {
         let snippet = snippet(resp.body_mut());
-        return Err(match status {
-            401 | 403 => ModelError::Auth(format!("provider rejected the credentials: {snippet}")),
-            429 => ModelError::RateLimited(format!("provider rate limit hit: {snippet}")),
-            500.. => ModelError::Server(format!("provider status {status}: {snippet}")),
-            _ => ModelError::Protocol(format!("model list failed: status {status}: {snippet}")),
-        });
+        return Err(status_error(status, snippet, "model list failed"));
     }
     let payload: Value = resp
         .body_mut()

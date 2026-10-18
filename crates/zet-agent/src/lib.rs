@@ -3,7 +3,7 @@
 // as instructions — prompt injection via command output cannot become a step.
 
 use std::path::{Path, PathBuf};
-use zet_models::{ChatModel, ChatRequest, Message, ModelError, Role, ToolDef};
+use zet_models::{ChatModel, ChatRequest, Message, ModelError, Role, ToolCall, ToolDef};
 use zet_policy::{classify, decide, Approval, Tier};
 
 pub mod journal;
@@ -119,6 +119,16 @@ pub trait Approver {
     fn approve(&self, tier: Tier, command: &str) -> bool;
 }
 
+/// Dispatch target for `mcp__{server}__{tool}` calls (docs §8). The MCP
+/// registry in `zet-mcp` implements it, so the agent itself stays free of
+/// the MCP dependency — same shape as [`Executor`]. Server tools reach
+/// the model separately, as defs, via [`Agent::with_extra_tools`].
+pub trait McpTools {
+    /// Run one namespaced call; return the text the model should read.
+    /// `Err` becomes an error result message, never a silent drop.
+    fn call(&mut self, call: &ToolCall) -> Result<String, String>;
+}
+
 /// Approves everything (tests, non-interactive T0/T1 flows).
 pub struct AllowAll;
 
@@ -195,6 +205,12 @@ pub struct Agent<M: ChatModel, A: Approver> {
     /// Agreed multi-step plan (planner loop): the user approved these
     /// steps up front; the model works through them in order.
     plan: Option<Vec<String>>,
+    /// Extra tool defs appended to every request (MCP servers' tools).
+    /// Native defs keep their place and order; these follow.
+    extra_tools: Vec<ToolDef>,
+    /// Where `mcp__*` calls go. `None` means such a call is an error,
+    /// not a no-op.
+    mcp: Option<Box<dyn McpTools>>,
 }
 
 impl<M: ChatModel, A: Approver> Agent<M, A> {
@@ -209,6 +225,8 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
             journal: Vec::new(),
             context: None,
             plan: None,
+            extra_tools: Vec::new(),
+            mcp: None,
         }
     }
 
@@ -227,6 +245,21 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
 
     pub fn with_executor<E: Executor + 'static>(mut self, executor: E) -> Self {
         self.executor = Box::new(executor);
+        self
+    }
+
+    /// Tool defs appended to every request, e.g. an MCP registry's
+    /// `tool_defs()`: the model can only call what it was shown.
+    pub fn with_extra_tools(mut self, tools: Vec<ToolDef>) -> Self {
+        self.extra_tools = tools;
+        self
+    }
+
+    /// Attach the `mcp__*` dispatch target. Without one, an `mcp__` call
+    /// is answered with an error the model can read and react to. Calls
+    /// are gated as T2 before they reach the registry.
+    pub fn with_mcp_tools<T: McpTools + 'static>(mut self, tools: T) -> Self {
+        self.mcp = Some(Box::new(tools));
         self
     }
 
@@ -289,17 +322,19 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
                 system.push_str("\nTerminal context (what the user sees):\n");
                 system.push_str(context);
             }
+            let mut tool_defs = vec![
+                shell_tool_def(),
+                tools::read_tool_def(),
+                tools::glob_tool_def(),
+                tools::grep_tool_def(),
+                tools::write_tool_def(),
+            ];
+            tool_defs.extend(self.extra_tools.iter().cloned());
             let req = ChatRequest {
                 model: String::new(),
                 system: Some(system),
                 messages: messages.clone(),
-                tools: vec![
-                    shell_tool_def(),
-                    tools::read_tool_def(),
-                    tools::glob_tool_def(),
-                    tools::grep_tool_def(),
-                    tools::write_tool_def(),
-                ],
+                tools: tool_defs,
                 max_tokens: 1024,
             };
             let res = self.model.chat(&req).map_err(AgentError::Model)?;
@@ -531,6 +566,68 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
         (call.id.clone(), zet_context::scrub(&output))
     }
 
+    /// Server tool call, routed to the attached registry. T2: an MCP server
+    /// can write, fetch or execute whatever its owner built it to do, and
+    /// the model asked for it — neither is consent — so every server call
+    /// passes the same gate as a risky shell command (ask, journaled with
+    /// the real tier and outcome, denied steps never run). The answer is
+    /// third-party data: scrubbed on the way back to the model, raw in the
+    /// local journal.
+    fn step_mcp(&mut self, call: &ToolCall) -> (String, String) {
+        if self.mcp.is_none() {
+            return (
+                call.id.clone(),
+                format!(
+                    "error: '{}' needs an MCP registry, none is attached",
+                    call.name
+                ),
+            );
+        }
+        let summary = format!("{}({})", call.name, summarize_args(&call.arguments));
+        let tier = Tier::T2;
+        let approval = decide(tier, self.in_repo);
+        let approved = match approval {
+            Approval::Auto => true,
+            Approval::Ask | Approval::ConfirmType => self.approver.approve(tier, &summary),
+        };
+        if !approved {
+            self.journal.push(JournalEntry {
+                command: summary.clone(),
+                tier,
+                approval,
+                approved: false,
+                executed: false,
+                exit_code: None,
+                output: format!("denied ({approval:?}): {summary}"),
+                checkpoint: None,
+            });
+            return (
+                call.id.clone(),
+                format!("denied by policy ({tier:?}): the tool was not called"),
+            );
+        }
+        let outcome = self
+            .mcp
+            .as_mut()
+            .expect("registry checked above")
+            .call(call);
+        let (executed, output) = match outcome {
+            Ok(text) => (true, text),
+            Err(e) => (false, format!("error: {e}")),
+        };
+        self.journal.push(JournalEntry {
+            command: summary,
+            tier,
+            approval,
+            approved: true,
+            executed,
+            exit_code: if executed { Some(0) } else { None },
+            output: output.clone(),
+            checkpoint: None,
+        });
+        (call.id.clone(), zet_context::scrub(&output))
+    }
+
     /// True once the turn mutated something (non-T0 step executed):
     /// only these pay for the verify leg.
     fn mutated(&self) -> bool {
@@ -611,6 +708,11 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
         }
         if call.name.as_str() == "write_file" {
             return self.step_write(call);
+        }
+        // Server tools carry the registry's namespace prefix; nothing
+        // native does, so the check is unambiguous in both directions.
+        if call.name.starts_with(zet_models::mcp::PREFIX) {
+            return self.step_mcp(call);
         }
         if call.name != "run_shell" {
             return (
@@ -771,6 +873,13 @@ impl std::fmt::Display for UndoError {
 }
 
 impl std::error::Error for UndoError {}
+
+/// One-line argument summary for the journal: enough to see what a server
+/// tool was asked for, bounded so a large blob can't pad the audit log.
+fn summarize_args(args: &str) -> String {
+    let flat = args.split_whitespace().collect::<Vec<_>>().join(" ");
+    flat.chars().take(128).collect()
+}
 
 fn git(cwd: &Path, args: &[&str]) -> Result<String, UndoError> {
     let out = std::process::Command::new("git")

@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use zet_agent::{Agent, AgentError, AllowAll, DenyNonRead, UndoError};
-use zet_models::{ChatModel, ChatRequest, ChatResponse, Message, Role, ToolCall};
+use zet_models::{ChatModel, ChatRequest, ChatResponse, Message, Role, ToolCall, ToolDef};
 use zet_policy::Tier;
 
 struct Script {
@@ -786,4 +786,179 @@ fn read_only_turns_skip_verification() {
     let mut agent = Agent::new(model, AllowAll, true, 8).with_workdir(dir);
     assert_eq!(agent.run("read a").unwrap(), "saw A");
     assert!(agent.journal.iter().all(|e| e.command != "verify"));
+}
+
+/// Stand-in for an MCP registry (`zet_mcp::McpRegistry` implements the
+/// same seam), so the agent's half of the wiring is testable here without
+/// spawning a server.
+struct FakeMcp {
+    answer: String,
+    seen: RefCell<Vec<String>>,
+}
+
+impl zet_agent::McpTools for FakeMcp {
+    fn call(&mut self, call: &zet_models::ToolCall) -> Result<String, String> {
+        self.seen.borrow_mut().push(call.name.clone());
+        if call.name.ends_with("boom") {
+            return Err("server said no".to_string());
+        }
+        Ok(self.answer.clone())
+    }
+}
+
+fn echo_def(name: &str) -> ToolDef {
+    ToolDef {
+        name: name.to_string(),
+        description: "server tool".to_string(),
+        parameters: serde_json::json!({"type": "object"}),
+    }
+}
+
+#[test]
+fn extra_tools_are_offered_after_the_native_ones() {
+    let model = Script::new(vec![Script::final_text("done")]);
+    let mut agent =
+        Agent::new(model, AllowAll, true, 8).with_extra_tools(vec![echo_def("mcp__test__echo")]);
+    agent.run("hi").unwrap();
+    let names: Vec<String> = agent.model.seen.borrow()[0]
+        .tools
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+    assert_eq!(names.len(), 6, "{names:?}");
+    assert_eq!(names[0], "run_shell");
+    assert_eq!(names[5], "mcp__test__echo");
+}
+
+/// The journal entry for an MCP step, whatever else ran after it.
+fn mcp_entry<A: zet_agent::Approver>(agent: &Agent<Script, A>) -> &zet_agent::JournalEntry {
+    agent
+        .journal
+        .iter()
+        .find(|e| e.command.starts_with("mcp__test__"))
+        .expect("no MCP journal entry")
+}
+
+#[test]
+fn mcp_calls_go_to_the_registry_with_the_call_id() {
+    let model = Script::new(vec![
+        tool_call("c1", "mcp__test__echo", r#"{"text":"ping"}"#),
+        Script::final_text("the server said: pong"),
+        // A T2 step counts as a mutation, so the verify leg runs.
+        Script::final_text("VERIFIED"),
+    ]);
+    let mcp = FakeMcp {
+        answer: "pong".to_string(),
+        seen: RefCell::new(Vec::new()),
+    };
+    let mut agent = Agent::new(model, AllowAll, false, 8)
+        .with_extra_tools(vec![echo_def("mcp__test__echo")])
+        .with_mcp_tools(mcp);
+    assert_eq!(
+        agent.run("ask the server").unwrap(),
+        "the server said: pong"
+    );
+
+    let seen = agent.model.seen.borrow();
+    let result = seen[1]
+        .messages
+        .iter()
+        .find(|m| m.role == Role::Tool)
+        .expect("tool result");
+    assert_eq!(result.tool_call_id.as_deref(), Some("c1"));
+    assert_eq!(result.text, "pong");
+    assert_eq!(seen.len(), 3, "step, answer, verify");
+
+    // Auditable like any other step, at its real tier: a server can
+    // write or execute, so it asks like a risky shell command.
+    let entry = mcp_entry(&agent);
+    assert_eq!(entry.tier, Tier::T2);
+    assert_eq!(entry.approval, zet_policy::Approval::Ask);
+    assert!(entry.approved);
+    assert!(entry.executed);
+    assert_eq!(entry.output, "pong");
+}
+
+#[test]
+fn mcp_calls_go_through_the_approval_gate() {
+    let model = Script::new(vec![
+        tool_call("c1", "mcp__test__echo", r#"{"text":"ping"}"#),
+        Script::final_text("understood"),
+    ]);
+    let mcp = FakeMcp {
+        answer: "pong".to_string(),
+        seen: RefCell::new(Vec::new()),
+    };
+    // DenyNonRead refuses anything above T0; a server call is T2.
+    let mut agent = Agent::new(model, DenyNonRead, false, 8)
+        .with_extra_tools(vec![echo_def("mcp__test__echo")])
+        .with_mcp_tools(mcp);
+    agent.run("ask the server").unwrap();
+
+    let entry = mcp_entry(&agent);
+    assert!(!entry.approved, "{entry:?}");
+    assert!(!entry.executed, "{entry:?}");
+    assert_eq!(entry.tier, Tier::T2);
+    let seen = agent.model.seen.borrow();
+    let result = seen[1]
+        .messages
+        .iter()
+        .find(|m| m.role == Role::Tool)
+        .expect("a denied call still answers");
+    assert!(
+        result.text.contains("denied by policy"),
+        "{:?}",
+        result.text
+    );
+    // Nothing ran, so nothing mutated: no verify leg.
+    assert!(agent.journal.iter().all(|e| e.command != "verify"));
+    assert_eq!(seen.len(), 2);
+}
+
+#[test]
+fn a_failed_server_call_comes_back_as_an_error() {
+    let model = Script::new(vec![
+        tool_call("c1", "mcp__test__boom", "{}"),
+        Script::final_text("understood"),
+    ]);
+    let mcp = FakeMcp {
+        answer: String::new(),
+        seen: RefCell::new(Vec::new()),
+    };
+    let mut agent = Agent::new(model, AllowAll, false, 8).with_mcp_tools(mcp);
+    agent.run("call the broken tool").unwrap();
+    let seen = agent.model.seen.borrow();
+    let result = seen[1]
+        .messages
+        .iter()
+        .find(|m| m.role == Role::Tool)
+        .expect("a failed call still answers");
+    assert!(result.text.contains("server said no"), "{:?}", result.text);
+    let entry = mcp_entry(&agent);
+    assert!(!entry.executed);
+    // Attempted but changed nothing: no verify leg.
+    assert!(agent.journal.iter().all(|e| e.command != "verify"));
+}
+
+#[test]
+fn an_mcp_call_without_a_registry_is_an_error_not_a_silent_drop() {
+    let model = Script::new(vec![
+        tool_call("c1", "mcp__test__echo", "{}"),
+        Script::final_text("no registry"),
+    ]);
+    // Defs offered, dispatch target missing: the model must be told.
+    let mut agent =
+        Agent::new(model, AllowAll, false, 8).with_extra_tools(vec![echo_def("mcp__test__echo")]);
+    assert_eq!(agent.run("call the tool").unwrap(), "no registry");
+    let seen = agent.model.seen.borrow();
+    let result = seen[1]
+        .messages
+        .iter()
+        .find(|m| m.role == Role::Tool)
+        .expect("the call was answered, not dropped");
+    assert!(result.text.contains("MCP registry"), "{:?}", result.text);
+    assert_eq!(result.tool_call_id.as_deref(), Some("c1"));
+    // Nothing ran, so nothing is journaled — same as a native call with
+    // unusable arguments.
+    assert!(agent.journal.is_empty(), "{:?}", agent.journal);
 }
