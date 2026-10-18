@@ -15,6 +15,26 @@ use zet_term::{MarkerKind, Terminal};
 
 use crate::{Block, Store};
 
+/// Branch checked out at `cwd`, or empty when there is none to name:
+/// not a repo, no git binary, detached HEAD, or a repo with no commits
+/// yet. Best effort by construction — a recorded command must never be
+/// lost because git misbehaved, so every failure is an empty string.
+///
+/// Once per finished block (not per keystroke): the branch only moves
+/// when the user switches it, and a subprocess per pump would cost more
+/// than the whole pump.
+pub fn git_branch(cwd: &str) -> String {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["branch", "--show-current"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
 pub struct Recorder {
     store: Store,
     session: String,
@@ -174,6 +194,7 @@ impl Recorder {
         while lines.last().is_some_and(|l| l.is_empty()) {
             lines.pop();
         }
+        let branch = git_branch(cwd);
         let block = Block {
             id: 0,
             session: self.session.clone(),
@@ -181,6 +202,7 @@ impl Recorder {
             output: lines.join("\n"),
             exit_code: done.exit_code,
             cwd: cwd.to_string(),
+            git_branch: branch,
             duration_ms: t0.elapsed().as_millis() as u64,
         };
         if done.exit_code != 0 {

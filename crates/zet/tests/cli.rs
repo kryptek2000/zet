@@ -60,6 +60,7 @@ fn blocks_lists_seeded_db() {
                 output: format!("out{i}"),
                 exit_code: i as i32,
                 cwd: "/tmp".to_string(),
+                git_branch: String::new(),
                 duration_ms: 1,
             })
             .unwrap();
@@ -73,6 +74,128 @@ fn blocks_lists_seeded_db() {
     assert!(text.contains("echo alpha"), "{text}");
     assert!(text.contains("echo beta"), "{text}");
     assert!(text.contains("[exit 1]"), "{text}");
+}
+
+#[test]
+fn blocks_show_the_branch_when_one_was_recorded() {
+    // The branch is metadata the recorder stamped; a command with no
+    // repo behind it shows no tag at all rather than an empty one.
+    let dir = std::env::temp_dir().join(format!(
+        "zet_blocks_branch_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("b.sqlite");
+    let store = zet_blocks::Store::open(db.to_str().unwrap()).unwrap();
+    store
+        .append(&zet_blocks::Block {
+            id: 0,
+            session: "s".to_string(),
+            command: "git commit -m wip".to_string(),
+            output: "ok".to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: "feat/mcp".to_string(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    let out = zet()
+        .args(["blocks", "--db", db.to_str().unwrap(), "--limit", "10"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("(s) [feat/mcp] git commit"), "{text}");
+
+    store
+        .append(&zet_blocks::Block {
+            id: 0,
+            session: "s".to_string(),
+            command: "ls /tmp".to_string(),
+            output: String::new(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    let out = zet()
+        .args(["blocks", "--db", db.to_str().unwrap(), "--limit", "10"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("(s) ls /tmp"), "{text}");
+    assert!(!text.contains("[]"), "{text}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn replay_prints_the_transcript_and_fails_loudly_for_an_unknown_session() {
+    let dir = std::env::temp_dir().join(format!(
+        "zet_replay_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("b.sqlite");
+    let store = zet_blocks::Store::open(db.to_str().unwrap()).unwrap();
+    store
+        .append(&zet_blocks::Block {
+            id: 0,
+            session: "s1".to_string(),
+            command: "echo alpha".to_string(),
+            output: "alpha\n".to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 3,
+        })
+        .unwrap();
+    drop(store);
+
+    let out = zet()
+        .args(["replay", "--db", db.to_str().unwrap(), "s1"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{:?}", out.status);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "$ echo alpha\nalpha\n[exit 0, 3ms]\n"
+    );
+
+    // Unknown session: exit 1 with a message, never silent empty stdout.
+    let out = zet()
+        .args(["replay", "--db", db.to_str().unwrap(), "nope"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty(), "{:?}", out.stdout);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no blocks for session"),
+        "{:?}",
+        out.stderr
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn replay_bad_usage_fails_loudly() {
+    for args in [
+        &["replay"][..],
+        &["replay", "--db"][..],
+        &["replay", "--nope", "s"][..],
+        &["replay", "s1", "s2"][..],
+    ] {
+        let out = zet().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+    }
 }
 
 // Live: piped stdin must store exactly the first line (not block to EOF,
@@ -201,6 +324,7 @@ fn seed_block(home: &std::path::Path, cmd: &str) {
             output: "out".to_string(),
             exit_code: 0,
             cwd: "/tmp".to_string(),
+            git_branch: String::new(),
             duration_ms: 1,
         })
         .unwrap();

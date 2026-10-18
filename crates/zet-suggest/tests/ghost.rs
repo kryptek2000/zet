@@ -12,6 +12,7 @@ fn seed(cmds: &[(&str, i32)]) -> Store {
                 output: String::new(),
                 exit_code: *exit,
                 cwd: String::new(),
+                git_branch: String::new(),
                 duration_ms: 1,
             })
             .unwrap();

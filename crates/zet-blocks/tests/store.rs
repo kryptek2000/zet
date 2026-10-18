@@ -12,6 +12,7 @@ fn sample(session: &str) -> Block {
         output: "hi\n".to_string(),
         exit_code: 0,
         cwd: "/tmp".to_string(),
+        git_branch: String::new(),
         duration_ms: 3,
     }
 }
@@ -124,6 +125,7 @@ fn record_live_command_as_block() {
             output: String::from_utf8_lossy(&out).into_owned(),
             exit_code: code as i32,
             cwd: "/tmp".to_string(),
+            git_branch: String::new(),
             duration_ms: 0,
         })
         .unwrap();
@@ -145,6 +147,7 @@ fn append_scrubs_key_material() {
             output: raw_out.to_string(),
             exit_code: 0,
             cwd: "/tmp".to_string(),
+            git_branch: String::new(),
             duration_ms: 0,
         })
         .unwrap();
@@ -179,6 +182,7 @@ fn append_scrubs_key_material() {
             output: "ok".to_string(),
             exit_code: 0,
             cwd: "/tmp".to_string(),
+            git_branch: String::new(),
             duration_ms: 0,
         })
         .unwrap();
