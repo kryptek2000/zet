@@ -133,6 +133,9 @@ fn zsh_hook_reports_exit_code_end_to_end() {
     // Isolate from the user's real zsh config.
     let zdotdir = std::env::temp_dir().join("zet-zsh-e2e");
     std::fs::create_dir_all(&zdotdir).unwrap();
+    // Prevent zsh-newuser-install wizard and compinit prompts on a
+    // fresh ZDOTDIR (CI has no .zshrc): an empty file skips both.
+    let _ = std::fs::write(zdotdir.join(".zshrc"), "");
 
     let hook = format!(
         "{}/../../shell/zet-integration.zsh",
