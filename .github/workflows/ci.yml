@@ -4,7 +4,10 @@ on:
   push:
     branches: [master, main]
   pull_request:
-    branches: [master, main]
+    # Any base branch: feature branches stack on each other (e.g. a red-team
+    # branch based on the models branch), and a base-filtered trigger left
+    # those PRs with no checks at all.
+    branches: ["**"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,6 +19,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install zsh (needed for zet-pty zsh integration test)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:

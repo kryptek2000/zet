@@ -2,7 +2,7 @@ use rusqlite::{params, Connection, Result};
 
 pub mod recorder;
 
-pub use recorder::Recorder;
+pub use recorder::{git_branch, Recorder};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
@@ -12,6 +12,9 @@ pub struct Block {
     pub output: String,
     pub exit_code: i32,
     pub cwd: String,
+    /// Branch the command ran on. Empty when there is none to name: not
+    /// a repo, no git binary, detached HEAD, or a repo with no commits.
+    pub git_branch: String,
     pub duration_ms: u64,
 }
 
@@ -43,10 +46,21 @@ impl Store {
                 output      TEXT NOT NULL DEFAULT '',
                 exit_code   INTEGER NOT NULL DEFAULT 0,
                 cwd         TEXT NOT NULL DEFAULT '',
+                git_branch  TEXT NOT NULL DEFAULT '',
                 duration_ms INTEGER NOT NULL DEFAULT 0
             )",
             (),
         )?;
+        // Databases in the wild predate git_branch, and CREATE TABLE IF
+        // NOT EXISTS leaves an existing table exactly as it is — so add
+        // the column when it is missing. Runs on every open, so it must
+        // stay idempotent: one PRAGMA, one ALTER only the first time.
+        if !self.has_column("git_branch")? {
+            self.conn.execute(
+                "ALTER TABLE blocks ADD COLUMN git_branch TEXT NOT NULL DEFAULT ''",
+                (),
+            )?;
+        }
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_blocks_session ON blocks (session, id)",
             (),
@@ -54,23 +68,39 @@ impl Store {
         Ok(())
     }
 
+    fn has_column(&self, name: &str) -> Result<bool> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(blocks)")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let column: String = row.get(1)?;
+            if column == name {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn append(&self, block: &Block) -> Result<i64> {
         let duration_ms = i64::try_from(block.duration_ms)
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         // Secrets must never reach the store: pasted keys echo through the
         // PTY onto recorded rows (seen live with an OpenRouter key). Scrub
-        // command and output at the single write path.
+        // command and output at the single write path. The branch goes
+        // through the same scrub: it is not a secret, but it is arbitrary
+        // user text and this is the one place rows are written.
         let command = scrub_secrets(&block.command);
         let output = scrub_secrets(&block.output);
+        let git_branch = scrub_secrets(&block.git_branch);
         self.conn.execute(
-            "INSERT INTO blocks (session, command, output, exit_code, cwd, duration_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO blocks (session, command, output, exit_code, cwd, git_branch, duration_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 block.session,
                 command,
                 output,
                 block.exit_code,
                 block.cwd,
+                git_branch,
                 duration_ms,
             ],
         )?;
@@ -79,7 +109,7 @@ impl Store {
 
     pub fn get(&self, id: i64) -> Result<Block> {
         self.conn.query_row(
-            "SELECT id, session, command, output, exit_code, cwd, duration_ms
+            "SELECT id, session, command, output, exit_code, cwd, git_branch, duration_ms
              FROM blocks WHERE id = ?1",
             params![id],
             row_to_block,
@@ -88,7 +118,7 @@ impl Store {
 
     pub fn list(&self, session: &str) -> Result<Vec<Block>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, session, command, output, exit_code, cwd, duration_ms
+            "SELECT id, session, command, output, exit_code, cwd, git_branch, duration_ms
              FROM blocks WHERE session = ?1 ORDER BY id ASC",
         )?;
         let rows = stmt.query_map(params![session], row_to_block)?;
@@ -98,7 +128,7 @@ impl Store {
     /// Newest blocks across sessions, most recent last (display order).
     pub fn recent(&self, limit: usize) -> Result<Vec<Block>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, session, command, output, exit_code, cwd, duration_ms
+            "SELECT id, session, command, output, exit_code, cwd, git_branch, duration_ms
              FROM blocks ORDER BY id DESC LIMIT ?1",
         )?;
         let rows: Vec<Block> = stmt
@@ -164,9 +194,9 @@ impl Store {
 }
 
 fn row_to_block(row: &rusqlite::Row<'_>) -> Result<Block> {
-    let raw_duration: i64 = row.get(6)?;
+    let raw_duration: i64 = row.get(7)?;
     let duration_ms = u64::try_from(raw_duration).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Integer, Box::new(e))
+        rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Integer, Box::new(e))
     })?;
     Ok(Block {
         id: row.get(0)?,
@@ -175,6 +205,7 @@ fn row_to_block(row: &rusqlite::Row<'_>) -> Result<Block> {
         output: row.get(3)?,
         exit_code: row.get(4)?,
         cwd: row.get(5)?,
+        git_branch: row.get(6)?,
         duration_ms,
     })
 }

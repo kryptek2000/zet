@@ -130,18 +130,39 @@ fn zsh_hook_reports_exit_code_end_to_end() {
         eprintln!("skipping: zsh not installed");
         return;
     }
-    // Isolate from the user's real zsh config.
-    let zdotdir = std::env::temp_dir().join("zet-zsh-e2e");
-    std::fs::create_dir_all(&zdotdir).unwrap();
-
     let hook = format!(
         "{}/../../shell/zet-integration.zsh",
         env!("CARGO_MANIFEST_DIR")
     );
+
+    // Isolate from the user's real zsh config. The scratch dir is keyed by
+    // thread id, not pid alone: cargo runs tests in parallel threads, and a
+    // pid-keyed dir lets one test's cleanup wipe another test's ZDOTDIR.
+    let zdotdir = std::env::temp_dir().join(format!(
+        "zet-zsh-e2e-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&zdotdir).unwrap();
+
+    // Load the hook from the rc file, never by typing `source` at a prompt.
+    // A fresh interactive zsh runs the system-wide /etc/zsh/zshrc, which
+    // calls compinit; compinit raises an interactive "Ignore insecure
+    // directories and continue [y] or abort compinit [n]?" prompt that reads
+    // the same stdin as this test. The prompt eats the first byte of the next
+    // line, so a typed `source` arrives as `ource` and the hook never loads
+    // ("zsh: command not found: ource" -- no OSC 133 markers, exit codes
+    // unseen). rc loading removes the setup line from the prompt stream
+    // entirely, so nothing typed later can be eaten.
+    let _ = std::fs::write(zdotdir.join(".zshrc"), format!("source {hook}\n"));
+
     let zdotdir_arg = format!("ZDOTDIR={}", zdotdir.display());
-    let mut s = Session::spawn("env", &[&zdotdir_arg, "zsh", "-i"], 80, 24).unwrap();
-    s.write_all(format!("source {hook}\nfalse\ntrue\nexit\n").as_bytes())
-        .unwrap();
+    // -d (--no-globalrcs) skips the system-wide /etc/zsh/zshrc, so the
+    // compinit security prompt never appears at all. The user's own rc
+    // ($ZDOTDIR/.zshrc, written above) is still read -- -d only drops the
+    // GLOBAL rc files, so the hook still loads.
+    let mut s = Session::spawn("env", &[&zdotdir_arg, "zsh", "-d", "-i"], 80, 24).unwrap();
+    s.write_all(b"false\ntrue\nexit\n").unwrap();
 
     let mut out = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -173,8 +194,63 @@ fn zsh_hook_reports_exit_code_end_to_end() {
         }
         st.observe(&e);
     }
-    assert!(exits.contains(&"1".to_string()), "exits seen: {exits:?}");
+    assert!(
+        exits.contains(&"1".to_string()),
+        "exits seen: {exits:?}; raw: {}",
+        String::from_utf8_lossy(&out)
+    );
     assert_eq!(exits.last().map(String::as_str), Some("0"));
     assert!(saw_c, "no pre-exec C marker observed");
     assert_eq!(st.last_exit(), Some(0));
+}
+
+/// The hook must not spam the prompt when zsh/parameter is unavailable.
+///
+/// The `${+aliases}` parameter expansion re-triggers zsh's module load on
+/// every prompt. When the module is missing, that re-trigger printed
+/// "failed to load module `zsh/parameter'" to stderr on every single
+/// prompt — a permanently noisy shell for anyone whose zsh lacks the
+/// module. The hook caches the load result once and gates the expansion
+/// on it, so the prompt stays silent.
+///
+/// Runs non-interactively so zsh/zle is never needed (no line editor),
+/// and forces module_path to an empty directory so zsh/parameter cannot
+/// load. precmd is invoked explicitly to exercise the expansion path.
+#[test]
+fn zsh_hook_is_quiet_when_parameter_module_is_missing() {
+    use std::process::Command;
+
+    if Command::new("zsh").arg("--version").output().is_err() {
+        eprintln!("skipping: zsh not installed");
+        return;
+    }
+    let hook = format!(
+        "{}/../../shell/zet-integration.zsh",
+        env!("CARGO_MANIFEST_DIR")
+    );
+
+    // Empty module dir: zsh/parameter (and everything else) is unfindable.
+    let empty_mods = std::env::temp_dir().join(format!(
+        "zet-zsh-emptymods-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&empty_mods);
+    std::fs::create_dir_all(empty_mods.join("zsh")).unwrap();
+
+    // Source the hook, then call precmd directly. Capture stderr.
+    let script = format!(
+        "module_path=('{}')\nsource {}\n__zet_precmd\n",
+        empty_mods.display(),
+        hook
+    );
+    let out = Command::new("zsh")
+        .args(["-f", "-c", &script])
+        .output()
+        .expect("zsh");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("failed to load module"),
+        "hook printed a module-load error: {stderr}"
+    );
 }

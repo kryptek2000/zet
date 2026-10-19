@@ -111,6 +111,11 @@ enum State {
     },
     /// ESC ( X / ESC ) X: charset select; consumes the final byte.
     Scs,
+    /// ESC with intermediate bytes (ESC # 8, ESC % G, ESC space F …): the
+    /// whole sequence is consumed through its final byte. Without this the
+    /// argument byte leaks onto the grid as text — found by the vttest
+    /// corpus, which showed `ESC # 8` printing a stray `8`.
+    EscIntermediate,
 }
 
 pub struct Terminal {
@@ -194,6 +199,15 @@ impl Terminal {
                 State::Ground => self.ground(b),
                 State::Escape => self.escape(b),
                 State::Scs => self.state = State::Ground,
+                State::EscIntermediate => {
+                    // Final byte ends the sequence; another intermediate
+                    // continues it.
+                    self.state = if (0x20..=0x2f).contains(&b) {
+                        State::EscIntermediate
+                    } else {
+                        State::Ground
+                    };
+                }
                 State::Osc { saw_esc } => self.osc(b, saw_esc),
                 State::Csi {
                     mut current,
@@ -334,6 +348,9 @@ impl Terminal {
             self.state = State::Osc { saw_esc: false };
         } else if b == b'(' || b == b')' || b == b'*' || b == b'+' {
             self.state = State::Scs;
+        } else if (0x20..=0x2f).contains(&b) {
+            // Any other ESC intermediate: consume through the final byte.
+            self.state = State::EscIntermediate;
         } else if b == b'7' {
             self.saved_cursor = (self.cx, self.cy);
             self.state = State::Ground;
@@ -510,13 +527,24 @@ impl Terminal {
                 let n = params.first().copied().unwrap_or(1).max(1) as usize;
                 self.cx = self.cx.saturating_sub(n);
             }
-            b'J' => {
-                if params.first().copied().unwrap_or(0) == 2 {
+            b'J' => match params.first().copied().unwrap_or(0) {
+                2 => {
                     self.grid = vec![vec![Cell::blank(); self.cols]; self.rows];
                     self.cx = 0;
                     self.cy = 0;
                 }
-            }
+                // Cursor to end of screen. Found by the vttest corpus: only
+                // ED 2 was handled, so `clear` from mid-screen was a no-op
+                // and left stale text behind.
+                0 => {
+                    let from = self.cx.min(self.cols);
+                    self.grid[self.cy][from..].fill(Cell::blank());
+                    for y in (self.cy + 1)..self.rows {
+                        self.grid[y].fill(Cell::blank());
+                    }
+                }
+                _ => {}
+            },
             b'K' => {
                 let row = &mut self.grid[self.cy];
                 match params.first().copied().unwrap_or(0) {
@@ -525,7 +553,51 @@ impl Terminal {
                     _ => row[self.cx.min(self.cols)..].fill(Cell::blank()),
                 }
             }
+            // IL/DL: found by the vttest corpus. Absent before, so a
+            // full-screen editor's line insert/delete silently corrupted the
+            // display. Both leave the cursor where it is (VT100 only moves
+            // lines within the region).
+            b'L' => {
+                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                self.edit_lines(self.cy, n, true);
+            }
+            b'M' => {
+                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                self.edit_lines(self.cy, n, false);
+            }
             _ => {}
+        }
+    }
+
+    /// Insert (`insert = true`) or delete (`false`) `n` lines at row `y`,
+    /// bounded by the scroll region.
+    ///
+    /// Insert pushes the lines below *down* by `n` and opens blanks at `y`;
+    /// delete pulls them *up* by `n` and closes blanks at the far edge. In
+    /// both cases lines pushed past the region are dropped, never into
+    /// scrollback: this edits in place, unlike a real scroll.
+    fn edit_lines(&mut self, y: usize, n: usize, insert: bool) {
+        let (top, bottom) = (self.scroll_top, self.scroll_bottom);
+        if y < top || y > bottom {
+            return;
+        }
+        let n = n.min(bottom - y + 1);
+        if insert {
+            for row in ((y + n)..=bottom).rev() {
+                let from = self.grid[row - n].clone();
+                self.grid[row] = from;
+            }
+            for row in y..(y + n) {
+                self.grid[row].fill(Cell::blank());
+            }
+        } else {
+            for row in y..=(bottom - n) {
+                let from = self.grid[row + n].clone();
+                self.grid[row] = from;
+            }
+            for row in (bottom + 1 - n)..=bottom {
+                self.grid[row].fill(Cell::blank());
+            }
         }
     }
 
