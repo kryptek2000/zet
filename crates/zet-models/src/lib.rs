@@ -6,11 +6,13 @@ pub mod keys;
 pub mod mcp;
 pub mod metered;
 pub mod openai;
+pub mod stream;
 
 pub use keys::KeyError;
 pub use mcp::McpError;
 pub use metered::Metered;
 pub use openai::{is_free_model, list_models};
+pub use stream::{ChatStream, SseAccumulator, SseStep, StreamEvent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -114,6 +116,19 @@ impl ChatModel for Client {
     }
 }
 
+impl ChatStream for Client {
+    fn chat_stream(
+        &self,
+        req: &ChatRequest,
+        on_event: &mut dyn FnMut(StreamEvent),
+    ) -> Result<ChatResponse, ModelError> {
+        match self {
+            Client::OpenAI(c) => c.chat_stream(req, on_event),
+            Client::Go(c) => c.chat_stream(req, on_event),
+        }
+    }
+}
+
 /// Provider configuration. Keys arrive from the OS keychain at runtime
 /// (see `zet auth add`); they are never written to disk by this crate.
 #[derive(Debug, Clone)]
@@ -145,8 +160,10 @@ impl Provider {
     }
 
     /// Build the chat client for this provider. Local endpoints reuse the
-    /// OpenAI-compatible client with an empty key.
-    pub fn into_client(self) -> Box<dyn ChatModel> {
+    /// OpenAI-compatible client with an empty key. The boxed client is a
+    /// `ChatStream`: a provider without verified streaming falls back to
+    /// blocking `chat` (supertrait), so `chat()` keeps working.
+    pub fn into_client(self) -> Box<dyn ChatStream> {
         match self {
             Provider::OpenAICompat {
                 base_url,

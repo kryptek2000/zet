@@ -14,7 +14,7 @@ use std::sync::{Mutex, OnceLock};
 
 use serde_json::{json, Value};
 
-use crate::{ChatModel, ChatRequest, ChatResponse, ModelError, Role};
+use crate::{ChatModel, ChatRequest, ChatResponse, ChatStream, ModelError, Role};
 
 /// The Go gateway base; the opencode: provider pins this.
 pub const GO_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
@@ -393,3 +393,14 @@ impl ChatModel for GoClient {
         self.responses_try(req)
     }
 }
+
+// The gateway serves two protocols (see the module docs) and which one a
+// model uses is only known by asking. Streaming stays on the inherited
+// default — one blocking call, replayed as events — until a live
+// /chat/completions stream (and a /responses one) has actually been
+// observed on the gateway.
+//
+// TODO(zet#7): implement SSE for GoClient once verified live against
+// opencode.ai/zen/go. Do not guess at the wire shape: a wrong guess
+// silently truncates answers, which is worse than a late first token.
+impl ChatStream for GoClient {}
