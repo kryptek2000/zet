@@ -1,5 +1,66 @@
 use zet_term::Event;
 
+/// Ask zsh where its loadable modules live.
+///
+/// zsh does NOT read $ZSH_MODULE_PATH — it uses the `module_path` array,
+/// whose default is compiled in. Querying the running shell is the only
+/// reliable source; reading an env var yields an empty list on a stock
+/// install and silently turns a targeted test into a broad one.
+///
+/// The compiled-in default can also be wrong for a relocated zsh (one
+/// unpacked outside its install prefix reports a path that does not
+/// exist). So the reported path is only used as a HINT: the caller
+/// verifies each candidate actually holds modules and falls back to
+/// searching the zsh binary's own directory.
+fn zsh_module_path() -> Vec<String> {
+    let mut dirs: Vec<String> = Vec::new();
+    if let Ok(out) = std::process::Command::new("zsh")
+        .args(["-d", "-f", "-c", "print -l $module_path"])
+        .output()
+    {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let p = std::path::Path::new(line);
+            if p.join("zsh").is_dir() {
+                dirs.push(line.to_string());
+            }
+        }
+    }
+    // Fallback: a relocated zsh reports a compiled-in path that does not
+    // exist. Look next to the binary instead.
+    if dirs.is_empty() {
+        if let Ok(path) = std::env::var("PATH") {
+            for dir in path.split(':') {
+                let cand = std::path::Path::new(dir).join("zsh");
+                if cand.is_file() {
+                    // <prefix>/bin/zsh -> <prefix>/lib/<arch>/zsh/<ver>
+                    let prefix = cand.parent().and_then(|p| p.parent());
+                    if let Some(prefix) = prefix {
+                        if let Ok(entries) = std::fs::read_dir(prefix.join("lib")) {
+                            for arch in entries.flatten() {
+                                if !arch.path().is_dir() {
+                                    continue;
+                                }
+                                if let Ok(vers) = std::fs::read_dir(arch.path().join("zsh")) {
+                                    for ver in vers.flatten() {
+                                        if ver.path().join("zsh").is_dir() {
+                                            dirs.push(ver.path().to_string_lossy().into_owned());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    dirs
+}
+
 #[test]
 fn prompt_command_cycle_tracks_exit_code() {
     use zet_pty::shell::ShellState;
@@ -212,16 +273,15 @@ fn zsh_hook_reports_exit_code_end_to_end() {
 /// prompt — a permanently noisy shell for anyone whose zsh lacks the
 /// module. The hook caches the load result once and gates the expansion
 /// on it, so the prompt stays silent.
+///
+/// Runs non-interactively so zsh/zle is never needed (no line editor),
+/// and forces module_path to an empty directory so zsh/parameter cannot
+/// load. precmd is invoked explicitly to exercise the expansion path.
 #[test]
 fn zsh_hook_is_quiet_when_parameter_module_is_missing() {
-    use std::time::{Duration, Instant};
-    use zet_pty::Session;
+    use std::process::Command;
 
-    if std::process::Command::new("zsh")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
+    if Command::new("zsh").arg("--version").output().is_err() {
         eprintln!("skipping: zsh not installed");
         return;
     }
@@ -230,65 +290,28 @@ fn zsh_hook_is_quiet_when_parameter_module_is_missing() {
         env!("CARGO_MANIFEST_DIR")
     );
 
-    let zdotdir = std::env::temp_dir().join(format!(
-        "zet-zsh-quiet-{}-{:?}",
+    // Empty module dir: zsh/parameter (and everything else) is unfindable.
+    let empty_mods = std::env::temp_dir().join(format!(
+        "zet-zsh-emptymods-{}-{:?}",
         std::process::id(),
         std::thread::current().id()
     ));
-    std::fs::create_dir_all(&zdotdir).unwrap();
-    // Make zsh/parameter the ONLY unfindable module: build a module dir that
-    // links every module the running zsh can find, minus parameter.so.
-    // Overriding module_path wholesale would also break zsh/zle (the line
-    // editor), which is a different module and would make the test assert
-    // on the wrong error.
-    let real_module_path = std::env::var("ZSH_MODULE_PATH").unwrap_or_default();
-    let module_dir = zdotdir.join("modules");
-    std::fs::create_dir_all(module_dir.join("zsh")).unwrap();
-    for dir in real_module_path.split(':').filter(|d| !d.is_empty()) {
-        let mods = std::path::Path::new(dir).join("zsh");
-        let Ok(entries) = std::fs::read_dir(&mods) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if name == "parameter.so" {
-                continue;
-            }
-            let dest = module_dir.join("zsh").join(&name);
-            let _ = std::fs::copy(entry.path(), dest);
-        }
-    }
-    // Quote the path: the scratch dir name carries the thread id, and
-    // zsh's rc parser treats the parens in "ThreadId(6)" as a glob.
-    let _ = std::fs::write(
-        zdotdir.join(".zshrc"),
-        format!(
-            "module_path=('{}')\n\
-             source {hook}\n",
-            module_dir.display()
-        ),
+    let _ = std::fs::remove_dir_all(&empty_mods);
+    std::fs::create_dir_all(empty_mods.join("zsh")).unwrap();
+
+    // Source the hook, then call precmd directly. Capture stderr.
+    let script = format!(
+        "module_path=('{}')\nsource {}\n__zet_precmd\n",
+        empty_mods.display(),
+        hook
     );
-
-    let zdotdir_arg = format!("ZDOTDIR={}", zdotdir.display());
-    let mut s = Session::spawn("env", &[&zdotdir_arg, "zsh", "-d", "-i"], 80, 24).unwrap();
-    s.write_all(b"true\nexit\n").unwrap();
-
-    let mut out = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        if s.try_exit().unwrap().is_some() {
-            s.wait_with_output(&mut out).unwrap();
-            break;
-        }
-        if Instant::now() > deadline {
-            panic!("zsh did not exit in time");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
-    let text = String::from_utf8_lossy(&out);
+    let out = Command::new("zsh")
+        .args(["-f", "-c", &script])
+        .output()
+        .expect("zsh");
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        !text.contains("failed to load module"),
-        "hook printed a module-load error to the prompt: {text}"
+        !stderr.contains("failed to load module"),
+        "hook printed a module-load error: {stderr}"
     );
 }
