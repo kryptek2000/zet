@@ -4,7 +4,10 @@ on:
   push:
     branches: [master, main]
   pull_request:
-    branches: [master, main]
+    # Any base branch: feature branches stack on each other (e.g. a red-team
+    # branch based on the models branch), and a base-filtered trigger left
+    # those PRs with no checks at all.
+    branches: ["**"]
 
 env:
   CARGO_TERM_COLOR: always
