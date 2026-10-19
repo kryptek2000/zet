@@ -9,6 +9,7 @@ fn block(cmd: &str, output: &str, exit_code: i32) -> Block {
         output: output.to_string(),
         exit_code,
         cwd: "/home/bandit/zet".to_string(),
+        git_branch: String::new(),
         duration_ms: 1,
     }
 }

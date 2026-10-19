@@ -17,6 +17,7 @@ fn seed(cmds: &[(&str, i32)]) -> Store {
                 output: String::new(),
                 exit_code: *exit,
                 cwd: String::new(),
+                git_branch: String::new(),
                 duration_ms: 1,
             })
             .unwrap();
@@ -56,6 +57,7 @@ fn history_is_instant_on_10k_rows() {
                 output: String::new(),
                 exit_code: 0,
                 cwd: String::new(),
+                git_branch: String::new(),
                 duration_ms: 1,
             })
             .unwrap();

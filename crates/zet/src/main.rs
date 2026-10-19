@@ -16,6 +16,7 @@ fn main() {
         ["inline", spec] => inline_set(spec),
         ["models", rest @ ..] => models_cmd(rest),
         ["blocks", rest @ ..] => blocks(rest),
+        ["replay", rest @ ..] => replay(rest),
         ["journal", rest @ ..] => journal(rest),
         ["undo"] => undo(),
         ["run", rest @ ..] => run_cmd(rest),
@@ -46,6 +47,8 @@ fn main() {
             eprintln!("                            (openrouter / opencode-go keys, local server, compat URL)");
             eprintln!("  zet blocks [--db PATH] [--limit N] [--session S]");
             eprintln!("                            list recorded command blocks");
+            eprintln!("  zet replay [--db PATH] <session>");
+            eprintln!("                            print a session's transcript, block by block");
             eprintln!("  zet journal [--limit N]   agent turns + recent commands (one history)");
             eprintln!("  zet undo                  undo the last checkpointed agent step here");
             eprintln!("  zet run <goal...>         run an agent turn here, unattended (never T3)");
@@ -433,14 +436,90 @@ fn blocks(argv: &[&str]) {
         list
     };
     for b in list {
+        // The branch rides along when the recorder knew one; a command
+        // from outside a repo shows no tag at all rather than `[]`.
+        let branch = if b.git_branch.is_empty() {
+            String::new()
+        } else {
+            format!("[{}] ", b.git_branch)
+        };
         println!(
-            "#{} [exit {}] ({}) {}",
-            b.id, b.exit_code, b.session, b.command
+            "#{} [exit {}] ({}) {}{}",
+            b.id, b.exit_code, b.session, branch, b.command
         );
         for line in b.output.lines() {
             println!("  {line}");
         }
     }
+}
+
+/// `zet replay [--db PATH] <session>`: print one session's transcript.
+/// Arg parsing and exits stay at this edge so the transcript itself is
+/// testable in-process.
+fn replay(argv: &[&str]) {
+    let mut db: Option<String> = None;
+    let mut session: Option<String> = None;
+    let mut i = 0;
+    while i < argv.len() {
+        match argv[i] {
+            "--db" => {
+                i += 1;
+                db = match argv.get(i) {
+                    Some(v) => Some(v.to_string()),
+                    None => {
+                        eprintln!("--db needs a value");
+                        std::process::exit(2);
+                    }
+                };
+            }
+            // A flag we don't know is a usage error; anything else is
+            // the session name.
+            other if other.starts_with('-') => {
+                eprintln!("unknown replay flag {other:?}");
+                std::process::exit(2);
+            }
+            other => {
+                if session.is_some() {
+                    eprintln!("replay takes one session, got two: {session:?} and {other:?}");
+                    std::process::exit(2);
+                }
+                session = Some(other.to_string());
+            }
+        }
+        i += 1;
+    }
+    let Some(session) = session else {
+        eprintln!("usage: zet replay [--db PATH] <session>");
+        std::process::exit(2);
+    };
+    match replay_cmd(db.as_deref(), &session) {
+        Ok(text) => print!("{text}"),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// The transcript for `session`, byte-identical to what the blocks were
+/// recorded as (`$ cmd`, output, `[exit N, Nms]` per block). An unknown
+/// session is an error: a silent empty transcript reads like "this
+/// session did nothing", which is a different claim and a wrong one.
+fn replay_cmd(db: Option<&str>, session: &str) -> Result<String, String> {
+    let store = match db {
+        Some(path) => {
+            zet_blocks::Store::open(path).map_err(|e| format!("cannot open {path}: {e}"))?
+        }
+        None => zet_blocks::Store::open_default()
+            .map_err(|e| format!("cannot open block store: {e}"))?,
+    };
+    let text = store
+        .replay(session)
+        .map_err(|e| format!("cannot replay session: {e}"))?;
+    if text.is_empty() {
+        return Err(format!("no blocks for session {session:?}"));
+    }
+    Ok(text)
 }
 
 /// One agent turn in this directory, journaled. Shared by foreground
@@ -1142,5 +1221,110 @@ fn journal(argv: &[&str]) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "zet_replay-{tag}-{}-{nanos}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    fn block(
+        session: &str,
+        command: &str,
+        output: &str,
+        exit_code: i32,
+        ms: u64,
+    ) -> zet_blocks::Block {
+        zet_blocks::Block {
+            id: 0,
+            session: session.to_string(),
+            command: command.to_string(),
+            output: output.to_string(),
+            exit_code,
+            cwd: "/tmp".to_string(),
+            git_branch: "main".to_string(),
+            duration_ms: ms,
+        }
+    }
+
+    /// zet#4 acceptance: `zet replay` reproduces the recorded output,
+    /// byte for byte — nonzero exit, timings, and an unterminated last
+    /// line included.
+    #[test]
+    fn replay_reproduces_the_transcript_byte_for_byte() {
+        let path = temp_db("accept");
+        let store = zet_blocks::Store::open(path.to_str().unwrap()).unwrap();
+        store
+            .append(&block("s1", "echo alpha", "alpha\n", 0, 3))
+            .unwrap();
+        store
+            .append(&block("s1", "boom", "kaboom\n", 1, 12))
+            .unwrap();
+        // Unterminated output: the marker must not run into the text.
+        store.append(&block("s1", "printf hi", "hi", 0, 1)).unwrap();
+        drop(store);
+
+        let out = replay_cmd(Some(path.to_str().unwrap()), "s1").unwrap();
+        assert_eq!(
+            out,
+            "$ echo alpha\nalpha\n[exit 0, 3ms]\n\
+             $ boom\nkaboom\n[exit 1, 12ms]\n\
+             $ printf hi\nhi\n[exit 0, 1ms]\n"
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn replay_of_an_unknown_session_fails_loudly() {
+        let path = temp_db("unknown");
+        let store = zet_blocks::Store::open(path.to_str().unwrap()).unwrap();
+        store
+            .append(&block("s1", "echo alpha", "alpha\n", 0, 3))
+            .unwrap();
+        drop(store);
+
+        let err = replay_cmd(Some(path.to_str().unwrap()), "nope").unwrap_err();
+        assert!(err.contains("no blocks for session"), "{err}");
+        assert!(err.contains("nope"), "{err}");
+        // A session that exists but holds nothing reads the same way:
+        // silence would claim the session did nothing.
+        let empty = zet_blocks::Store::open_in_memory().unwrap();
+        assert!(empty.replay("s1").unwrap().is_empty());
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn replay_reports_a_store_it_cannot_open() {
+        let err = replay_cmd(Some("/nonexistent/blocks.sqlite"), "s1").unwrap_err();
+        assert!(err.starts_with("cannot open"), "{err}");
+    }
+
+    /// The transcript is the recorded bytes: the branch is metadata, and
+    /// showing it in the replay would change the format under replay.
+    #[test]
+    fn the_branch_never_leaks_into_the_transcript() {
+        let path = temp_db("branchless");
+        let store = zet_blocks::Store::open(path.to_str().unwrap()).unwrap();
+        store
+            .append(&block("s1", "echo alpha", "alpha\n", 0, 3))
+            .unwrap();
+        drop(store);
+        let out = replay_cmd(Some(path.to_str().unwrap()), "s1").unwrap();
+        assert!(!out.contains("main"), "{out}");
+        assert!(!out.contains('[') || out.contains("[exit"), "{out}");
+        std::fs::remove_file(&path).unwrap();
     }
 }

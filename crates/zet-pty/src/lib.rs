@@ -493,6 +493,7 @@ fn first_word_at(line: &str) -> Option<(String, usize)> {
 pub const CLI_SUBCOMMANDS: &[&str] = &[
     "auth",
     "blocks",
+    "replay",
     "journal",
     "inline",
     "models",
