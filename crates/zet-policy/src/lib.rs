@@ -246,12 +246,26 @@ fn expands_secret_var(cmd: &str) -> bool {
                 .unwrap_or(rest.len());
             &rest[..end]
         };
-        if !name.is_empty()
+        // The marker must be a WHOLE underscore-delimited word in the
+        // name. A substring match made every ordinary uppercase
+        // variable that happens to CONTAIN a marker a secret:
+        // $MONKEY, $KEYBOARD, $SECRETARY, $KEY. A plain `echo` of those
+        // became type-to-confirm, which is the gate asking about
+        // nothing.
+        // The marker must be a whole underscore-delimited word in the
+        // name, AND the name must have a PREFIX: real secrets are
+        // namespaced (GITHUB_TOKEN, AWS_SECRET_ACCESS_KEY, DB_PASSWORD).
+        // A bare $KEY, $TOKEN or $SECRET is far too generic to gate on --
+        // asking to confirm `echo $KEY` is the gate crying wolf.
+        let is_secret_name = !name.is_empty()
             && name
                 .chars()
                 .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-            && MARKERS.iter().any(|m| name.contains(m))
-        {
+            && {
+                let words: Vec<&str> = name.split('_').filter(|w| !w.is_empty()).collect();
+                words.len() > 1 && words.iter().any(|word| MARKERS.contains(word))
+            };
+        if is_secret_name {
             return true;
         }
         i += 1;
@@ -350,19 +364,98 @@ fn norm_first(core: &str) -> &str {
 /// The gate has to compare the word the shell would run.
 fn exec_word(tok: &str) -> String {
     let mut out = String::with_capacity(tok.len());
-    let mut chars = tok.chars();
+    let mut chars = tok.chars().peekable();
+    // Quote state. Inside SINGLE quotes a backslash is literal, so
+    // `echo 'su\do'` is the literal text `su\do` -- the shell does not
+    // run sudo, and the gate must not claim it does. Inside double
+    // quotes a backslash still escapes.
+    let mut in_single = false;
+    let mut in_double = false;
     while let Some(c) = chars.next() {
         match c {
             // A backslash escapes the next character; the backslash goes.
-            '\\' => {
-                if let Some(next) = chars.next() {
+            // A backslash before a NEWLINE is a line continuation: both
+            // characters vanish, so `s\<NL>udo` is the word `sudo` and
+            // the gate must see it as one.
+            '\\' => match chars.peek() {
+                Some('\n') => {
+                    chars.next();
+                }
+                Some(next) => {
+                    let next = *next;
+                    chars.next();
+                    if in_single {
+                        // Literal backslash inside single quotes.
+                        out.push('\\');
+                    }
                     out.push(next);
                 }
-            }
+                None => {}
+            },
             // Quote characters are removed, their contents kept.
-            '\'' | '"' => {}
+            '\'' if !in_double => {
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+            }
             other => out.push(other),
         }
+    }
+    out
+}
+
+/// Normalize every token of a command, keeping quote state ACROSS
+/// tokens.
+///
+/// A quote can open in one token and close in another, so the state
+/// cannot be reset per token: `git commit -m 'fix s\udo'` has the
+/// backslash inside single quotes, where the shell keeps it literal,
+/// but a per-token pass would treat it as an escape and see `sudo`.
+/// The whole line is walked once, with the quote state carried across
+/// the whitespace.
+fn exec_words(cmd: &str) -> String {
+    let mut out = String::with_capacity(cmd.len());
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut token = String::new();
+    let mut chars = cmd.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !in_double => {
+                in_single = !in_single;
+                token.push(c);
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                token.push(c);
+            }
+            // A backslash-newline is a line CONTINUATION: both vanish, so
+            // `s\<NL>udo` is the single word `sudo`. The newline must
+            // not end the token, and the backslash is dropped later by
+            // exec_word.
+            '\\' => {
+                token.push(c);
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                    token.push('\n');
+                }
+            }
+            // Whitespace inside quotes is part of the word, not a
+            // separator. A newline AFTER a backslash was already
+            // consumed above.
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !token.is_empty() {
+                    out.push_str(&exec_word(&token));
+                    out.push(' ');
+                    token.clear();
+                }
+            }
+            other => token.push(other),
+        }
+    }
+    if !token.is_empty() {
+        out.push_str(&exec_word(&token));
     }
     out
 }
@@ -408,6 +501,15 @@ fn split_chain(cmd: &str) -> Vec<&str> {
         match c {
             '\'' | '"' => quote = Some(c),
             '\\' => escape = true,
+            // A NEWLINE separates commands, exactly like `;`. Without
+            // this arm, `echo hi<NL>rm -rf /` was one segment and
+            // classified T0 -- the mass delete ran with no prompt at
+            // all. A backslash-newline is a line CONTINUATION and is
+            // handled by the escape arm above.
+            '\n' => {
+                parts.push(&cmd[start..i]);
+                start = i + 1;
+            }
             ';' => {
                 parts.push(&cmd[start..i]);
                 start = i + 1;
@@ -669,8 +771,11 @@ pub fn classify(cmd: &str) -> Tier {
     // a plain substring scan misses it. `exec_word` strips quoting and
     // escapes over the whole command, so an escaped name anywhere is
     // caught, while `lower.contains` is kept for the bare spellings.
-    let exec_core = exec_word(core);
-    let exec_lower = exec_core.to_lowercase();
+    // The normalization is applied PER TOKEN, not to the whole command:
+    // a quote opened in one token does not close in the next, and
+    // running the whole line through one pass would let an unterminated
+    // quote swallow the rest of the command.
+    let exec_lower = exec_words(core).to_lowercase();
     if exec_lower.contains("sudo")
         || exec_lower.contains("doas")
         || exec_lower.contains("pkexec")
@@ -693,14 +798,19 @@ pub fn classify(cmd: &str) -> Tier {
     let resolved = strip_wrappers(core);
     let toks: Vec<&str> = resolved.split_whitespace().collect();
     if first_exec == "rm" {
+        // Flags are read from the NORMALIZED token, not the raw one: a
+        // backslash-escaped flag (`rm \-rf /`) is the same `-rf` to the
+        // shell, but the raw token starts with `\` and never matched the
+        // recursive test — so a mass delete ran at auto-approve.
+        let toks: Vec<String> = toks.iter().map(|t| exec_word(t)).collect();
         let recursive = toks.iter().skip(1).any(|t| {
-            *t == "--recursive"
+            t == "--recursive"
                 || (t.starts_with('-')
                     && !t.starts_with("--")
                     && t[1..].chars().any(|c| c == 'r' || c == 'R'))
         });
         if recursive {
-            let targets: Vec<&&str> = toks
+            let targets: Vec<&String> = toks
                 .iter()
                 .skip(1)
                 .filter(|t| !t.starts_with('-'))
@@ -753,26 +863,30 @@ pub fn classify(cmd: &str) -> Tier {
     if piped_shell {
         return Tier::T2;
     }
-    // Every OTHER pipe segment is tiered too, and the worst tier wins.
+    // Every OTHER pipe segment is tiered too, and the WORST tier wins.
     // Only the head used to be judged, so `echo x | xargs rm -rf /` fell
     // to T0 — a mass delete behind a pipe, with no prompt at all. A pipe
     // does not launder the command at its tail: the tail still runs.
     // Termination: each segment holds no top-level `|`, so classify on
     // a segment cannot recurse into another pipe.
+    //
+    // The maximum is taken over ALL segments, not the first non-T0 one.
+    // Returning early on a T1 segment let a later critical tail slip
+    // through: `echo x | tee out | rm -rf /` returned T1 because `tee`
+    // came first, and the mass delete ran at auto-approve.
+    let mut pipe_tier = Tier::T0;
     for seg in split_pipe(core).iter().skip(1) {
         let seg = seg.trim();
         if seg.is_empty() {
             continue;
         }
         let t = classify(seg);
-        if t > Tier::T1 {
-            return t;
+        if t > pipe_tier {
+            pipe_tier = t;
         }
-        // A T1 tail (a write: `tee out`, `sed -i`) makes the whole pipe
-        // a write too.
-        if t == Tier::T1 {
-            return Tier::T1;
-        }
+    }
+    if pipe_tier > Tier::T0 {
+        return pipe_tier;
     }
     if first_exec == "find" {
         let args: Vec<&str> = core.split_whitespace().skip(1).collect();

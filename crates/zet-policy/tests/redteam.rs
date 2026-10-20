@@ -408,3 +408,67 @@ fn secret_variable_expansion_is_t3() {
     assert_eq!(classify("echo $key"), Tier::T0);
     assert_eq!(classify("echo $monkey"), Tier::T0);
 }
+
+#[test]
+fn a_later_critical_tail_beats_an_earlier_write_tail() {
+    // The pipe loop returned the FIRST non-T0 segment, so a write early
+    // in the pipe (`tee out`) masked a critical tail after it: the mass
+    // delete ran at auto-approve. The worst tier must win over ALL
+    // segments.
+    assert_floored(
+        "pipe-tail-order",
+        &[
+            ("echo x | tee out | rm -rf /", Tier::T3),
+            ("echo x | tee out | dd if=/dev/zero of=/dev/sda", Tier::T3),
+            ("echo x | rm -rf / | cat", Tier::T3),
+            ("echo x | tee out | find / -delete", Tier::T3),
+        ],
+    );
+}
+
+#[test]
+fn an_escaped_flag_is_the_same_flag() {
+    // `rm \-rf /` is `rm -rf /` to the shell -- the backslash only
+    // stops the shell from treating the dash as an option, and the
+    // resulting argv still carries `-rf`. The flag scan read the RAW
+    // token, so the recursive test never fired and the delete ran at
+    // auto-approve.
+    assert_floored(
+        "escaped-flags",
+        &[("rm \\-rf /", Tier::T3), ("rm \\-r /", Tier::T3)],
+    );
+}
+
+#[test]
+fn a_newline_separates_commands() {
+    // A newline is a command separator, exactly like `;`. Without it,
+    // `echo hi<NL>rm -rf /` was one segment and classified T0 -- the
+    // mass delete ran with no prompt at all.
+    assert_floored(
+        "newline-chain",
+        &[
+            ("echo hi\nrm -rf /", Tier::T3),
+            ("echo hi\nsudo id", Tier::T3),
+        ],
+    );
+    // A backslash-newline is a line CONTINUATION, not a separator:
+    // `s\<NL>udo` is the single word `sudo`.
+    assert_floored("line-continuation", &[("s\\\nudo id", Tier::T3)]);
+}
+
+#[test]
+fn ordinary_uppercase_variables_are_not_secrets() {
+    // The secret-variable markers are matched as WHOLE words in a
+    // NAMESPACED name. A substring match made every uppercase variable
+    // that merely CONTAINED a marker a secret -- $MONKEY, $KEYBOARD,
+    // $SECRETARY -- and a plain `echo` of those became type-to-confirm.
+    assert_eq!(classify("echo $MONKEY"), Tier::T0);
+    assert_eq!(classify("echo $KEYBOARD"), Tier::T0);
+    assert_eq!(classify("echo $SECRETARY"), Tier::T0);
+    assert_eq!(classify("echo $KEY"), Tier::T0);
+    assert_eq!(classify("echo $TOKEN"), Tier::T0);
+    // A backslash inside single quotes is literal to the shell, so the
+    // text is not a command name and must not be treated as one.
+    assert_eq!(classify("echo 'su\\do'"), Tier::T0);
+    assert_eq!(classify("git commit -m 'fix s\\udo'"), Tier::T1);
+}
