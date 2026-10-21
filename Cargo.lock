@@ -4561,6 +4561,7 @@ name = "zet-blocks"
 version = "0.1.0"
 dependencies = [
  "rusqlite",
+ "zet-policy",
  "zet-pty",
  "zet-term",
 ]

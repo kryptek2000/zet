@@ -470,6 +470,16 @@ impl<M: ChatModel, A: Approver> Agent<M, A> {
 
     /// Native write: T1 mutation with the same approval + checkpoint
     /// flow as a shell write. Confined to the workdir like reads.
+    ///
+    /// T1 is the right tier without path-based escalation: `write_file`
+    /// cannot name a path outside the workdir (`tools::resolve`
+    /// canonicalizes and refuses absolute-elsewhere and `../` escapes,
+    /// symlinks included), so `~/.ssh/`, `/etc/` and friends are
+    /// unreachable through this tool — there is no path for a T1 write to
+    /// land somewhere the gate should have asked about. Anything outside
+    /// the workdir goes through `run_shell`, which is tiered by command.
+    /// If that confinement ever loosens, this tier must go with it
+    /// (red-team suite: crates/zet-agent/tests/redteam.rs).
     fn step_write(&mut self, call: &zet_models::ToolCall) -> (String, String) {
         let tier = Tier::T1;
         let args: serde_json::Value = match serde_json::from_str(&call.arguments) {
