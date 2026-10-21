@@ -1,7 +1,10 @@
-// Tiered command policy: classify shell commands T0-T3, map tiers to
-// approval decisions. Pure function of (command, in_repo) — no IO, so the
-// red-team suite can pin every attack to a tier.
+//! Tiered command policy: classify shell commands T0-T3, map tiers to
+//! approval decisions. Pure function of (command, in_repo) — no IO, so the
+//! red-team suite can pin every attack to a tier.
 
+/// Safety tier of a shell command, from safest to most dangerous
+/// (spec §6.4). Ordering is meaningful: a chained command takes the
+/// highest tier among its segments, so `T3` always wins.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -16,13 +19,24 @@ pub enum Tier {
     T3,
 }
 
+/// What the policy demands before a command may run. `Auto` runs
+/// immediately, `Ask` shows the exact command and waits for consent,
+/// `ConfirmType` requires the user to retype the command to prove intent
+/// (spec §6.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Approval {
+    /// Run without prompting: read-only, or a low-write action inside a repo.
     Auto,
+    /// Prompt with the exact command and the diff before running.
     Ask,
+    /// Prompt and require the command to be typed back verbatim.
     ConfirmType,
 }
 
+/// Map a tier to the approval it demands. `in_repo` relaxes T1 only:
+/// a low-write command auto-runs inside a repo and asks outside it.
+/// T0 is always auto; T3 always requires type-to-confirm and is never
+/// auto-passed, whatever the context.
 pub fn decide(tier: Tier, in_repo: bool) -> Approval {
     match tier {
         Tier::T0 => Approval::Auto,
@@ -700,6 +714,14 @@ fn is_mass_target(t: &str) -> bool {
     )
 }
 
+/// Classify a shell command into its safety tier (spec §6.4).
+///
+/// Pure and IO-free: the tier depends only on the command text. Chains
+/// (`;`, `&&`, `||`) take the worst tier of their segments, and the
+/// command is analyzed past env assignments and transparent wrappers
+/// (`VAR=1 timeout 10 su …` is seen as `su`). Classification fails
+/// closed: anything unrecognized is T1 (ask), and privilege escalation,
+/// mass deletion, secret access, and `prod` contexts are T3.
 pub fn classify(cmd: &str) -> Tier {
     // Chains take the worst tier. Recursion terminates: segments hold no
     // top-level separators by construction.
