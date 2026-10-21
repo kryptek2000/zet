@@ -4534,15 +4534,21 @@ dependencies = [
 name = "zet"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "nix",
  "notify-rust",
+ "pollster",
  "serde_json",
+ "winit",
  "zet-agent",
  "zet-blocks",
  "zet-context",
+ "zet-gpu",
  "zet-models",
  "zet-policy",
  "zet-pty",
+ "zet-suggest",
+ "zet-term",
 ]
 
 [[package]]
@@ -4582,20 +4588,12 @@ version = "0.1.0"
 name = "zet-gpu"
 version = "0.1.0"
 dependencies = [
- "arboard",
  "bytemuck",
  "cosmic-text",
- "notify-rust",
  "pollster",
  "wgpu",
  "winit",
- "zet-agent",
- "zet-blocks",
- "zet-context",
- "zet-models",
- "zet-policy",
  "zet-pty",
- "zet-suggest",
  "zet-term",
 ]
 

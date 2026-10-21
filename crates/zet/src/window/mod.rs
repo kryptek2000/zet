@@ -1,6 +1,9 @@
-// Live shell: real PTY + grid + GPU, keyboard in, pixels out.
-// Usage: cargo run -p zet-gpu --example shell
-// This is the human smoke test (launcher points here).
+//! The terminal window: real PTY + grid + GPU, keyboard in, pixels out.
+//!
+//! This is the product. It lives in the `zet` binary crate (the
+//! composition root) so `zet-gpu` stays a pure renderer with no edge
+//! to the agent/model stack. `run(goal)` opens the window; `Some(goal)`
+//! starts that agent turn once the shell reaches its first prompt.
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -192,6 +195,10 @@ struct App {
     perf_frames: u64,
     cmd_t0: Option<std::time::Instant>,
     perf_blocks: usize,
+    /// A turn handed to us on the command line (`zet "fix the test"`).
+    /// It waits for the shell's first prompt, then starts that turn.
+    /// `None` (the plain `zet` case) changes nothing.
+    pending_goal: Option<String>,
 }
 
 /// One approved agent step, serviced by the main loop: typed visibly into
@@ -767,6 +774,22 @@ impl App {
         }
     }
 
+    /// The active tab's shell has reported a prompt, so a goal can run
+    /// in it.
+    ///
+    /// The shell reports the end of a command with OSC 133 `D;<code>`,
+    /// which puts `ShellState` back at `Phase::Prompt` and records the
+    /// exit code. That marker is also proof that the shell-integration
+    /// hook is live — the agent's steps are recorded as blocks only
+    /// from then on, so a goal started earlier would lose them.
+    ///
+    /// The phase alone cannot say this: `ShellState::new()` starts at
+    /// `Phase::Prompt`, before the shell has said anything at all.
+    fn shell_reported_prompt(&self) -> bool {
+        let tab = &self.tabs[self.active];
+        !tab.dead && tab.shell_state.last_exit().is_some()
+    }
+
     /// Title variant carrying the last exit code (post-command).
     fn retitle_with_exit(&self, code: u32) {
         if let Some(w) = &self.window {
@@ -1275,6 +1298,13 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // A goal handed to us on the command line (`zet "fix the test"`)
+        // starts as soon as the shell reports its first prompt.
+        if self.pending_goal.is_some() && self.shell_reported_prompt() {
+            if let Some(goal) = self.pending_goal.take() {
+                self.start_agent(goal, None);
+            }
+        }
         // Requesting unconditionally here would keep a redraw permanently
         // pending and the loop would never sleep — the original spin.
         if self.needs_draw || std::time::Instant::now() >= self.last_frame + FRAME {
@@ -1764,11 +1794,16 @@ impl ApplicationHandler for App {
     }
 }
 
-fn main() {
+/// Open the window and run the event loop until the window closes.
+///
+/// `goal` is the turn to start once the shell is up: `None` opens the
+/// window exactly as before (the human types), `Some(goal)` starts that
+/// agent turn as soon as the active tab reaches its first prompt.
+pub fn run(goal: Option<String>) -> std::io::Result<()> {
     zet_gpu::perf_mark("main");
     let (prog, hook) = shell_program();
     let shell_name = prog.clone();
-    let event_loop = EventLoop::new().unwrap();
+    let event_loop = EventLoop::new().map_err(io_error)?;
     // Wake the loop the moment PTY bytes land: output renders instantly
     // instead of waiting for the heartbeat.
     let proxy = event_loop.create_proxy();
@@ -1809,6 +1844,13 @@ fn main() {
         perf_frames: 0,
         cmd_t0: None,
         perf_blocks: 0,
+        pending_goal: goal,
     };
-    event_loop.run_app(&mut app).unwrap();
+    event_loop.run_app(&mut app).map_err(io_error)
+}
+
+/// winit errors are plain IO failures for us: the window could not be
+/// opened, or the event loop failed.
+fn io_error(e: winit::error::EventLoopError) -> std::io::Error {
+    std::io::Error::other(e)
 }

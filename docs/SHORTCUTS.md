@@ -1,7 +1,7 @@
 # ZET shortcuts & local setup
 
-Everything below describes the built window (`cargo run -p zet-gpu
---example shell`, the desktop launcher target). No account, no login.
+Everything below describes the built window (`cargo run -p zet`, the
+desktop launcher target). No account, no login.
 
 ## Typing & completion
 

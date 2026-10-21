@@ -6,6 +6,28 @@ const PROVIDERS: &[&str] = &["openai", "openrouter", "compat", "opencode"];
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let env = zet::mode::Env::detect();
+    match zet::mode::plan(&args, &env) {
+        zet::mode::Mode::Window { goal } => match zet::window::run(goal) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("zet: {e}");
+                std::process::exit(1);
+            }
+        },
+        zet::mode::Mode::Cli => cli_dispatch(&args),
+        // A window was asked for but this box cannot open one (no
+        // display, or ZET_NO_WINDOW): say so plainly, then the usage.
+        zet::mode::Mode::Usage => {
+            if zet::mode::window_refused(&args, &env) {
+                eprintln!("zet: no display; run a subcommand (zet auth|blocks|run|...)");
+            }
+            cli_dispatch(&args);
+        }
+    }
+}
+
+fn cli_dispatch(args: &[String]) {
     let argv: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     match argv.as_slice() {
         ["auth", "show"] => auth_show(),
