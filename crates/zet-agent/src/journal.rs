@@ -3,9 +3,19 @@ use std::path::{Path, PathBuf};
 
 use crate::JournalEntry;
 
+/// The journal file: `<state root>/journal.jsonl`. The state root is
+/// `$ZET_HOME` → `$HOME/.zet` → `/tmp/.zet` — the same resolution
+/// `zet_blocks::zet_home()` does, repeated here so this crate's
+/// dependency list stays as it is.
 pub fn journal_path_default() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    Path::new(&home).join(".zet").join("journal.jsonl")
+    let root = match std::env::var("ZET_HOME").ok().filter(|s| !s.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => match std::env::var("HOME").ok().filter(|s| !s.is_empty()) {
+            Some(home) => Path::new(&home).join(".zet"),
+            None => PathBuf::from("/tmp/.zet"),
+        },
+    };
+    root.join("journal.jsonl")
 }
 
 pub fn append_journal(path: &Path, entries: &[JournalEntry]) -> std::io::Result<()> {

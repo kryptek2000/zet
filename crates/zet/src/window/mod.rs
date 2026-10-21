@@ -41,6 +41,22 @@ fn shell_program() -> (String, Option<String>) {
     (prog, hook)
 }
 
+/// The lines typed into a fresh shell, in order: the session id the
+/// shell exports, then the shell integration hook.
+///
+/// The session id travels by environment variable: the shell exports
+/// it, so every child — `zet blocks`, `zet replay`, `zet journal` —
+/// names this session without anyone having to pass it on the command
+/// line. Typed into the PTY like the hook line below, so no zet-pty
+/// change is needed.
+fn setup_lines(session_id: &str, hook: Option<&str>) -> String {
+    let mut out = format!("export ZET_SESSION={session_id}\n");
+    if let Some(hook) = hook {
+        out.push_str(&format!("source {hook}\nclear\n"));
+    }
+    out
+}
+
 /// One terminal tab: everything bound to a single shell session.
 /// The window holds a Vec<Tab> + active index; shared chrome
 /// (renderer, key/mouse state, model specs, perf) stays on App.
@@ -89,9 +105,16 @@ impl Tab {
         let mut session =
             Session::spawn("env", &["TERM=xterm-256color", prog, "-i"], 80, 24).unwrap();
         zet_gpu::perf_mark("shell_spawn");
-        if let Some(hook) = hook {
-            let _ = session.write_all(format!("source {hook}\nclear\n").as_bytes());
-        }
+        let session_id = format!(
+            "{}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            std::process::id()
+        );
+        let setup = setup_lines(&session_id, hook.as_deref());
+        let _ = session.write_all(setup.as_bytes());
         let reader = session.clone_reader().unwrap();
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         std::thread::spawn(move || {
@@ -111,14 +134,6 @@ impl Tab {
                 }
             }
         });
-        let session_id = format!(
-            "{}-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-            std::process::id()
-        );
         let recorder = zet_blocks::Store::open_default()
             .map(|store| zet_blocks::Recorder::new(store, &session_id))
             .ok();
@@ -1853,4 +1868,109 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
 /// opened, or the event loop failed.
 fn io_error(e: winit::error::EventLoopError) -> std::io::Error {
     std::io::Error::other(e)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::setup_lines;
+    use std::time::{Duration, Instant};
+
+    use zet_pty::Session;
+
+    /// A shell like the window's: `env TERM=… <shell> -i`.
+    fn spawn_shell() -> Session {
+        Session::spawn(
+            "env",
+            &["TERM=xterm-256color", "bash", "--norc", "-i"],
+            80,
+            24,
+        )
+        .unwrap()
+    }
+
+    /// Run the shell to completion and return everything it wrote.
+    fn drain_to_exit(s: &mut Session) -> String {
+        let mut out = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if s.try_exit().unwrap().is_some() {
+                s.wait_with_output(&mut out).unwrap();
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!("bash did not exit in time");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        String::from_utf8_lossy(&out).to_string()
+    }
+
+    /// Type `setup` into a fresh shell, ask it for `ZET_SESSION`, and
+    /// return what it says.
+    ///
+    /// The value is printed inside brackets (`GOT=[…]`) so the answer
+    /// cannot be confused with the shell's echo of the command line it
+    /// was asked to run — the echo carries the literal `$ZET_SESSION`,
+    /// and is filtered out by looking only at lines whose bracket holds
+    /// no `$`.
+    fn session_id_seen_by_shell(setup: &str) -> String {
+        let mut s = spawn_shell();
+        s.write_all(setup.as_bytes()).unwrap();
+        s.write_all(b"printf 'GOT=[%s]\\n' \"$ZET_SESSION\"\nexit\n")
+            .unwrap();
+
+        let text = drain_to_exit(&mut s);
+        text.lines()
+            .filter_map(|l| {
+                let start = l.find("GOT=[")? + "GOT=[".len();
+                let rest = &l[start..];
+                let end = rest.find(']')?;
+                Some(rest[..end].to_string())
+            })
+            // The shell's own echo of the command: `$ZET_SESSION` unexpanded.
+            .rfind(|v| !v.contains('$'))
+            .unwrap_or_else(|| panic!("no session id echoed by the shell: {text}"))
+    }
+
+    /// The window's own setup bytes, typed into a real shell: the
+    /// exported session id comes back, unchanged. This is the whole
+    /// contract of `ZET_SESSION` — if the export line were malformed,
+    /// every `zet blocks` inside the window would read the wrong
+    /// session.
+    #[test]
+    fn the_exported_session_id_reaches_the_shell() {
+        let setup = setup_lines("1712345678-4242", None);
+        assert_eq!(session_id_seen_by_shell(&setup), "1712345678-4242");
+    }
+
+    /// With the hook in the setup (as the window really does it), the
+    /// session id still survives: the hook line does not reset the
+    /// environment.
+    #[test]
+    fn the_session_id_survives_the_hook_line() {
+        let hook = format!(
+            "{}/../../shell/zet-integration.bash",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let setup = setup_lines("1712345678-4242", Some(&hook));
+        assert_eq!(session_id_seen_by_shell(&setup), "1712345678-4242");
+    }
+
+    /// The export is what makes it inherited: a child process sees the
+    /// session id too, which is how `zet blocks` inside the shell finds
+    /// the session.
+    #[test]
+    fn a_child_process_inherits_the_session_id() {
+        let mut s = spawn_shell();
+        s.write_all(setup_lines("1712345678-4242", None).as_bytes())
+            .unwrap();
+        s.write_all(b"sh -c 'printf CHILD=[%s]\\n \"$ZET_SESSION\"'\nexit\n")
+            .unwrap();
+
+        let text = drain_to_exit(&mut s);
+        assert!(
+            text.contains("CHILD=[1712345678-4242]"),
+            "child did not inherit the session id: {text}"
+        );
+    }
 }

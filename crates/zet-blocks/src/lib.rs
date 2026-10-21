@@ -4,6 +4,26 @@ pub mod recorder;
 
 pub use recorder::{git_branch, Recorder};
 
+/// The one state root: `$ZET_HOME` when set, else `$HOME/.zet`, else
+/// `/tmp/.zet`. Every zet file — blocks, journal, usage log, recipes,
+/// schedules, runs — lives under it, so `ZET_HOME` relocates the whole
+/// state of a machine in one move.
+///
+/// This crate owns the resolution. Crates that cannot depend on it
+/// (zet-models) repeat the same three steps locally; zet-agent reaches
+/// this crate transitively through zet-context and could take a direct
+/// edge, but repeats the steps too so the resolution stays in one
+/// readable place per crate.
+pub fn zet_home() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var("ZET_HOME").ok().filter(|s| !s.is_empty()) {
+        return std::path::PathBuf::from(dir);
+    }
+    if let Some(home) = std::env::var("HOME").ok().filter(|s| !s.is_empty()) {
+        return std::path::Path::new(&home).join(".zet");
+    }
+    std::path::PathBuf::from("/tmp/.zet")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     pub id: i64,
@@ -161,15 +181,14 @@ impl Store {
         rows.next().transpose()
     }
 
-    /// `~/.zet/blocks.sqlite`, creating `~/.zet` when missing.
+    /// `<state root>/blocks.sqlite`, creating the root when missing.
     pub fn open_default() -> std::io::Result<Self> {
-        let home = std::env::var("HOME").map_err(std::io::Error::other)?;
-        let dir = std::path::Path::new(&home).join(".zet");
+        let dir = zet_home();
         std::fs::create_dir_all(&dir)?;
         Self::open(
             dir.join("blocks.sqlite")
                 .to_str()
-                .ok_or_else(|| std::io::Error::other("non-UTF8 HOME"))?,
+                .ok_or_else(|| std::io::Error::other("non-UTF8 state root"))?,
         )
         .map_err(std::io::Error::other)
     }

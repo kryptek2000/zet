@@ -69,8 +69,10 @@ fn cli_dispatch(args: &[String]) {
             eprintln!("                            (openrouter / opencode-go keys, local server, compat URL)");
             eprintln!("  zet blocks [--db PATH] [--limit N] [--session S]");
             eprintln!("                            list recorded command blocks");
+            eprintln!("                            (--session defaults to $ZET_SESSION)");
             eprintln!("  zet replay [--db PATH] <session>");
             eprintln!("                            print a session's transcript, block by block");
+            eprintln!("                            (session defaults to $ZET_SESSION)");
             eprintln!("  zet journal [--limit N]   agent turns + recent commands (one history)");
             eprintln!("  zet undo                  undo the last checkpointed agent step here");
             eprintln!("  zet run <goal...>         run an agent turn here, unattended (never T3)");
@@ -385,6 +387,14 @@ fn keychains<T>(f: impl FnOnce(&[&dyn Keychain]) -> T) -> T {
     f(&chains)
 }
 
+/// The session the window exported into this shell (`ZET_SESSION`).
+/// None when the variable is unset or empty: a command run outside a
+/// zet window names no session, and guessing one would filter the
+/// block list down to nothing.
+fn env_session() -> Option<String> {
+    std::env::var("ZET_SESSION").ok().filter(|s| !s.is_empty())
+}
+
 fn blocks(argv: &[&str]) {
     let mut db: Option<String> = None;
     let mut limit: usize = 20;
@@ -442,6 +452,10 @@ fn blocks(argv: &[&str]) {
             std::process::exit(1);
         }),
     };
+    // No --session: fall back to the session this shell inherited from
+    // the window. Inside a zet window that is "my blocks"; outside one
+    // the variable is unset and the list spans every session.
+    let session = session.or_else(env_session);
     let list = match &session {
         Some(s) => store.list(s).unwrap_or_else(|e| {
             eprintln!("cannot list blocks: {e}");
@@ -510,6 +524,10 @@ fn replay(argv: &[&str]) {
         }
         i += 1;
     }
+    // No session given: the window's session id, when this shell was
+    // started under one. Without it there is nothing to replay and the
+    // usage stands.
+    let session = session.or_else(env_session);
     let Some(session) = session else {
         eprintln!("usage: zet replay [--db PATH] <session>");
         std::process::exit(2);
@@ -668,8 +686,7 @@ fn render_recipe(name: &str, extra: &str, args: &[(String, String)]) -> String {
         eprintln!("bad recipe name {name:?}: plain names only");
         std::process::exit(1);
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let dir = std::path::Path::new(&home).join(".zet").join("recipes");
+    let dir = zet_blocks::zet_home().join("recipes");
     let path = dir.join(format!("{name}.md"));
     let body = match std::fs::read_to_string(&path) {
         Ok(b) => b,
@@ -763,10 +780,7 @@ fn parse_duration(text: &str) -> Option<u64> {
 /// Schedules file: one JSON object per line (no locking — single
 /// writer per command invocation; the daemon rewrites whole).
 fn schedules_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    std::path::Path::new(&home)
-        .join(".zet")
-        .join("schedules.jsonl")
+    zet_blocks::zet_home().join("schedules.jsonl")
 }
 
 fn now_secs() -> u64 {
@@ -973,8 +987,7 @@ fn daemon_tick() {
 }
 /// Runs directory: one subdir per delegated turn (goal, log, status).
 fn runs_dir() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    std::path::Path::new(&home).join(".zet").join("runs")
+    zet_blocks::zet_home().join("runs")
 }
 
 /// Detach a worker for the goal; print the run id and exit now. The

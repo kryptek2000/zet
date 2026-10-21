@@ -17,10 +17,19 @@ pub struct Metered<M: ChatModel> {
     log: PathBuf,
 }
 
-/// Default log location: same ~/.zet state dir as blocks/journal.
+/// Default log location: `<state root>/usage.jsonl` — the same state
+/// root as blocks and journal (`$ZET_HOME` → `$HOME/.zet` →
+/// `/tmp/.zet`). This crate cannot depend on zet-blocks, so the
+/// resolution is repeated here.
 pub fn default_log() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    std::path::Path::new(&home).join(".zet").join("usage.jsonl")
+    let root = match std::env::var("ZET_HOME").ok().filter(|s| !s.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => match std::env::var("HOME").ok().filter(|s| !s.is_empty()) {
+            Some(home) => std::path::Path::new(&home).join(".zet"),
+            None => PathBuf::from("/tmp/.zet"),
+        },
+    };
+    root.join("usage.jsonl")
 }
 
 impl<M: ChatModel> Metered<M> {

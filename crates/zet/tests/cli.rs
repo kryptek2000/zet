@@ -198,6 +198,86 @@ fn replay_bad_usage_fails_loudly() {
     }
 }
 
+/// The window exports its session id into the shell it spawns, so a
+/// command run inside that shell names the session without being told
+/// to: `zet blocks` lists that session's blocks and `zet replay`
+/// prints its transcript. Without the variable there is no session to
+/// name, and both fall back to their old behavior.
+#[test]
+fn zet_session_env_names_the_session() {
+    let home = temp_home("session_env");
+    let db = home.join(".zet").join("blocks.sqlite");
+    let store = zet_blocks::Store::open(db.to_str().unwrap()).unwrap();
+    store
+        .append(&zet_blocks::Block {
+            id: 0,
+            session: "s9".to_string(),
+            command: "echo nine".to_string(),
+            output: "nine\n".to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 7,
+        })
+        .unwrap();
+    // A second session in the same store: the env filter must not leak it.
+    store
+        .append(&zet_blocks::Block {
+            id: 0,
+            session: "other".to_string(),
+            command: "echo other".to_string(),
+            output: "other\n".to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    drop(store);
+
+    let out = zet()
+        .env("HOME", &home)
+        .env_remove("ZET_HOME")
+        .env("ZET_SESSION", "s9")
+        .args(["blocks"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{:?}", out.status);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("echo nine"), "{text}");
+    assert!(!text.contains("echo other"), "{text}");
+
+    let out = zet()
+        .env("HOME", &home)
+        .env_remove("ZET_HOME")
+        .env("ZET_SESSION", "s9")
+        .args(["replay"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{:?}", out.status);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "$ echo nine\nnine\n[exit 0, 7ms]\n"
+    );
+}
+
+/// The negative: no session named anywhere, no session to replay —
+/// the usage stands (exit 2), not an empty transcript.
+#[test]
+fn replay_without_a_session_anywhere_fails_loudly() {
+    let home = temp_home("session_absent");
+    let out = zet()
+        .env("HOME", &home)
+        .env_remove("ZET_HOME")
+        .env_remove("ZET_SESSION")
+        .args(["replay"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("usage: zet replay"), "{err}");
+}
+
 // Live: piped stdin must store exactly the first line (not block to EOF,
 // not swallow following lines). Needs a keychain; CI skips.
 #[test]

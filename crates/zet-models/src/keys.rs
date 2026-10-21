@@ -149,12 +149,21 @@ pub fn autodetect_local() -> Option<String> {
 }
 
 /// Home for the persisted NL/agent model choice (`zet inline <spec>`):
-/// same ~/.zet state dir as the journal. A child shell can never change
-/// its parent window's env, so the window re-reads this file on every
-/// NL/agent request — no restart needed after `zet inline`.
+/// `<state root>/inline_spec` — the same root as the journal and the
+/// block store (`$ZET_HOME` → `$HOME/.zet` → `/tmp/.zet`). This crate
+/// cannot depend on zet-blocks, so the resolution is repeated here.
+/// A child shell can never change its parent window's env, so the window
+/// re-reads this file on every NL/agent request — no restart needed
+/// after `zet inline`.
 pub fn inline_spec_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    std::path::Path::new(&home).join(".zet").join("inline_spec")
+    let root = match std::env::var("ZET_HOME").ok().filter(|s| !s.is_empty()) {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => match std::env::var("HOME").ok().filter(|s| !s.is_empty()) {
+            Some(home) => std::path::Path::new(&home).join(".zet"),
+            None => std::path::PathBuf::from("/tmp/.zet"),
+        },
+    };
+    root.join("inline_spec")
 }
 
 /// First line, trimmed. Blank/missing reads as unset, never empty spec.
