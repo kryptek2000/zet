@@ -1,3 +1,5 @@
+> **PRODUCT DIRECTION UPDATE — 2026-10-22:** The controlling product vision is [ZET Product Charter](ZET-PRODUCT-CHARTER.md), with active execution in [Roadmap](ROADMAP.md). ZET is **The Outcome-Aware Terminal** (provisional descriptive positioning), a native terminal with evidence-linked work and Mission Control. This document preserves valuable Rust/wgpu, policy, compatibility, performance and existing-agent architecture, but its opening competitive positioning, §5 separate mode/pane concepts, “agentic core as the differentiator,” and §13 M0→2.0 agent/cloud-factory roadmap are **historical proposals, not current product authority**. Do not expand ZET into a Hermes/OpenClaw-style agent platform or treat mockup UI as shipped. Preserve actual Ctrl+G binding and existing implemented behavior until a reviewed interaction spec changes them.
+
 # ZET — Product + Architecture Spec
 **Version:** 0.1.0-draft — 2026-10-09
 **Stack:** Rust + GPU (wgpu) | **Edge:** Agentic AI that runs tasks
