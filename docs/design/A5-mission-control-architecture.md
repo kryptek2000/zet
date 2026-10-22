@@ -271,7 +271,7 @@ INSPECTOR_COLS  = 32     // default width of the inspector
 MIN_TERM_COLS   = 40     // the terminal never gets narrower than this
 MIN_TERM_ROWS   = 10     // matches the existing row clamp (mod.rs:1298)
 
-resolve(cols, rows, requested: Layout) -> FrameLayout:
+resolve(cols, rows, requested: Layout, bar_rows: usize) -> FrameLayout:
     1. rail_cols      = if requested.rail    { RAIL_COLS } else { 0 }
     2. inspector_cols = if requested.inspector { INSPECTOR_COLS } else { 0 }
     3. if cols - rail_cols - inspector_cols < MIN_TERM_COLS:
@@ -281,10 +281,22 @@ resolve(cols, rows, requested: Layout) -> FrameLayout:
     4. term.cols = cols - rail_cols - inspector_cols
        term.x    = rail_cols
        inspector.x = rail_cols + term.cols
-       term.y = rows_used_by_top_chrome   (0 or 1, see §4.4)
-       rail.y    = term.y ; inspector.y = term.y
-       all panels share term.rows
+       term.rows = rows - bar_rows
+       term.y    = bar_rows        // the tab-bar row sits ABOVE the viewport
+       rail.y    = bar_rows ; inspector.y = bar_rows
 ```
+
+**The `bar_rows` origin (one rule, applied everywhere).** `bar_rows` is the existing tab-bar row
+(`crates/zet/src/window/mod.rs:832-834`) — 1 when there is more than one tab, else 0. It is
+**outside** the terminal viewport but **inside** the window. Consequences, applied consistently in
+§5.2 and §5.3:
+
+- The terminal viewport's origin is `(rail_cols, bar_rows)`; its height is `rows - bar_rows`.
+- The panels start at the same `y` as the terminal, so all three regions are vertically aligned.
+- **The origin is added exactly once.** Code that draws inside a viewport uses the viewport's
+  origin and never adds `bar_rows` itself; code that converts a window pixel to a viewport cell
+  subtracts the viewport origin once, and `bar_rows` is *not* added again. Double-counting it is
+  the single most likely off-by-one in this plan — §8.1 has a test for it.
 
 **Height is deliberately untouched.** Mission Control steals **columns only**. The terminal's row
 count is exactly what it is today (`rows - bar_rows`). This preserves:
@@ -482,10 +494,16 @@ r.draw_text_row(rail_vp, …);                     // 3. rail content
 r.draw_fill(inspector_vp, INSPECTOR_BG);         // 4.
 r.draw_text_row(inspector_vp, …);                // 5.
 if bar > 0 { r.draw_tabbar(&labels, active, cols); }   // 6. unchanged
-if let Some((cx, cy, g)) = ghost { r.draw_ghost(layout.term, cy + bar, cx, &g); } // 7.
+if let Some((cx, cy, g)) = ghost { r.draw_ghost(layout.term, cy, cx, &g); }      // 7.
 if let Some((hits, cur)) = &search { r.draw_search(&term, hits, *cur, layout.term); } // 8.
 r.render();                                      // 9. ONE draw call
 ```
+
+**Origin discipline (the one rule that keeps this correct).** Every draw inside a viewport uses
+the viewport's origin; **no call site adds `bar_rows` itself**. The current code does
+`r.draw_ghost(cy + bar, …)` because the ghost's row is a *window* row; with a viewport that
+becomes `r.draw_ghost(layout.term, cy, …)` — `cy` is the terminal's own row and the viewport
+supplies the offset. The same applies to `draw_search` and to the mouse mapping in §5.3.
 
 Panels are drawn **after** the terminal and **before** the overlays, so the tab bar, ghost and
 search highlights still sit on top of the terminal region exactly as today.
@@ -533,15 +551,19 @@ Four behavioural edits, all in `crates/zet/src/window/mod.rs`:
        let (cw, ch) = r.cell_px();
        let vp = self.frame_layout().term;
        // Pixel → cell, relative to the terminal viewport, not the window.
+       // The viewport origin already includes the tab-bar row: subtract it
+       // once, and do not add bar_rows again.
        let x = x - vp.x as f64 * cw as f64;      // NEW
-       let y = y - (vp.y + self.bar_rows()) as f64 * ch as f64;
+       let y = y - vp.y as f64 * ch as f64;       // NEW (was: bar_rows * ch)
        if x < 0.0 { return None; }                // NEW: click was in a panel
        Some(pix_to_cell(x, y, cw, ch, vp.cols as usize, vp.rows as usize,
                         self.tabs[self.active].term.visible_base()))
    }
    ```
    `pix_to_cell` itself needs no change — it is already viewport-relative once the origin is
-   subtracted. The `x < 0.0` guard is what stops a rail click from selecting terminal cells.
+   subtracted. The `x < 0.0` guard is what stops a rail click from selecting terminal cells. A
+   click to the *right* of the terminal viewport (in the inspector) is likewise rejected by
+   `pix_to_cell`'s column clamp.
 
 3. **A focus branch in the key handler**, mirroring the existing search-mode branch
    (`:1431-1455`): when `focus != Terminal`, navigation keys are consumed and `translate()` is
@@ -765,6 +787,7 @@ over 10 % on any gate blocks the slice.
 | | `inspector_is_refused_before_the_rail` | narrow window → inspector collapses first, rail kept |
 | | `both_are_refused_below_the_minimum` | `cols < 40` → terminal takes everything, `Degraded::BothRefused` |
 | | `terminal_never_drops_below_the_minimum` | property test over `cols ∈ 20..=500` |
+| | `the_tab_bar_row_is_counted_exactly_once` | with `bar_rows = 1`, the terminal viewport's `y == 1` and its `rows == rows - 1`; with `bar_rows = 0`, `y == 0`. A pixel at the top of the grid maps to grid row 0 in both cases — the double-count guard (§4.1) |
 | | `mode_presets_round_trip` | `LayoutMode::next()` cycles exactly three states |
 | `panels.rs` | `empty_git_branch_renders_as_unknown` | `Block.git_branch == ""` → `Provenance::Unknown`, value `"—"` |
 | | `failed_command_is_inferred_from_the_exit_code` | `exit_code != 0` → `Provenance::Inferred` |
