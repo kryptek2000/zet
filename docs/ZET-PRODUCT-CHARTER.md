@@ -19,7 +19,7 @@ Only **ZET** is the product name. **“The Outcome-Aware Terminal”** is our pr
 ## Non-negotiables
 
 1. **Native app:** Rust + wgpu, no Electron, Chromium, browser or embedded webview requirement. Linux Wayland and X11 are key targets.
-2. **Terminal integrity:** Real shell/PT Y interaction, true scrollback, keyboard protocols, editors and multiplexers remain correct. Mission chrome must not substitute a fake terminal transcript.
+2. **Terminal integrity:** Real shell/PTY interaction, true scrollback, keyboard protocols, editors and multiplexers remain correct. Mission chrome must not substitute a fake terminal transcript.
 3. **Useful without AI:** Users can navigate local commands, results and manually linked missions offline and without login. AI is enhancement, not prerequisite.
 4. **No competing agent platform:** Existing coding CLI agents operate in ZET's real terminal. Optional deep integrations require explicit contracts; a user can keep their preferred agent.
 5. **Honest provenance:** Separate observed events, explicit user linkages, inferred associations, requested work, executed operations, and independently verified outcomes. Unknown stays unknown.
