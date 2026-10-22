@@ -846,7 +846,7 @@ Each slice is a separate PR. Each ends green. Each is independently revertible.
 | **4** | **Mission rail** | `crates/zet/src/window/panels.rs` (new), `crates/zet/src/window/mod.rs` | 2, 3 | The rail renders live sessions + observed commands from real data. `Ctrl+Shift+M` toggles it. Scrollback/session/PTY assertions from §8.2 are green. |
 | **5** | **Inspector + focus model** | `crates/zet/src/window/panels.rs`, `crates/zet/src/window/mod.rs`, `crates/zet-gpu/src/input.rs` | 4 | The inspector renders observed commands + real decisions. **No verification section.** Focus routing: rail/inspector/terminal, `Esc` returns, no key leaks to the PTY. `Ctrl+Shift+I` / `Ctrl+Shift+L` work. |
 | **6** | **Screenshot readback** | `crates/zet-gpu/src/renderer.rs` (env-gated) | 3 | A PNG can be captured from a running window for visual audit. Test-only path. |
-| **7** | **Performance + compatibility pass** | — | 4, 5 | All §7.5 gates re-measured in all three layouts with no regression > 10 %. Compatibility smoke: bash, zsh, `less`, `vim`, `tmux`, `ssh`, CJK, wide output, 100k lines. |
+| **7** | **Performance + compatibility pass** | — | 4, 5 | All §7.5 gates re-measured in all three layouts with no regression > 10 %. Compatibility smoke: bash, zsh, `less`, `vim`, `tmux`, CJK, wide output, 100k lines. (SSH is **not** in the list — it does not exist yet, §2.5.) |
 
 **Ordering rationale:** slices 1–3 change *geometry* only and are individually invisible, so the
 highest-risk change (the viewport/PTY coupling, R1) lands before any chrome exists. The chrome
