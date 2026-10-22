@@ -1,27 +1,48 @@
-# ZET
-A modern, ultra-fast AI-native terminal emulator — Ghostty-class speed, Warp-beating agentic runtime.
+# ZET — The Outcome-Aware Terminal
+
+**A native Linux-first terminal that connects commands, development work, and verified results.**
 
 > Terminal that does the work, not just the commands.
 
-## Docs
-- **Full spec:** [`docs/ZET-DESIGN.md`](docs/ZET-DESIGN.md) — product, agentic core (plan→gate→exec→verify), safety tiers, perf gates, roadmap
-- **Architecture:** [`zet-architecture.html`](zet-architecture.html) — open in a browser (offline, no deps)
-- **Shortcuts:** [`docs/SHORTCUTS.md`](docs/SHORTCUTS.md) — keys, NL/agent modes, undo, local model setup
-- **Workspace:** `Cargo.toml` + `crates/` — `zet-term, zet-pty, zet-gpu, zet-blocks, zet-context, zet-agent, zet-policy, zet-models, zet-mcp, zet-daemon`
+**ZET** is the product name. **“The Outcome-Aware Terminal”** is the proposed descriptive positioning, subject to further naming/trademark clearance—not a claim of exclusive rights.
 
-## Edge (vs Warp / Ghostty / Amazon Q)
-- Real-terminal agent: plans, runs, verifies, rolls back — in your shell, over SSH, headless via `zet run --bg`
-- Tiered approvals (T0 auto → T3 type-to-confirm + sandbox) + checkpoint every mutation + one-key undo
-- Local-first: offline inline <50ms, BYOM/cloud gateway, no login to launch
-- Perf gates: <100ms cold, <3ms input, 120fps, <80MB idle — CI-benched vs Ghostty/Warp
+ZET is a genuine **Rust + wgpu desktop terminal** with an ambitious new layer: **Mission Control**. The goal is to connect real commands, errors, files, changes, human decisions, agent activity, checkpoints, and verification into an inspectable development workstream.
 
-## Quickstart (target CLI)
+## Our defining experience
+
+A failed test is more than red text: ZET should let you follow its original command and output, related files, the subsequent investigation, the exact approved changes, and the evidence that a fix actually worked. Any association must have known provenance; ZET must never invent relationships or falsely report verification.
+
+- **The real terminal remains central.** PTY, shell, SSH, editors, and conventional terminal programs work normally, including without AI.
+- **Mission Control makes the work navigable.** Missions group objectives, commands, real sessions, decisions and outcomes—not just tabs or agent processes.
+- **An optional agent-aware layer.** Existing coding CLIs can run unchanged. ZET must not become another Hermes/OpenClaw or require its own autonomous agent to be useful.
+- **Evidence over claims.** Proposed, executed, and verified are distinct statuses; approvals, diffs, checkpoints, and undo reflect the actual underlying systems.
+- **A beautiful native interface.** Futuristic dark design, collapsible mission rail and contextual inspector, central living workstream; one-click/key focus layout.
+- **Terminal-grade performance and trust.** GPU acceleration, demand-driven frames, strong compatibility, local-first operation, keyboard accessibility and policy gates.
+
+## What ZET is not
+
+No Electron, Chromium shell, webview UI, or browser required for operation. No forced AI login. No generic agent orchestration dashboard. No synthetic metrics represented as live telemetry.
+
+## Current status
+
+**In development.** The native terminal and several infrastructure crates already exist. The flagship Mission Control interface and linked evidence model are **planned**, not shipped; the visual mockup is a **design reference**, not implementation evidence. The Rust test suite and CI must remain green before release.
+
+## Build and verify
+
 ```bash
-zet                                   # open window
-zet "fix failing e2e in ./api"         # open with agent goal
-zet run --bg recipe:triage-ci --arg service=api
-zet undo                              # revert last agent checkpoint
-zet replay <session>                  # replay timeline
+cargo fmt --all -- --check
+cargo check --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
 
-Requires Rust toolchain (not yet installed in this env) — `cargo build` once `rustup` is available.
+## The definitive plan
+
+- [Product Charter / Approved Direction](docs/ZET-PRODUCT-CHARTER.md) — authority, UX, boundaries and naming
+- [Execution Roadmap](docs/ROADMAP.md) — ordered milestones and acceptance criteria
+- [Architecture and performance baseline](docs/ZET-DESIGN.md) — original system design, retained for implementation constraints; superseded where positioning conflicts with charter
+- [Engineering rules](AGENTS.md) — authoritative security/performance/testing gates
+- [UI component design reference](docs/design/A4-ui-component-spec.md) — historical design proposal, to reconcile before implementation
+- [Shortcuts](docs/SHORTCUTS.md) — existing behavior (do not break it to implement mockup shortcuts)
+
+**Decision hierarchy:** product vision and scope: Product Charter → Roadmap. Implementation: code, engineering rules, technical specs. Security, performance and compatibility protections cannot be relaxed by marketing copy.
