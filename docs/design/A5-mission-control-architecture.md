@@ -69,7 +69,7 @@ Honest baseline, per roadmap P0 ("no greenwashing README"). Everything in the *P
 
 | Area | What exists | Evidence |
 |---|---|---|
-| PTY | Real fork/exec PTY, real shell (`$SHELL -i`), resize, shutdown, SSH transport | `crates/zet-pty/src/lib.rs`, `shell.rs`; `crates/zet-pty/tests/{session,stress,shell_state}.rs` |
+| PTY | Real fork/exec PTY, real shell (`$SHELL -i`), resize, shutdown, kill/wait | `crates/zet-pty/src/lib.rs`, `shell.rs`; `crates/zet-pty/tests/{session,stress,shell_state}.rs` |
 | Terminal | VT parser, grid, scrollback, alt screen, bracketed paste, OSC 133/633 markers, search, `reveal_row` | `crates/zet-term/src/lib.rs`; `tests/{terminal,vttest,stress}.rs` |
 | Shell integration | bash + zsh hooks emitting OSC 133 `B`/`C`/`D`/`X`; `ZET_SESSION` exported | `shell/zet-integration.{bash,zsh}`; `crates/zet/src/window/mod.rs:52-58` |
 | Renderer | wgpu surface, glyph atlas (cosmic-text), tinted quads, tab bar, ghost overlay, search highlight, selection, cursor | `crates/zet-gpu/src/renderer.rs` |
@@ -77,7 +77,7 @@ Honest baseline, per roadmap P0 ("no greenwashing README"). Everything in the *P
 | Blocks | SQLite store of real recorded commands (command, output, exit code, cwd, branch, duration), secret scrubbing, completion history | `crates/zet-blocks/src/lib.rs`, `recorder.rs` |
 | Tabs | New/close/cycle, per-tab PTY + grid + recorder, click-to-switch tab bar | `crates/zet/src/window/mod.rs:874-915` |
 | Agent | Planner/executor/verifier, T0–T3 policy, checkpoints, journal, one-key undo (F12) | `crates/zet-agent/src/lib.rs`, `crates/zet-policy/src/lib.rs` |
-| Context | Repo map, git state, shell history, env | `crates/zet-context/src/lib.rs` |
+| Context | Git state (branch, dirty count), block gathering, secret scrubbing | `crates/zet-context/src/lib.rs` (`git_state`, `gather`, `scrub`) |
 | Models | Gateway trait (OpenAI-compat / Anthropic / local), BYOK keychain, metering | `crates/zet-models/src/*` |
 | Perf harness | `ZET_PERF=1` stage marks, first-frame ms, input-latency µs, `cat 100k` settle probe | `crates/zet/src/window/mod.rs:1218-1234`; `crates/zet-gpu/src/lib.rs:perf_mark` |
 | CI | Exactly the four gates (fmt, check, clippy `-D warnings`, test) | `.github/workflows/ci.yml` |
@@ -93,6 +93,10 @@ Honest baseline, per roadmap P0 ("no greenwashing README"). Everything in the *P
 | Agent progress telemetry, mission health, completion % | **Absent and must stay absent.** | Never (§6.4) |
 | Screenshot / framebuffer readback | **Absent** — no `copy_texture_to_buffer` anywhere in the tree. | P2-A slice 6 (needed for the roadmap's screenshot exit criterion) |
 | Keybinding remapping config | **Absent** (`docs/ZET-DESIGN.md:197` promises it) | P6 |
+
+Nine further capabilities are advertised in `AGENTS.md` but do not exist (SSH, the daemon, the repo
+map, Arrow IPC, the lane scheduler, the sandbox, the audit log, CLI panes, damage tracking). They
+are audited individually in **§2.5**.
 
 ### 2.3 Known gaps in the current implementation that P2-A inherits
 
@@ -123,6 +127,40 @@ its *product* proposals are deferred:
 | `ThemeDef`/`Palette`/`Tokens` | **Deferred to P2-B**, but P2-A must not hard-code more colours than today (it reuses the existing `const Rgba` values verbatim). |
 | `Tween`/120 Hz animation | **Deferred.** P2-A has no animation: panel show/hide is an instant layout change. |
 | `BlockView` (grid-anchored block headers) | **Deferred to P3.** P2-A shows recorded blocks in the *inspector*, not as grid overlays. |
+
+### 2.5 `AGENTS.md` workspace layout vs. the tree — eight lines, nine capabilities, do not hold
+
+Roadmap P0 asks for an inventory of "actual implemented native features versus planned designs;
+**no greenwashing README**". `AGENTS.md:5-21` describes the workspace layout. Auditing every line
+of it against the tree, **eight lines describe nine capabilities that are not in the repository**:
+
+| `AGENTS.md` claim | Reality | Evidence |
+|---|---|---|
+| `zet-pty — portable PTY (fork/exec, Win ConPTY), **SSH transport**` | **No SSH code exists.** `grep -rniE "\bssh\b" crates/ --include=*.rs` matches only redaction/policy paths (`~/.ssh` secret handling) — never a transport. | `docs/design/A2-ssh-transport.md` is a *design* document; `crates/zet-pty/src/` has no SSH module. |
+| `zet-daemon — background/delegated runs, notifications, zet status IPC` | **`zet-daemon` is an empty stub**: `crates/zet-daemon/src/lib.rs` is one comment line. | `crates/zet-daemon/src/lib.rs` |
+| `zet-context — repo map, shell history, env, git watcher` | **Only git state, block gathering and scrubbing exist.** No repo map, no shell-history reader, no env reader, no file watcher. | `crates/zet-context/src/lib.rs` (`git_state`, `gather`, `scrub`) |
+| `zet-blocks — block store (SQLite + **Arrow IPC** for scrollback)` | **SQLite only.** No Arrow anywhere in the crate or its `Cargo.toml`. | `crates/zet-blocks/` — `grep -rniE "arrow"` is empty |
+| `zet-agent — planner/executor/verifier, **lane scheduler**, checkpoints` | The agent is **explicitly single-lane**: "Single lane: one shell step per model turn". There is no scheduler. | `crates/zet-agent/src/lib.rs:1,13,372` |
+| `zet-policy — tiers, approvals, **sandbox profiles**, **audit log**` | **Only `Tier`, `Approval`, `decide`, `classify`.** No sandbox (no bubblewrap/Landlock) and no audit log. | `crates/zet-policy/src/lib.rs` |
+| `zet-mcp — MCP client/host, tool registry, **third-party CLI panes**` | The registry/host side **is** real (`crates/zet-mcp/src/lib.rs:1-9` fans out to N stdio servers). **The CLI panes are not.** | `crates/zet-mcp/src/lib.rs` |
+| `zet-gpu — wgpu renderer, glyph atlas, **damage tracking**` | `damage.rs` exists and is pure (`Rect`, `Damage`), but **it is not wired into the render path** — the renderer clears and re-stages every frame. | `crates/zet-gpu/src/damage.rs`; `grep -rn "damage" crates/zet-gpu/src/renderer.rs crates/zet/src/window/mod.rs` → empty |
+
+**Impact on P2-A: none functionally.** The panels are built only from what §6.1 actually lists —
+`zet-context` offers git state and nothing more; there is no audit log to render; there is no
+sandbox state to display.
+
+**Two consequences for the owner.** First, the repository currently advertises SSH, a daemon, a
+repo map, Arrow IPC, a lane scheduler, a sandbox, an audit log, CLI panes and damage tracking as
+if they were shipped. `docs/ZET-DESIGN.md:169` names the SSH story in the present tense too. That
+is precisely the "greenwashing" the charter and roadmap P0 forbid, and it is most visible in
+`AGENTS.md`, which every agent reads first. Second, the **damage-tracking** line matters
+technically: `Damage`/`Rect` are *not* in the render path, so P2-A must not assume an incremental
+frame pipeline. P2-A keeps the existing "clear and re-stage every frame" model — which is also
+why the quad-count budget in §7.3 matters.
+
+**This is a documentation defect, not an implementation defect.** It is flagged for the owner
+rather than fixed here: this PR is scoped to the architecture, and the correction belongs with the
+README rewrite in PR #14.
 
 ---
 
@@ -681,7 +719,7 @@ is read through `Recorder::blocks()` at most once per 250 ms heartbeat, not per 
 | R1 | **Viewport/PTY desync** — PTY width ≠ drawn width | Medium | Critical (broken transcript) | §5.3 change 1 is the keystone; §8.2 asserts `session.cols == term.cols == layout.term.cols` after every layout change |
 | R2 | Live-row truncation on narrowing (no reflow) | **Certain** | Medium | Accept + document (§7.4, Blocker B2). Full output survives in the block store. Reflow is a separate `zet-term` change |
 | R3 | Panel content rebuild per frame (SQLite) | Medium | High (input latency gate) | Dirty-flag cache; no DB on the key path (§7.2) |
-| R4 | Quad-count growth from panel fills | Medium | Medium | Fill only the rows that carry content, not the whole column; cap visible rows per panel |
+| R4 | Quad-count growth from panel fills | Medium | Medium | Fill only the rows that carry content, not the whole column; cap visible rows per panel. Note `Damage`/`Rect` are **not** wired into the render path (§2.5), so every frame re-stages the full quad set — the budget cannot be dodged with partial redraws |
 | R5 | Glyph atlas thrash (256 slots, wholesale reset) | Low–Medium | Medium (raster storm) | Fixed, ASCII-first panel glyph vocabulary; ~20 distinct glyphs max (§7.4) |
 | R6 | Idle CPU regression from the 4 Hz heartbeat now also staging panels | Medium | Low–Medium | Panels are cached; the per-frame cost is quad staging of ~1–2k quads |
 | R7 | Startup regression from new modules | Low | Medium (300 ms gate) | New modules are zero-cost until first use; no new I/O on the init path; `zet-gpu` gets no new device resources |
@@ -814,6 +852,7 @@ packaging. Each is either P2-B, P3, P5, or P6 in the roadmap.
 | **B4** | `Ctrl+Shift+I` (inspector) is bound by some other terminals (iTerm2/kitty families) | Taking a chord from a hosted TUI is a compatibility decision, not an implementation detail | Recommended: `Ctrl+Shift+I` primary, `Ctrl+Shift+E` alternative, both listed in `docs/SHORTCUTS.md`; the `Ctrl+Shift+` namespace is reserved for chrome. Architect confirms |
 | **B5** | No framebuffer readback exists, but the roadmap's P2 exit needs a screenshot comparison | Adding a GPU readback path is a new capability in `zet-gpu` | Proposed as slice 6, env-gated and test-only. Architect confirms it is in P2-A's scope rather than P2-B |
 | **B6** | The charter's "Status / Lightweight" bar is realised inside the rail/inspector rather than as a dedicated row | A dedicated row changes the terminal height and the PTY `SIGWINCH` behaviour, invalidating the perf baselines | Proposed: no new row in P2-A (§4.4); a dedicated status row is a P2-B candidate once tokens exist |
+| **B7** | `AGENTS.md` advertises SSH transport, a `zet-daemon`, a `zet-context` repo map, Arrow IPC, a lane scheduler, a sandbox, an audit log, CLI panes and damage tracking; **none of the nine exists** (§2.5) | The charter forbids shipping claims the product cannot back, and roadmap P0 explicitly demands "no greenwashing README". SSH is also named as shipped in `docs/ZET-DESIGN.md:169` | **Owner action, separate from P2-A:** correct `AGENTS.md:5-21` and the README under PR #14 before release. No code change proposed here. Also note for P2-A: `Damage`/`Rect` are **not** wired into the render path, so no incremental frame pipeline may be assumed |
 
 ---
 
