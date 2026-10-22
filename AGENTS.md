@@ -1,3 +1,5 @@
+> **CURRENT PRODUCT AUTHORITY (2026-10-22):** ZET — **The Outcome-Aware Terminal** (provisional descriptor; ZET is the brand). Read [docs/ZET-PRODUCT-CHARTER.md](docs/ZET-PRODUCT-CHARTER.md) and [docs/ROADMAP.md](docs/ROADMAP.md) **before proposing features or UI changes**. Earlier agent-centric positioning and original roadmap in `docs/ZET-DESIGN.md` are historical where inconsistent. Build an evidence-connected native terminal and Mission Control, **not** another Hermes/OpenClaw or a browser app. Preserve every security, performance, terminal-compatibility, and owner-approval gate below.
+
 # Zet — AI-native terminal emulator
 
 Repo: github.com/kryptek2000/zet (Rust + wgpu). Full spec: `docs/ZET-DESIGN.md`. Architecture diagram: `zet-architecture.html`.
