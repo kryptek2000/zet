@@ -351,12 +351,13 @@ This is the honesty contract. Every cell rendered in the rail or inspector maps 
 
 ```
 ┌ SESSION ────────────┐   header: session id, cwd, git branch (or "—")
-│ FAILED TEST         │   section: observed commands whose exit != 0
+│ FAILED COMMANDS     │   section: observed commands whose exit != 0
 │  1 cargo test  → 1  │     (Inferred selection of Observed rows)
 │  2 rg foo      → 127│
 │ DECISIONS           │   section: real zet_agent::JournalEntry rows
-│  T2 git push  ✓     │     tier, approved, executed, checkpoint present
-│ ─────────────────── │
+│  T2 git push        │     tier, approval state, executed, checkpoint
+│    approved · ran   │     ("approved" is the policy decision, NOT a
+│ ─────────────────── │      verification of anything)
 │ (no verification)    │   ABSENT — not rendered
 └─────────────────────┘
 ```
