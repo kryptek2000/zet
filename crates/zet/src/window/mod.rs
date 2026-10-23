@@ -683,16 +683,24 @@ impl App {
         let (x, y) = self.mouse_px?;
         let r = self.renderer.as_ref()?;
         let (cw, ch) = r.cell_px();
-        // Pixel row 0 belongs to the tab bar when visible: shift the
-        // grid mapping down (bar clicks are intercepted before select).
-        let y = y - self.bar_rows() as f64 * ch as f64;
+        let vp = self.frame_layout().term;
+        // Pixel -> cell relative to the terminal viewport. The viewport
+        // origin already includes the tab-bar row, so subtract it once.
+        let x = x - vp.x as f64 * cw as f64;
+        let y = y - vp.y as f64 * ch as f64;
+        if x < 0.0 || y < 0.0 {
+            return None;
+        }
+        if x >= vp.cols as f64 * cw as f64 || y >= vp.rows as f64 * ch as f64 {
+            return None;
+        }
         Some(pix_to_cell(
             x,
             y,
             cw,
             ch,
-            self.cols,
-            self.rows,
+            vp.cols as usize,
+            vp.rows as usize,
             self.tabs[self.active].term.visible_base(),
         ))
     }
@@ -835,13 +843,23 @@ impl App {
         (self.tabs.len() > 1) as usize
     }
 
+    #[allow(dead_code)]
     fn grid_rows(&self) -> usize {
         self.rows.saturating_sub(self.bar_rows())
     }
+    fn frame_layout(&self) -> layout::FrameLayout {
+        layout::resolve(
+            self.cols as u32,
+            self.rows as u32,
+            layout::LayoutMode::TerminalFocus.layout(),
+            self.bar_rows(),
+        )
+    }
 
-    /// Size every tab's grid + PTY to the current window minus the bar.
+    /// Size every tab's grid + PTY to the terminal viewport.
     fn fit_all(&mut self) {
-        let (cols, rows) = (self.cols, self.grid_rows());
+        let vp = self.frame_layout().term;
+        let (cols, rows) = (vp.cols as usize, vp.rows as usize);
         for tab in &mut self.tabs {
             tab.term.resize(cols, rows);
             if let Some(s) = &tab.session {
@@ -1673,9 +1691,8 @@ impl ApplicationHandler for App {
                     }
                 }
                 // Snapshot draw params before borrowing the renderer:
-                // grid rows, bar offset, labels, selection are Copy/owned.
-                let (grid_rows, bar, cols, active) =
-                    (self.grid_rows(), self.bar_rows(), self.cols, self.active);
+                // bar offset, labels, selection are Copy/owned.
+                let (bar, cols, active) = (self.bar_rows(), self.cols, self.active);
                 let labels = self.tab_labels();
                 let sel = self.tabs[self.active].selection;
                 let ghost = self.tabs[self.active].ghost.visible().map(|g| {
@@ -1691,22 +1708,23 @@ impl ApplicationHandler for App {
                 } else {
                     None
                 };
+                let vp = self.frame_layout().term;
+                let gpu_vp = zet_gpu::renderer::Viewport {
+                    x: vp.x,
+                    y: vp.y,
+                    cols: vp.cols,
+                    rows: vp.rows,
+                };
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
-                    r.draw_terminal(
-                        &self.tabs[self.active].term,
-                        cols,
-                        grid_rows,
-                        sel,
-                        bar as u32,
-                    );
+                    r.draw_terminal_in(&self.tabs[self.active].term, gpu_vp, sel);
                     if bar > 0 {
                         r.draw_tabbar(&labels, active, cols);
                     }
                     if let Some((cx, cy, g)) = ghost {
-                        r.draw_ghost(cy + bar, cx, &g, cols, self.rows);
+                        r.draw_ghost(gpu_vp, cy, cx, &g);
                     }
                     if let Some((hits, cur)) = &search {
-                        r.draw_search(&self.tabs[self.active].term, hits, *cur, bar as u32);
+                        r.draw_search(&self.tabs[self.active].term, hits, *cur, gpu_vp);
                     }
                     r.render();
                     self.last_frame = std::time::Instant::now();
