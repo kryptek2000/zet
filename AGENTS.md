@@ -1,32 +1,35 @@
 > **CURRENT PRODUCT AUTHORITY (2026-10-22):** ZET — **The Outcome-Aware Terminal** (provisional descriptor; ZET is the brand). Read [docs/ZET-PRODUCT-CHARTER.md](docs/ZET-PRODUCT-CHARTER.md) and [docs/ROADMAP.md](docs/ROADMAP.md) **before proposing features or UI changes**. Earlier agent-centric positioning and original roadmap in `docs/ZET-DESIGN.md` are historical where inconsistent. Build an evidence-connected native terminal and Mission Control, **not** another Hermes/OpenClaw or a browser app. Preserve every security, performance, terminal-compatibility, and owner-approval gate below.
 
-# Zet — AI-native terminal emulator
+# ZET — Native terminal engineering guide
 
 Repo: github.com/kryptek2000/zet (Rust + wgpu). Full spec: `docs/ZET-DESIGN.md`. Architecture diagram: `zet-architecture.html`.
 
-## Workspace layout
+## Workspace layout — implemented versus planned
 
-```
-crates/
-  zet          binary + CLI (zet, zet run, zet replay, zet undo, zet audit)
-  zet-term     VT parser, grid, scrollback, shell integration (OSC 133/633)
-  zet-pty      portable PTY (fork/exec, Win ConPTY), SSH transport
-  zet-gpu      wgpu renderer, glyph atlas (cosmic-text/parley), damage tracking
-  zet-blocks   block store (SQLite + Arrow IPC for scrollback)
-  zet-context  repo map, shell history, env, git watcher
-  zet-agent    planner/executor/verifier, lane scheduler, checkpoints
-  zet-policy   tiers, approvals, sandbox profiles, audit log
-  zet-models   LLM gateway trait: LocalLlama, OpenAI-compat, Anthropic, BYOK
-  zet-suggest  inline autocomplete (local 1B model, <50ms)
-  zet-mcp      MCP client/host, tool registry, third-party CLI panes
-  zet-daemon   background/delegated runs, notifications, zet status IPC
-```
+**Important:** A crate directory or an old architecture design does **not** mean the feature is implemented. The inventory below reflects the code review in `docs/design/A5-mission-control-architecture.md` at the PR #13 head (`166c204`); verify against current code before claiming a feature is shipped.
+
+| Crate | Present implementation / limitation |
+|---|---|
+| `zet` | Native executable, local shell/window composition, tabs, existing agent interaction; earlier CLI sketches contain unimplemented commands |
+| `zet-term` | VT grid, scrollback, alt-screen, bracketed paste, shell integration; resize **does not reflow** existing wrapped rows |
+| `zet-pty` | Local fork/exec PTY and resize; SSH transport and Windows ConPTY are **not implemented in this baseline** |
+| `zet-gpu` | wgpu renderer, cosmic-text glyph atlas, tab bar, ghost/search/selection; pure `Damage` structures exist but **damage-based rendering is not wired** |
+| `zet-blocks` | SQLite command block store/recorder and secret scrubbing; Arrow IPC is **not implemented** |
+| `zet-context` | Git state, context gathering and scrubbing; repo map, external history reader, env reader and file watcher are **not implemented** |
+| `zet-agent` | Single-lane planner/executor/verifier, journal/checkpoint support; parallel lane scheduler is **not implemented** |
+| `zet-policy` | T0–T3 tier classification and approval decisions; OS sandbox profiles and separate audit-log subsystem are **not implemented** |
+| `zet-models` | Model gateway / BYOK plumbing; provider readiness depends on local configuration |
+| `zet-suggest` | Inline suggestion/history support; do not advertise universal sub-50ms model inference |
+| `zet-mcp` | MCP registry and stdio tool/server integration; third-party CLI panes are **not implemented** |
+| `zet-daemon` | Stub only; background/delegated execution and notification IPC are **not implemented** |
+
+**Product implementation order:** [Charter](docs/ZET-PRODUCT-CHARTER.md) → [Roadmap](docs/ROADMAP.md) → [A5 native Mission Control proposal](docs/design/A5-mission-control-architecture.md). A5 is subject to independent audit and owner merge approval; it is **not** implemented UI. Historical diagrams and `ZET-DESIGN.md` contain proposed future capabilities.
 
 ## Non-negotiable principles (spec §2)
 
-1. Terminal first, chat second — AI renders as blocks, never hijacks the PTY.
+1. Real terminal integrity first — Mission Control is optional chrome around the canonical PTY; AI must never hijack it.
 2. Speed is a feature — the perf budgets below are release gates.
-3. Agent is accountable — every action = visible block + diff + audit entry + undo.
+3. Agent accountability is a requirement — actions must be auditable and show available evidence; do not imply an unimplemented audit or undo capability.
 4. Local-first, BYOM — no account required to open a shell.
 5. Ask rarely, at the right time — tiered approvals (T0–T3), not Y/N spam.
 6. Keyboard everything.
@@ -46,7 +49,7 @@ crates/
 
 Threading: UI/GPU thread ↔ PTY reader ↔ agent tokio runtime ↔ model streaming, all cross via lock-free rings. **PTY output must never block on model I/O.** Never put blocking calls on the UI thread.
 
-## Safety tiers (spec §6.4)
+## Safety tiers — intended policy, not a sandbox implementation (spec §6.4)
 
 | Tier | Examples | Default |
 |---|---|---|
@@ -55,7 +58,7 @@ Threading: UI/GPU thread ↔ PTY reader ↔ agent tokio runtime ↔ model stream
 | T2 risky | git push, docker run, db migrate, `rm -rf`, curl\|sh | always ask + show exact cmd + diff |
 | T3 critical | prod kubectl, secrets access, sudo, mass delete | ask + type-to-confirm + sandbox only |
 
-Checkpoints: pre-write snapshot before every mutation; all agent writes journaled to `~/.zet/journal/<session>.sqlite`. Secrets (`~/.aws`, `~/.ssh`, env) are never sent to cloud models unless explicitly attached.
+**Enforcement boundary:** The existing agent path supports checkpoints/journal entries, but a local shell command or third-party CLI is not automatically journaled or safely undoable. OS sandboxing, comprehensive audit logs and complete secret-control guarantees require additional implementation and verification. Never advertise these as present just because the policy design specifies them. Treat sensitive local data as untrusted for model submission.
 
 ## Build, test, verify
 
@@ -66,7 +69,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-CI (`.github/workflows/ci.yml`) runs exactly these four on every push and PR, plus installs `zsh` for the zet-pty zsh integration test. **All four must pass before a change is considered done.** The zsh test is non-interactive and needs an empty `.zshrc` to skip the newuser wizard — don't "fix" that by changing the test; the CI passes today.
+CI (`.github/workflows/ci.yml`) runs exactly these four on every push and PR, plus installs `zsh` for the zet-pty zsh integration test. **All four must pass before a change is considered done.** The zsh test is non-interactive and needs an empty `.zshrc` to skip the newuser wizard — do not "fix" that by changing the test. **Always inspect the latest run; at this documentation update, master still had an outstanding text-rendering test failure pending PR #13.**
 
 ## Working rules for agents
 
