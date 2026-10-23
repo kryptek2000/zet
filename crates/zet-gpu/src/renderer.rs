@@ -170,6 +170,13 @@ pub struct Viewport {
     pub rows: u32,
 }
 
+/// Conservative upper bound for cells staged by one chrome primitive.
+pub const MAX_RENDERABLE_VIEWPORT_DIMENSION: u32 = 100_000;
+/// Conservative upper bound for cells staged by one chrome primitive.
+pub const MAX_RENDERABLE_VIEWPORT_CELLS: usize = 1_000_000;
+/// Conservative upper bound for one vertical rule.
+pub const MAX_RENDERABLE_RULE_ROWS: usize = 100_000;
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -714,7 +721,25 @@ impl Renderer {
         let Some(bg_slot) = self.bg_slot else {
             return;
         };
-        for (cx, cy) in viewport_fill_cells(vp) {
+        let (window_cols, window_rows) = self.window_cell_dimensions();
+        let x_start = vp.x.min(window_cols);
+        let x_end =
+            vp.x.checked_add(vp.cols)
+                .map_or(window_cols, |value| value.min(window_cols));
+        let y_start = vp.y.min(window_rows);
+        let y_end =
+            vp.y.checked_add(vp.rows)
+                .map_or(window_rows, |value| value.min(window_rows));
+        if x_start >= x_end || y_start >= y_end {
+            return;
+        }
+        let clipped = Viewport {
+            x: x_start,
+            y: y_start,
+            cols: x_end - x_start,
+            rows: y_end - y_start,
+        };
+        for (cx, cy) in viewport_fill_cells(clipped) {
             self.quads.extend(cell_quad(
                 cx,
                 cy,
@@ -730,12 +755,33 @@ impl Renderer {
     /// One row of text at (`vp.x + col`, `vp.y + row`), clipped to the
     /// viewport. Reuses the existing glyph cache and appends to the
     /// current quad buffer.
+    /// Newline and other control characters are non-rendering: they still
+    /// consume one column in `viewport_text_cells`, but never reach
+    /// `slot_for`, so a multi-line string stays on one row with gaps.
     pub fn draw_text_row(&mut self, vp: Viewport, row: u32, col: u32, text: &str, ink: Rgba) {
         if row >= vp.rows || col >= vp.cols {
             return;
         }
-        for (cx, cy, c) in viewport_text_cells(vp, row, col, text) {
-            if c == ' ' {
+        let (window_cols, window_rows) = self.window_cell_dimensions();
+        let x_start = vp.x.min(window_cols);
+        let x_end =
+            vp.x.checked_add(vp.cols)
+                .map_or(window_cols, |value| value.min(window_cols));
+        let y_start = vp.y.min(window_rows);
+        let y_end =
+            vp.y.checked_add(vp.rows)
+                .map_or(window_rows, |value| value.min(window_rows));
+        if x_start >= x_end || y_start >= y_end || row >= (y_end - y_start) {
+            return;
+        }
+        let clipped = Viewport {
+            x: x_start,
+            y: y_start,
+            cols: x_end - x_start,
+            rows: y_end - y_start,
+        };
+        for (cx, cy, c) in viewport_text_cells(clipped, row, col, text) {
+            if c == ' ' || c.is_control() {
                 continue;
             }
             if let Some(slot) = self.slot_for(c) {
@@ -759,7 +805,13 @@ impl Renderer {
         let Some(bg_slot) = self.bg_slot else {
             return;
         };
-        for y in rule_rows(y0, y1) {
+        let (window_cols, window_rows) = self.window_cell_dimensions();
+        if x >= window_cols {
+            return;
+        }
+        let start = y0.min(window_rows);
+        let end = y1.min(window_rows);
+        for y in rule_rows(start, end) {
             self.quads.extend(cell_quad(
                 x,
                 y,
@@ -805,6 +857,17 @@ pub fn wrap_ghost(
 }
 
 impl Renderer {
+    fn window_cell_dimensions(&self) -> (u32, u32) {
+        let cell_w = self.cell_w.max(1.0);
+        let cell_h = self.cell_h.max(1.0);
+        let cols = (self.config.width as f64 / cell_w as f64).floor();
+        let rows = (self.config.height as f64 / cell_h as f64).floor();
+        (
+            cols.min(u32::MAX as f64) as u32,
+            rows.min(u32::MAX as f64) as u32,
+        )
+    }
+
     pub fn render(&mut self) {
         use wgpu::CurrentSurfaceTexture as Cst;
         let frame = match self.surface.get_current_texture() {
@@ -881,7 +944,9 @@ pub fn viewport_search_cell(
     if col as u32 >= vp.cols {
         return None;
     }
-    Some((vp.x + col as u32, vp.y + y as u32))
+    let x = vp.x.checked_add(col as u32)?;
+    let y = vp.y.checked_add(y as u32)?;
+    Some((x, y))
 }
 
 /// Pure coordinate helper: ghost cells wrapped and clipped to the
@@ -894,7 +959,11 @@ pub fn viewport_ghost_cells(
 ) -> Vec<(u32, u32, char)> {
     wrap_ghost(row, col, text, vp.cols as usize, vp.rows as usize)
         .into_iter()
-        .map(|(x, y, c)| (vp.x + x, vp.y + y, c))
+        .filter_map(|(x, y, c)| {
+            let x = vp.x.checked_add(x)?;
+            let y = vp.y.checked_add(y)?;
+            Some((x, y, c))
+        })
         .collect()
 }
 
@@ -922,21 +991,33 @@ pub fn viewport_hit_test(
     if col >= vp.cols as usize || row >= vp.rows as usize {
         return None;
     }
-    Some(crate::selection::CellPos {
-        col,
-        row: row + scrollback,
-    })
+    let row = row.checked_add(scrollback)?;
+    Some(crate::selection::CellPos { col, row })
 }
 
 /// Pure geometry helper for `draw_fill`: every cell covered by `vp`.
 pub fn viewport_fill_cells(vp: Viewport) -> Vec<(u32, u32)> {
-    if vp.cols == 0 || vp.rows == 0 {
+    if vp.cols == 0
+        || vp.rows == 0
+        || vp.cols > MAX_RENDERABLE_VIEWPORT_DIMENSION
+        || vp.rows > MAX_RENDERABLE_VIEWPORT_DIMENSION
+    {
         return Vec::new();
     }
-    let mut out = Vec::with_capacity((vp.cols as usize) * (vp.rows as usize));
-    for y in 0..vp.rows {
+    let area = (vp.cols as usize) * (vp.rows as usize);
+    if area > MAX_RENDERABLE_VIEWPORT_CELLS {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(area);
+    'rows: for y in 0..vp.rows {
+        let Some(cy) = vp.y.checked_add(y) else {
+            break 'rows;
+        };
         for x in 0..vp.cols {
-            out.push((vp.x + x, vp.y + y));
+            let Some(cx) = vp.x.checked_add(x) else {
+                break;
+            };
+            out.push((cx, cy));
         }
     }
     out
@@ -947,6 +1028,10 @@ pub fn viewport_text_cells(vp: Viewport, row: u32, col: u32, text: &str) -> Vec<
     if row >= vp.rows || col as usize >= vp.cols as usize {
         return Vec::new();
     }
+    let cy = match vp.y.checked_add(row) {
+        Some(value) => value,
+        None => return Vec::new(),
+    };
     let mut out = Vec::new();
     for (i, c) in text.chars().enumerate() {
         let Some(x) = (col as usize).checked_add(i) else {
@@ -955,7 +1040,10 @@ pub fn viewport_text_cells(vp: Viewport, row: u32, col: u32, text: &str) -> Vec<
         if x >= vp.cols as usize {
             break;
         }
-        out.push((vp.x + x as u32, vp.y + row, c));
+        let Some(cx) = vp.x.checked_add(x as u32) else {
+            break;
+        };
+        out.push((cx, cy, c));
     }
     out
 }
@@ -963,10 +1051,13 @@ pub fn viewport_text_cells(vp: Viewport, row: u32, col: u32, text: &str) -> Vec<
 /// Pure geometry helper for `draw_rule`: rows in `[y0, y1)`.
 pub fn rule_rows(y0: u32, y1: u32) -> Vec<u32> {
     if y1 <= y0 {
-        Vec::new()
-    } else {
-        (y0..y1).collect()
+        return Vec::new();
     }
+    let len = (y1 - y0) as usize;
+    if len > MAX_RENDERABLE_RULE_ROWS {
+        return Vec::new();
+    }
+    (y0..y1).collect()
 }
 
 #[cfg(test)]
