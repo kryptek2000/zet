@@ -1,5 +1,7 @@
 # A5 — Native Mission Control: Architecture & Implementation Plan
 
+> **2026-10-23 — Architect correction following independent audit:** The original 2026-10-22 repository/PR status in §1 and §11 is historical. PRs #13 and #14 are now merged, and PR #16 contains this document alone on top of green `master` at `4c8f7eb`. Beam's viewport audit found that `draw_search` must offset **both X and Y** and clip to terminal viewport bounds before implementation. This revision makes that a hard slice-2 requirement, fixes right-side mouse hit rejection, clarifies ghost/tab-bar coordinates and panel-only caching, and defers GPU readback to optional later work. The audit remains independently reviewable; do not interpret this edit as merge authorization.
+
 **Tracking:** UX-001 · **Phase:** P1-A (architecture) → defines **P2-A** (implementation)
 **Status:** proposed — awaiting architect (GPT-6) review and independent audit (Beam)
 **Author:** MiniMax (implementer) · **Date:** 2026-10-22
@@ -430,9 +432,11 @@ guarantees P2-A provides, and how each is verified:
 | Pending approvals stay visible | Approvals are real `zet_policy` decisions enforced in the agent path, not a UI overlay; the inspector renders them from `JournalEntry` | §8.2 |
 
 **And the honest caveat** — see §7.3 and Blocker B2: narrowing the viewport truncates the right
-edge of the *live* rows, because `zet-term` does not reflow. The full text of every recorded
-command is preserved in the block store (`zet_blocks::Block.output`), so nothing is permanently
-lost, but the live view does lose the right edge until the shell repaints. This is the same
+edge of the *live* rows, because `zet-term` does not reflow. Recorded command/output blocks may preserve **some** textual evidence, but that does not imply
+lossless screen reconstruction; alternate-screen applications and interactive updates need not
+be recoverable from the block store. The live grid may lose right-edge content until the shell
+or application repaints. Treat panel resizing as **experimental** until proper reflow and
+interactive-app compatibility are tested. This is the same
 behaviour ZET already has when the *window* is narrowed.
 
 ---
@@ -503,7 +507,9 @@ r.render();                                      // 9. ONE draw call
 the viewport's origin; **no call site adds `bar_rows` itself**. The current code does
 `r.draw_ghost(cy + bar, …)` because the ghost's row is a *window* row; with a viewport that
 becomes `r.draw_ghost(layout.term, cy, …)` — `cy` is the terminal's own row and the viewport
-supplies the offset. The same applies to `draw_search` and to the mouse mapping in §5.3.
+supplies the offset. The same applies to `draw_search` and to the mouse mapping in §5.3. **Mandatory slice-2 correction (Beam audit):** existing `draw_search` at `crates/zet-gpu/src/renderer.rs:598-650` converts absolute scrollback rows to grid-visible rows, but draws columns at window `x = col + dx`. The viewport version **must** compute grid-visible `row = abs_row - visible_base` first, then draw at **`x = vp.x + grid_col`**, **`y = vp.y + row`**, and skip highlights where `grid_col >= vp.cols` or `row >= vp.rows` (plus negative/out-of-bounds coordinates). Both axes must be translated exactly once; no overlay may paint outside the terminal rectangle. Extract unit-testable coordinate/clipping math and test nonzero `vp.x`, nonzero `vp.y`, scrollback offsets and a highlight touching the right edge. This is a **pre-chrome merge gate**, not a future cosmetic fix.
+
+`draw_ghost` must likewise use `vp.x`/`vp.y` for cell placement **and** feed `vp.cols`/`vp.rows` to the existing `wrap_ghost` clipping helper; it must not use the full-window dimensions or paint into the inspector.
 
 Panels are drawn **after** the terminal and **before** the overlays, so the tab bar, ghost and
 search highlights still sit on top of the terminal region exactly as today.
@@ -555,15 +561,25 @@ Four behavioural edits, all in `crates/zet/src/window/mod.rs`:
        // once, and do not add bar_rows again.
        let x = x - vp.x as f64 * cw as f64;      // NEW
        let y = y - vp.y as f64 * ch as f64;       // NEW (was: bar_rows * ch)
-       if x < 0.0 { return None; }                // NEW: click was in a panel
+       if x < 0.0 || y < 0.0 { return None; }   // outside viewport (rail/tab bar)
+       if x >= vp.cols as f64 * cw as f64 || y >= vp.rows as f64 * ch as f64 {
+           return None;                            // inspector / below terminal
+       }
        Some(pix_to_cell(x, y, cw, ch, vp.cols as usize, vp.rows as usize,
                         self.tabs[self.active].term.visible_base()))
    }
    ```
-   `pix_to_cell` itself needs no change — it is already viewport-relative once the origin is
-   subtracted. The `x < 0.0` guard is what stops a rail click from selecting terminal cells. A
-   click to the *right* of the terminal viewport (in the inspector) is likewise rejected by
-   `pix_to_cell`'s column clamp.
+   `pix_to_cell` itself needs no change once the origin is subtracted and **both bounds** are
+   checked by `mouse_cell`. Its existing column clamp is NOT a rejection mechanism: without
+   the explicit `x >= vp.cols * cw` guard, an inspector click would select the **last terminal
+   cell**. Reject coordinates in either panel or above/below the terminal before calling it.
+
+   **Tab bar remains window-relative:** existing `tab_segment(col, window_cols, n_tabs)` consumes
+   full-window columns, not `vp.cols`. If the bar spans the entire window, rail-area clicks
+   switch tabs by design; if they should not, explicitly reject `x < rail_cols * cw` in the
+   tab-bar handler and document the narrower hit region. **For P2-A choose rejection of rail-area
+   tab clicks**, while keeping the tab bar's remaining hit mapping consistent with its painted
+   segments. Test that the painted tab segment and its clickable area agree.
 
 3. **A focus branch in the key handler**, mirroring the existing search-mode branch
    (`:1431-1455`): when `focus != Terminal`, navigation keys are consumed and `translate()` is
@@ -575,8 +591,8 @@ Four behavioural edits, all in `crates/zet/src/window/mod.rs`:
 
 | Item | Change | Why it cannot be avoided | Mitigation |
 |---|---|---|---|
-| `Renderer::draw_search` | signature gains a `Viewport` instead of `y_off: u32` | search hits must be highlighted in the terminal viewport, not at window x=0 | keep a `y_off`-compatible wrapper if the auditor prefers zero churn |
-| `Renderer::draw_ghost` | signature gains a `Viewport` | the ghost sits in the terminal viewport | same |
+| `Renderer::draw_search` | signature gains `Viewport` instead of `y_off: u32`; translate both axes and clip to `vp.cols`/`vp.rows` | current code uses **window-relative X**, despite viewport-relative Y | **Required in slice 2:** pure coordinate tests with `vp.x > 0`, `vp.y > 0`, scrollback rows and viewport right edge; compatible wrapper only if correctly offset |
+| `Renderer::draw_ghost` | signature gains `Viewport`; use `vp.x`/`vp.y`, `wrap_ghost` with `vp.cols`/`vp.rows` | full-window wrapping/placement can overlap the rail or inspector | **Required in slice 2:** pure wrapping/offset regression tests; keep a backwards-compatible wrapper if useful |
 | `Renderer::draw_terminal` | **kept**, becomes a wrapper over `draw_terminal_in` | no churn for existing callers/tests | — |
 | New public items | `Viewport`, `draw_terminal_in`, `draw_fill`, `draw_text_row`, `draw_rule` | additive | — |
 
@@ -701,8 +717,10 @@ can audit the mapping from source to cell.
 | `F1`–`F12` | Heavily used by TUI apps (`F1` help, `F5` reload, `F10` menu). `F12` is already ZET's undo key. |
 | `Ctrl+P` / `Ctrl+;` (old spec §5.2) | `Ctrl+P` is readline's *previous command*; `Ctrl+;` is a completion key. Both would break shell editing. |
 
-**Rule adopted:** the `Ctrl+Shift+<letter>` namespace is reserved for ZET chrome, and no bare
-`Ctrl+<letter>` chord is ever taken. Full remapping is a P6 item (`docs/ZET-DESIGN.md:197`
+**Architect qualification:** these are proposed candidate chords, **not** a conflict-free reserved
+namespace. Confirm modifier event delivery on target Linux and TUI passthrough. Chrome must have
+visible pointer controls and a reachable Focus mode; do not finalize a binding without tests.
+No bare `Ctrl+<letter>` chord is taken. Full remapping is a P6 item (`docs/ZET-DESIGN.md:197`
 promises it; there is no config surface for it today).
 
 ### 7.2 Resizing behaviour
@@ -719,7 +737,8 @@ promises it; there is no config surface for it today).
 **Resize storm control:** the existing code already resizes the PTY on every `Resized` event.
 P2-A adds no new resize source beyond the toggles, so the SIGWINCH rate is unchanged.
 
-**Panel snapshot caching.** Rebuilding the panel content every frame would mean a SQLite read per
+**Panel snapshot caching (rail/inspector only).** The terminal's live VT grid is rendered on its
+normal redraw path and is **never** frozen or snapshotted by `ChromeCache`. Rebuilding panel content every frame would mean a SQLite read per
 frame. Instead:
 
 ```rust
@@ -740,7 +759,7 @@ is read through `Recorder::blocks()` at most once per 250 ms heartbeat, not per 
 | # | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|---|
 | R1 | **Viewport/PTY desync** — PTY width ≠ drawn width | Medium | Critical (broken transcript) | §5.3 change 1 is the keystone; §8.2 asserts `session.cols == term.cols == layout.term.cols` after every layout change |
-| R2 | Live-row truncation on narrowing (no reflow) | **Certain** | Medium | Accept + document (§7.4, Blocker B2). Full output survives in the block store. Reflow is a separate `zet-term` change |
+| R2 | Live-row truncation on narrowing (no reflow) | **Certain** | Medium | Experimental panel toggle with focus mode fallback; no claim of full text/screen recoverability (especially alternate screen). Proper reflow is separate `zet-term` work |
 | R3 | Panel content rebuild per frame (SQLite) | Medium | High (input latency gate) | Dirty-flag cache; no DB on the key path (§7.2) |
 | R4 | Quad-count growth from panel fills | Medium | Medium | Fill only the rows that carry content, not the whole column; cap visible rows per panel. Note `Damage`/`Rect` are **not** wired into the render path (§2.5), so every frame re-stages the full quad set — the budget cannot be dodged with partial redraws |
 | R5 | Glyph atlas thrash (256 slots, wholesale reset) | Low–Medium | Medium (raster storm) | Fixed, ASCII-first panel glyph vocabulary; ~20 distinct glyphs max (§7.4) |
@@ -796,7 +815,12 @@ over 10 % on any gate blocks the slice.
 | | `live_sessions_come_only_from_real_tabs` | rail row count == `App.tabs.len()` |
 | `renderer.rs` | `viewport_origin_offsets_the_grid` | pure `viewport_quads()` helper: cell (0,0) of a viewport at x=24 lands at pixel `24*cell_w` |
 | | `fill_covers_exactly_the_viewport_cells` | pure helper: quad count == `vp.cols * vp.rows` |
-| | `text_row_clips_at_the_viewport_edge` | a 40-char string in a 10-col viewport yields 10 cells |
+| | `text_row_clips_at_the_viewport_edge` | a 40-char string in a 10-col viewport yields 10 cells | 
+| | `search_highlight_uses_nonzero_viewport_origin` | search absolute row converted to visible row, then positioned at `vp.x + col`, `vp.y + row`; no double counting | 
+| | `search_highlight_clips_to_viewport` | hit outside `vp.cols`/`vp.rows` yields no quad; nonzero scrollback and rightmost cell covered | 
+| | `ghost_wrap_uses_terminal_viewport_size` | wrapping uses `vp.cols`/`vp.rows` rather than window dimensions and offsets with viewport origin | 
+| | `panel_clicks_rejected_both_sides` | negative X for rail and `x >= vp.cols * cw` for inspector, plus Y outside viewport, all return `None` | 
+| | `tabbar_clicks_follow_drawn_regions` | rail-area click cannot activate a tab; hit segments match the actual visible tab bar |
 | `input.rs` | `new_chords_do_not_shadow_existing_ones` | the six existing chord predicates still return `false` for the three new chords |
 | | `ctrl_shift_m_i_l_are_recognised` | new predicates true for their chords, false for plain letters and bare `Ctrl+<letter>` |
 | | `bare_ctrl_letter_still_becomes_a_control_byte` | `translate()` unchanged — no regression |
@@ -813,13 +837,16 @@ over 10 % on any gate blocks the slice.
 | `focus_rail_does_not_leak_keys_to_the_pty` | with the rail focused, typing `ls` produces **no** PTY bytes; after `Esc`, it does |
 | `esc_returns_focus_to_the_terminal` | focus round-trip |
 | `click_in_the_rail_does_not_select_terminal_cells` | a rail click leaves `selection == None` |
+| `click_in_the_inspector_does_not_select_terminal_cells` | inspector click is rejected instead of clamping to the last terminal column |
+| `search_and_ghost_do_not_paint_into_panels` | offsets and clipping validated with rail and inspector open; absolute scrollback row and tab-bar offset counted once |
 
 ### 8.3 Visual regression
 
-There is **no framebuffer readback today** (§2.2). The roadmap's P2 exit criterion ("screenshot
-comparison to approved design") therefore needs one. P2-A slice 6 adds a minimal, env-gated
-readback path: copy the swapchain texture to a buffer and write a PNG. It is test-only, costs
-nothing when disabled, and is the precondition for any honest visual audit.
+There is **no framebuffer readback today** (§2.2). For P2-A, capture **actual native ZET window
+screenshots using the Linux compositor or window-capture tooling** to compare against the approved
+design. No renderer readback is required for that manual visual review. A dedicated env-gated GPU
+readback mechanism is optional **separate P2-B/test-tool scope**, subject to its own audit; do not
+expand the viewport-critical rendering slice with new swapchain capture work.
 
 Manual review against the approved mockup (a **design north star, not a pixel lock**, per
 `docs/design/ZET-FLAGSHIP-UI-REFERENCE.md`): proportions, hierarchy, restraint, and — critically —
@@ -839,13 +866,13 @@ Each slice is a separate PR. Each ends green. Each is independently revertible.
 
 | # | Slice | Files | Depends on | Exit criteria |
 |---|---|---|---|---|
-| **0** | **Merge the baseline** (owner action) | — | — | #13 merged → `master` green; #14 rebased onto it and green. **Not an implementer action.** |
+| **0** | **Merged baseline verified** | — | — | #13 and #14 **merged**; `master` CI green at `4c8f7eb`. Confirm clean current baseline at each new feature PR. |
 | **1** | **Layout model** | `crates/zet/src/window/layout.rs` (new), `crates/zet/src/window/mod.rs` | 0 | `FrameLayout` resolves correctly for every width; the whole §8.1 layout suite is green. **No rendering change yet** — the app still draws one grid. |
-| **2** | **Viewport-aware grid + PTY** | `crates/zet/src/window/mod.rs`, `crates/zet-gpu/src/renderer.rs` (`Viewport`, `draw_terminal_in`), `crates/zet-gpu/src/input.rs` (signatures) | 1 | The terminal renders into a sub-viewport with the **default layout still full-width** (no visible change). `draw_terminal` is a wrapper; no behaviour change. PTY == viewport width. |
+| **2** | **Viewport-aware grid + PTY + search/ghost correctness** | `crates/zet/src/window/mod.rs`, `crates/zet-gpu/src/renderer.rs` (`Viewport`, `draw_terminal_in`, `draw_search`, `draw_ghost`), input/selection tests | 1 | Default terminal layout remains full-width. PTY == viewport width; search highlights use **`vp.x` and `vp.y`**, are clipped; ghost uses viewport dimensions; left/right mouse rejection works. All pure regression tests green **before chrome**. |
 | **3** | **Chrome primitives** | `crates/zet-gpu/src/renderer.rs` (`draw_fill`, `draw_text_row`, `draw_rule`), pure helpers + tests | 2 | Primitives unit-tested without a GPU; the app still draws nothing new. |
 | **4** | **Mission rail** | `crates/zet/src/window/panels.rs` (new), `crates/zet/src/window/mod.rs` | 2, 3 | The rail renders live sessions + observed commands from real data. `Ctrl+Shift+M` toggles it. Scrollback/session/PTY assertions from §8.2 are green. |
 | **5** | **Inspector + focus model** | `crates/zet/src/window/panels.rs`, `crates/zet/src/window/mod.rs`, `crates/zet-gpu/src/input.rs` | 4 | The inspector renders observed commands + real decisions. **No verification section.** Focus routing: rail/inspector/terminal, `Esc` returns, no key leaks to the PTY. `Ctrl+Shift+I` / `Ctrl+Shift+L` work. |
-| **6** | **Screenshot readback** | `crates/zet-gpu/src/renderer.rs` (env-gated) | 3 | A PNG can be captured from a running window for visual audit. Test-only path. |
+| **6** | **Native visual review (readback optional later)** | Linux compositor/window capture; optional separate readback design only if needed | 4, 5 | Real screenshot from running native ZET window compared with approved design. No GPU readback code required in P2-A. |
 | **7** | **Performance + compatibility pass** | — | 4, 5 | All §7.5 gates re-measured in all three layouts with no regression > 10 %. Compatibility smoke: bash, zsh, `less`, `vim`, `tmux`, CJK, wide output, 100k lines. (SSH is **not** in the list — it does not exist yet, §2.5.) |
 
 **Ordering rationale:** slices 1–3 change *geometry* only and are individually invisible, so the
@@ -870,13 +897,13 @@ packaging. Each is either P2-B, P3, P5, or P6 in the roadmap.
 
 | # | Blocker | Why it needs the architect | Proposed resolution |
 |---|---|---|---|
-| **B1** | `master` is red; #13 is green but unmerged; #14 is red because it predates #13 | Release state is the owner's call, and P2-A cannot start on a red baseline | Owner merges #13 → owner rebases #14 → P2-A starts. **This plan changes nothing.** |
-| **B2** | **`zet-term` does not reflow.** Narrowing the terminal for a rail truncates the live grid's right edge (`crates/zet-term/src/lib.rs:729-757`); `Cell` has no soft-wrap flag; the recorder keys on absolute rows so inserting scrollback rows mid-session would desync blocks | This is a **core terminal** change with a real blast radius. It is *not* "the smallest safe path" and it is not P2-A's job | **P2-A accepts the truncation** and documents it honestly (the full text remains in the block store). **P2-B (or a standalone `zet-term` PR):** add a soft-wrap flag to `Cell`, implement xterm-style reflow, and re-anchor the recorder's absolute rows — with its own test corpus. **Architect must confirm the P2-A/P2-B split.** |
+| **B1** | **Resolved 2026-10-23:** #13 and #14 merged; `master` CI green at `4c8f7eb` | Current PR #16 must still be independently audited, green at its exact head and owner-approved | Do not start P2-A code until PR #16 accepted and merged by owner. |
+| **B2** | **`zet-term` does not reflow.** Narrowing for a rail may truncate the live grid; `Cell` lacks soft-wrap, recorder indexes absolute rows | Core terminal refactor beyond viewport slice | P2-A experimental panel toggling, truthful truncation caveat, Focus fallback and adversarial alt-screen/wide-output tests; no lossless claim. Proper reflow separately reviewed for future work. |
 | **B3** | The charter's `Mission` / `WorkEvent` / `ArtifactRef` / `EvidenceLink` / `ApprovalState` / `VerificationReceipt` schema (P1/P3) does not exist | Defining it now, without a consumer, would pre-empt the P1 contract and risk inventing telemetry | P2-A introduces **none** of them; the rail/inspector are read-only views over existing types (§6.1). The schema is proposed in **P1-B**, and P3 consumes it |
-| **B4** | `Ctrl+Shift+I` (inspector) is bound by some other terminals (iTerm2/kitty families) | Taking a chord from a hosted TUI is a compatibility decision, not an implementation detail | Recommended: `Ctrl+Shift+I` primary, `Ctrl+Shift+E` alternative, both listed in `docs/SHORTCUTS.md`; the `Ctrl+Shift+` namespace is reserved for chrome. Architect confirms |
-| **B5** | No framebuffer readback exists, but the roadmap's P2 exit needs a screenshot comparison | Adding a GPU readback path is a new capability in `zet-gpu` | Proposed as slice 6, env-gated and test-only. Architect confirms it is in P2-A's scope rather than P2-B |
+| **B4** | Proposed Ctrl+Shift chords may overlap TUI/app input | Native Linux key event delivery and terminal passthrough must be verified before claiming a conflict-free namespace | Candidate chords only; retain mouse affordance and Terminal Focus, verify interactions under bash/zsh/vim/tmux before updating `docs/SHORTCUTS.md`. |
+| **B5** | No framebuffer readback exists | Native screenshot comparison can use compositor/window capture without touching the GPU pipeline | P2-A uses actual window screenshot review; specialized GPU readback deferred to a separately reviewed test-tool PR if needed. |
 | **B6** | The charter's "Status / Lightweight" bar is realised inside the rail/inspector rather than as a dedicated row | A dedicated row changes the terminal height and the PTY `SIGWINCH` behaviour, invalidating the perf baselines | Proposed: no new row in P2-A (§4.4); a dedicated status row is a P2-B candidate once tokens exist |
-| **B7** | `AGENTS.md` advertises SSH transport, a `zet-daemon`, a `zet-context` repo map, Arrow IPC, a lane scheduler, a sandbox, an audit log, CLI panes and damage tracking; **none of the nine exists** (§2.5) | The charter forbids shipping claims the product cannot back, and roadmap P0 explicitly demands "no greenwashing README". SSH is also named as shipped in `docs/ZET-DESIGN.md:169` | **Owner action, separate from P2-A:** correct `AGENTS.md:5-21` and the README under PR #14 before release. No code change proposed here. Also note for P2-A: `Damage`/`Rect` are **not** wired into the render path, so no incremental frame pipeline may be assumed |
+| **B7** | **Resolved as documentation:** misleading current-feature claims found in old `AGENTS.md` and design spec | Corrected in merged PR #14; the originally audited tree description in §2.5 remains historical | Do not assume `Damage`/`Rect` are wired or that stub capabilities are implemented; audit code at each slice. |
 
 ---
 
