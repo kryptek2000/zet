@@ -12,7 +12,7 @@ ZET is a genuine **Rust + wgpu desktop terminal** with an ambitious new layer: *
 
 A failed test is more than red text: ZET should let you follow its original command and output, related files, the subsequent investigation, the exact approved changes, and the evidence that a fix actually worked. Any association must have known provenance; ZET must never invent relationships or falsely report verification.
 
-- **The real terminal remains central.** PTY, shell, SSH, editors, and conventional terminal programs work normally, including without AI.
+- **The real terminal remains central.** Native local PTY, shell, scrollback, editors, and conventional terminal programs must work without AI. SSH integration is a future compatibility goal, not a shipped ZET transport.
 - **Mission Control makes the work navigable.** Missions group objectives, commands, real sessions, decisions and outcomes—not just tabs or agent processes.
 - **An optional agent-aware layer.** Existing coding CLIs can run unchanged. ZET must not become another Hermes/OpenClaw or require its own autonomous agent to be useful.
 - **Evidence over claims.** Proposed, executed, and verified are distinct statuses; approvals, diffs, checkpoints, and undo reflect the actual underlying systems.
@@ -25,7 +25,7 @@ No Electron, Chromium shell, webview UI, or browser required for operation. No f
 
 ## Current status
 
-**In development.** The native terminal and several infrastructure crates already exist. The flagship Mission Control interface and linked evidence model are **planned**, not shipped; the visual mockup is a **design reference**, not implementation evidence. The Rust test suite and CI must remain green before release.
+**In development.** A native terminal, renderer, tabs, shell integration, command recording and some agent infrastructure already exist. The flagship Mission Control interface, persisted mission/evidence graph, CI verification linking, native SSH transport and multi-agent orchestration are **not shipped**. The visual mockup is a **design reference**, not implementation evidence. The baseline renderer regression is being addressed in [PR #13](https://github.com/kryptek2000/zet/pull/13); release requires green CI on the final merged commit.
 
 ## Build and verify
 
@@ -42,6 +42,7 @@ cargo test --workspace
 - [Execution Roadmap](docs/ROADMAP.md) — ordered milestones and acceptance criteria
 - [Architecture and performance baseline](docs/ZET-DESIGN.md) — original system design, retained for implementation constraints; superseded where positioning conflicts with charter
 - [Engineering rules](AGENTS.md) — authoritative security/performance/testing gates
+- [Native Mission Control architecture — PR #16](https://github.com/kryptek2000/zet/pull/16) — proposed A5 layout / PTY plan, pending audit and merge
 - [UI component design reference](docs/design/A4-ui-component-spec.md) — historical design proposal, to reconcile before implementation
 - [Shortcuts](docs/SHORTCUTS.md) — existing behavior (do not break it to implement mockup shortcuts)
 
