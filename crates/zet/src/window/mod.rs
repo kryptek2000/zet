@@ -22,6 +22,8 @@ use zet_pty::shell::ShellState;
 use zet_pty::Session;
 use zet_term::Terminal;
 
+pub mod layout;
+
 const HOOKS: [(&str, &str); 2] = [
     ("bash", "zet-integration.bash"),
     ("zsh", "zet-integration.zsh"),
