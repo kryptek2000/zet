@@ -23,7 +23,7 @@ Repo: github.com/kryptek2000/zet (Rust + wgpu). Full spec: `docs/ZET-DESIGN.md`.
 | `zet-mcp` | MCP registry and stdio tool/server integration; third-party CLI panes are **not implemented** |
 | `zet-daemon` | Stub only; background/delegated execution and notification IPC are **not implemented** |
 
-**Product implementation order:** [Charter](docs/ZET-PRODUCT-CHARTER.md) → [Roadmap](docs/ROADMAP.md) → [A5 native Mission Control proposal](docs/design/A5-mission-control-architecture.md). A5 is subject to independent audit and owner merge approval; it is **not** implemented UI. Historical diagrams and `ZET-DESIGN.md` contain proposed future capabilities.
+**Product implementation order:** [Charter](docs/ZET-PRODUCT-CHARTER.md) → [Roadmap](docs/ROADMAP.md) → [A5 native Mission Control proposal / PR #16](https://github.com/kryptek2000/zet/pull/16). A5 is subject to independent audit and owner merge approval; it is **not** implemented UI. Historical diagrams and `ZET-DESIGN.md` contain proposed future capabilities.
 
 ## Non-negotiable principles (spec §2)
 
