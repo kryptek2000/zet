@@ -722,24 +722,10 @@ impl Renderer {
             return;
         };
         let (window_cols, window_rows) = self.window_cell_dimensions();
-        let x_start = vp.x.min(window_cols);
-        let x_end =
-            vp.x.checked_add(vp.cols)
-                .map_or(window_cols, |value| value.min(window_cols));
-        let y_start = vp.y.min(window_rows);
-        let y_end =
-            vp.y.checked_add(vp.rows)
-                .map_or(window_rows, |value| value.min(window_rows));
-        if x_start >= x_end || y_start >= y_end {
+        let Some(clipped) = clip_viewport_to_window(vp, window_cols, window_rows) else {
             return;
-        }
-        let clipped = Viewport {
-            x: x_start,
-            y: y_start,
-            cols: x_end - x_start,
-            rows: y_end - y_start,
         };
-        for (cx, cy) in viewport_fill_cells(clipped) {
+        for (cx, cy) in viewport_fill_iter(clipped) {
             self.quads.extend(cell_quad(
                 cx,
                 cy,
@@ -763,25 +749,14 @@ impl Renderer {
             return;
         }
         let (window_cols, window_rows) = self.window_cell_dimensions();
-        let x_start = vp.x.min(window_cols);
-        let x_end =
-            vp.x.checked_add(vp.cols)
-                .map_or(window_cols, |value| value.min(window_cols));
-        let y_start = vp.y.min(window_rows);
-        let y_end =
-            vp.y.checked_add(vp.rows)
-                .map_or(window_rows, |value| value.min(window_rows));
-        if x_start >= x_end || y_start >= y_end || row >= (y_end - y_start) {
+        let Some(clipped) = clip_viewport_to_window(vp, window_cols, window_rows) else {
+            return;
+        };
+        if row >= clipped.rows || col >= clipped.cols {
             return;
         }
-        let clipped = Viewport {
-            x: x_start,
-            y: y_start,
-            cols: x_end - x_start,
-            rows: y_end - y_start,
-        };
-        for (cx, cy, c) in viewport_text_cells(clipped, row, col, text) {
-            if c == ' ' || c.is_control() {
+        for (cx, cy, c) in viewport_text_iter(clipped, row, col, text) {
+            if !is_renderable_text_char(c) {
                 continue;
             }
             if let Some(slot) = self.slot_for(c) {
@@ -809,9 +784,10 @@ impl Renderer {
         if x >= window_cols {
             return;
         }
-        let start = y0.min(window_rows);
-        let end = y1.min(window_rows);
-        for y in rule_rows(start, end) {
+        let Some((start, end)) = clip_rule_rows(y0, y1, window_rows) else {
+            return;
+        };
+        for y in rule_rows_iter(start, end) {
             self.quads.extend(cell_quad(
                 x,
                 y,
@@ -995,69 +971,144 @@ pub fn viewport_hit_test(
     Some(crate::selection::CellPos { col, row })
 }
 
-/// Pure geometry helper for `draw_fill`: every cell covered by `vp`.
-pub fn viewport_fill_cells(vp: Viewport) -> Vec<(u32, u32)> {
-    if vp.cols == 0
-        || vp.rows == 0
-        || vp.cols > MAX_RENDERABLE_VIEWPORT_DIMENSION
-        || vp.rows > MAX_RENDERABLE_VIEWPORT_DIMENSION
+/// True when a requested fill viewport is within the primitive's
+/// defensive bounds. Used by both the production iterator and tests.
+pub fn viewport_fill_allowed(cols: u32, rows: u32) -> bool {
+    if cols == 0
+        || rows == 0
+        || cols > MAX_RENDERABLE_VIEWPORT_DIMENSION
+        || rows > MAX_RENDERABLE_VIEWPORT_DIMENSION
     {
-        return Vec::new();
+        return false;
     }
-    let area = (vp.cols as usize) * (vp.rows as usize);
-    if area > MAX_RENDERABLE_VIEWPORT_CELLS {
-        return Vec::new();
-    }
-    let mut out = Vec::with_capacity(area);
-    'rows: for y in 0..vp.rows {
-        let Some(cy) = vp.y.checked_add(y) else {
-            break 'rows;
-        };
-        for x in 0..vp.cols {
+    (cols as usize)
+        .checked_mul(rows as usize)
+        .is_some_and(|area| area <= MAX_RENDERABLE_VIEWPORT_CELLS)
+}
+
+/// Pure geometry helper for `draw_fill`: every cell covered by `vp`,
+/// generated lazily and without an eager area-sized allocation.
+pub fn viewport_fill_iter(vp: Viewport) -> impl Iterator<Item = (u32, u32)> {
+    let allowed = viewport_fill_allowed(vp.cols, vp.rows);
+    let max_cols = if allowed { vp.cols } else { 0 };
+    let max_rows = if allowed { vp.rows } else { 0 };
+    let mut x = 0;
+    let mut y = 0;
+    std::iter::from_fn(move || {
+        while y < max_rows {
+            if x >= max_cols {
+                x = 0;
+                y += 1;
+                continue;
+            }
             let Some(cx) = vp.x.checked_add(x) else {
+                x = max_cols;
+                continue;
+            };
+            let Some(cy) = vp.y.checked_add(y) else {
                 break;
             };
-            out.push((cx, cy));
+            x += 1;
+            return Some((cx, cy));
         }
-    }
-    out
+        None
+    })
+}
+
+/// Pure geometry helper for `draw_fill`: every cell covered by `vp`.
+pub fn viewport_fill_cells(vp: Viewport) -> Vec<(u32, u32)> {
+    viewport_fill_iter(vp).collect()
+}
+
+/// The documented single-line policy for text rows: spaces and control
+/// characters consume a cell but never produce glyph output.
+pub fn is_renderable_text_char(c: char) -> bool {
+    c != ' ' && !c.is_control()
+}
+
+/// Pure geometry helper for `draw_text_row`: clipped text cells,
+/// generated lazily.
+pub fn viewport_text_iter<'a>(
+    vp: Viewport,
+    row: u32,
+    col: u32,
+    text: &'a str,
+) -> impl Iterator<Item = (u32, u32, char)> + 'a {
+    let valid = row < vp.rows && col < vp.cols;
+    let cy = vp.y.checked_add(row);
+    let max_cols = vp.cols.saturating_sub(col) as usize;
+    text.chars()
+        .enumerate()
+        .take(if valid { max_cols } else { 0 })
+        .filter_map(move |(i, c)| {
+            let x = col.checked_add(i as u32)?;
+            if x >= vp.cols {
+                return None;
+            }
+            let cx = vp.x.checked_add(x)?;
+            Some((cx, cy?, c))
+        })
 }
 
 /// Pure geometry helper for `draw_text_row`: clipped text cells.
 pub fn viewport_text_cells(vp: Viewport, row: u32, col: u32, text: &str) -> Vec<(u32, u32, char)> {
-    if row >= vp.rows || col as usize >= vp.cols as usize {
-        return Vec::new();
+    viewport_text_iter(vp, row, col, text).collect()
+}
+
+/// Pure helper: clip a requested viewport to the drawable window cell
+/// rectangle. Returns `None` when there is no intersection. Saturating
+/// extent arithmetic prevents `vp.x + vp.cols` overflow from wrapping.
+pub fn clip_viewport_to_window(
+    vp: Viewport,
+    window_cols: u32,
+    window_rows: u32,
+) -> Option<Viewport> {
+    if window_cols == 0 || window_rows == 0 || vp.cols == 0 || vp.rows == 0 {
+        return None;
     }
-    let cy = match vp.y.checked_add(row) {
-        Some(value) => value,
-        None => return Vec::new(),
+    let x0 = vp.x.min(window_cols);
+    let x1 = vp.x.saturating_add(vp.cols).min(window_cols);
+    let y0 = vp.y.min(window_rows);
+    let y1 = vp.y.saturating_add(vp.rows).min(window_rows);
+    if x0 >= x1 || y0 >= y1 {
+        return None;
+    }
+    Some(Viewport {
+        x: x0,
+        y: y0,
+        cols: x1 - x0,
+        rows: y1 - y0,
+    })
+}
+
+/// Pure helper: clip a vertical rule to the window's row bounds.
+pub fn clip_rule_rows(y0: u32, y1: u32, window_rows: u32) -> Option<(u32, u32)> {
+    if y1 <= y0 || window_rows == 0 {
+        return None;
+    }
+    let start = y0.min(window_rows);
+    let end = y1.min(window_rows);
+    if start >= end {
+        None
+    } else {
+        Some((start, end))
+    }
+}
+
+/// Lazy, bounded rule rows. Empty for inverted or oversized ranges.
+pub fn rule_rows_iter(y0: u32, y1: u32) -> impl Iterator<Item = u32> {
+    let len = if y1 > y0 { (y1 - y0) as usize } else { 0 };
+    let count = if len <= MAX_RENDERABLE_RULE_ROWS {
+        len
+    } else {
+        0
     };
-    let mut out = Vec::new();
-    for (i, c) in text.chars().enumerate() {
-        let Some(x) = (col as usize).checked_add(i) else {
-            break;
-        };
-        if x >= vp.cols as usize {
-            break;
-        }
-        let Some(cx) = vp.x.checked_add(x as u32) else {
-            break;
-        };
-        out.push((cx, cy, c));
-    }
-    out
+    (0..count).map(move |i| y0 + i as u32)
 }
 
 /// Pure geometry helper for `draw_rule`: rows in `[y0, y1)`.
 pub fn rule_rows(y0: u32, y1: u32) -> Vec<u32> {
-    if y1 <= y0 {
-        return Vec::new();
-    }
-    let len = (y1 - y0) as usize;
-    if len > MAX_RENDERABLE_RULE_ROWS {
-        return Vec::new();
-    }
-    (y0..y1).collect()
+    rule_rows_iter(y0, y1).collect()
 }
 
 #[cfg(test)]
@@ -1190,5 +1241,192 @@ mod viewport_tests {
         assert!(rule_rows(5, 5).is_empty());
         assert!(rule_rows(7, 3).is_empty());
         assert!(rule_rows(u32::MAX, u32::MAX).is_empty());
+    }
+
+    #[test]
+    fn fill_limits_reject_huge_requests_before_iteration() {
+        assert!(!viewport_fill_allowed(
+            MAX_RENDERABLE_VIEWPORT_DIMENSION + 1,
+            1
+        ));
+        assert!(!viewport_fill_allowed(
+            1,
+            MAX_RENDERABLE_VIEWPORT_DIMENSION + 1
+        ));
+        assert!(!viewport_fill_allowed(1001, 1000));
+        assert!(viewport_fill_allowed(1000, 1000));
+        assert!(viewport_fill_allowed(MAX_RENDERABLE_VIEWPORT_DIMENSION, 1));
+        assert!(viewport_fill_iter(Viewport {
+            x: 0,
+            y: 0,
+            cols: u32::MAX,
+            rows: 1,
+        })
+        .next()
+        .is_none());
+        assert!(viewport_fill_cells(Viewport {
+            x: 0,
+            y: 0,
+            cols: 1001,
+            rows: 1000,
+        })
+        .is_empty());
+    }
+
+    #[test]
+    fn rule_limit_rejects_huge_nonempty_range() {
+        assert!(rule_rows(0, u32::MAX).is_empty());
+        assert!(rule_rows_iter(0, u32::MAX).next().is_none());
+        assert_eq!(
+            rule_rows_iter(0, MAX_RENDERABLE_RULE_ROWS as u32)
+                .take(1)
+                .count(),
+            1
+        );
+        assert!(rule_rows_iter(0, MAX_RENDERABLE_RULE_ROWS as u32 + 1)
+            .next()
+            .is_none());
+    }
+
+    #[test]
+    fn near_max_origins_do_not_wrap() {
+        let base = u32::MAX - 1;
+        let fill = viewport_fill_cells(Viewport {
+            x: base,
+            y: base,
+            cols: 5,
+            rows: 5,
+        });
+        assert_eq!(fill.len(), 4);
+        assert!(fill.iter().all(|&(x, y)| x >= base && y >= base));
+
+        let text = viewport_text_cells(
+            Viewport {
+                x: base,
+                y: base,
+                cols: 5,
+                rows: 1,
+            },
+            0,
+            0,
+            "abc",
+        );
+        assert_eq!(text, vec![(base, base, 'a'), (u32::MAX, base, 'b')]);
+
+        let vp = Viewport {
+            x: base,
+            y: base,
+            cols: 3,
+            rows: 1,
+        };
+        assert_eq!(viewport_search_cell(vp, 0, 1, 0, 1), Some((u32::MAX, base)));
+        assert_eq!(viewport_search_cell(vp, 0, 2, 0, 1), None);
+
+        let ghost = viewport_ghost_cells(vp, 0, 0, "abc");
+        assert_eq!(ghost, vec![(base, base, 'a'), (u32::MAX, base, 'b')]);
+    }
+
+    #[test]
+    fn clip_viewport_to_window_cases() {
+        let inside = Viewport {
+            x: 2,
+            y: 3,
+            cols: 4,
+            rows: 2,
+        };
+        assert_eq!(clip_viewport_to_window(inside, 10, 10), Some(inside));
+
+        let partial = Viewport {
+            x: 8,
+            y: 8,
+            cols: 5,
+            rows: 5,
+        };
+        assert_eq!(
+            clip_viewport_to_window(partial, 10, 10),
+            Some(Viewport {
+                x: 8,
+                y: 8,
+                cols: 2,
+                rows: 2,
+            })
+        );
+
+        assert_eq!(
+            clip_viewport_to_window(
+                Viewport {
+                    x: 10,
+                    y: 0,
+                    cols: 5,
+                    rows: 5,
+                },
+                10,
+                10,
+            ),
+            None
+        );
+        assert_eq!(
+            clip_viewport_to_window(
+                Viewport {
+                    x: 95,
+                    y: 0,
+                    cols: u32::MAX,
+                    rows: 1,
+                },
+                100,
+                10,
+            ),
+            Some(Viewport {
+                x: 95,
+                y: 0,
+                cols: 5,
+                rows: 1,
+            })
+        );
+        assert_eq!(
+            clip_viewport_to_window(
+                Viewport {
+                    x: 0,
+                    y: 0,
+                    cols: 1,
+                    rows: 1,
+                },
+                0,
+                10,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn clip_rule_rows_cases() {
+        assert_eq!(clip_rule_rows(2, 5, 10), Some((2, 5)));
+        assert_eq!(clip_rule_rows(8, 20, 10), Some((8, 10)));
+        assert_eq!(clip_rule_rows(10, 20, 10), None);
+        assert_eq!(clip_rule_rows(5, 5, 10), None);
+        assert_eq!(clip_rule_rows(7, 3, 10), None);
+        assert_eq!(clip_rule_rows(0, u32::MAX, 10), Some((0, 10)));
+        assert_eq!(clip_rule_rows(0, 5, 0), None);
+    }
+
+    #[test]
+    fn text_control_characters_consume_one_cell_without_newline() {
+        assert!(is_renderable_text_char('a'));
+        assert!(!is_renderable_text_char(' '));
+        assert!(!is_renderable_text_char('\n'));
+        assert!(!is_renderable_text_char('\t'));
+
+        let vp = Viewport {
+            x: 4,
+            y: 6,
+            cols: 5,
+            rows: 1,
+        };
+        assert_eq!(
+            viewport_text_cells(vp, 0, 0, "a\nb"),
+            vec![(4, 6, 'a'), (5, 6, '\n'), (6, 6, 'b')]
+        );
+        assert_eq!(viewport_text_iter(vp, 0, 0, "a\nb").count(), 3);
+        assert_eq!(viewport_text_iter(vp, 1, 0, "a").count(), 0);
     }
 }
