@@ -185,6 +185,13 @@ pub fn resolve_preset(cols: u32, rows: u32, mode: LayoutMode, bar_rows: usize) -
 }
 
 /// Backwards-friendly alias for [`resolve`].
+/// Terminal viewport dimensions for a window. This is the seam used by
+/// `App::fit_all` so PTY and grid sizing can be tested without a window.
+pub fn terminal_viewport(layout: Layout, cols: u32, rows: u32, bar_rows: usize) -> (u32, u32) {
+    let viewport = resolve(cols, rows, layout, bar_rows).term;
+    (viewport.cols, viewport.rows)
+}
+
 pub fn resolve_layout<R>(cols: u32, rows: u32, requested: R, bar_rows: usize) -> FrameLayout
 where
     R: Into<Layout>,
@@ -609,6 +616,28 @@ mod tests {
         let frame = resolve_mode(120, 40, layout, Some(LayoutMode::MissionControl), 0);
         assert_eq!(frame.mode, None);
         assert!(frame.inspector.is_some());
+    }
+
+    #[test]
+    fn terminal_viewport_matches_frame_layout() {
+        for cols in [0u32, 1, 20, 80, 104, 500] {
+            for rows in [0u32, 1, 5, 24, 40] {
+                for bar_rows in [0usize, 1, 5] {
+                    let (vp_cols, vp_rows) =
+                        terminal_viewport(LayoutMode::TerminalFocus.layout(), cols, rows, bar_rows);
+                    let frame = resolve(cols, rows, LayoutMode::TerminalFocus.layout(), bar_rows);
+                    assert_eq!((vp_cols, vp_rows), (frame.term.cols, frame.term.rows));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_viewport_narrower_than_window() {
+        let (cols, rows) = terminal_viewport(LayoutMode::TerminalFocus.layout(), 104, 24, 1);
+        assert_eq!((cols, rows), (104, 23));
+        let (cols, rows) = terminal_viewport(LayoutMode::TerminalFocus.layout(), 104, 24, 0);
+        assert_eq!((cols, rows), (104, 24));
     }
 
     #[test]

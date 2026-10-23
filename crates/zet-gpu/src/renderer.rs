@@ -161,6 +161,15 @@ pub fn term_color(color: zet_term::Color, bold: bool) -> Rgba {
     }
 }
 
+/// A cell-aligned rectangle in the window grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Viewport {
+    pub x: u32,
+    pub y: u32,
+    pub cols: u32,
+    pub rows: u32,
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -484,19 +493,39 @@ impl Renderer {
         sel: Option<crate::selection::Selection>,
         y_off: u32,
     ) {
+        let vp = Viewport {
+            x: 0,
+            y: y_off,
+            cols: cols as u32,
+            rows: rows as u32,
+        };
+        self.draw_terminal_in(term, vp, sel);
+    }
+
+    /// Generalised terminal draw into a cell-aligned viewport. The viewport
+    /// origin is applied exactly once and drawing is clipped to its bounds.
+    pub fn draw_terminal_in(
+        &mut self,
+        term: &zet_term::Terminal,
+        vp: Viewport,
+        sel: Option<crate::selection::Selection>,
+    ) {
         self.quads.clear();
         let (cur_x, cur_y) = term.cursor();
         let show_cursor = term.cursor_visible() && term.view_offset() == 0;
         let sb = term.visible_base();
-        for y in 0..rows {
-            let line: Vec<char> = term.visible_line_text(y).chars().collect();
-            for (x, &c) in line.iter().enumerate().take(cols) {
-                let cell = term.visible_cell(x, y);
+        for vy in 0..vp.rows as usize {
+            if vy >= term.rows() {
+                break;
+            }
+            let line: Vec<char> = term.visible_line_text(vy).chars().collect();
+            for (vx, &c) in line.iter().enumerate().take(vp.cols as usize) {
+                let cell = term.visible_cell(vx, vy);
                 let fg = cell.map(|cell| cell.fg).unwrap_or_default();
                 let bg = cell.map(|cell| cell.bg).unwrap_or_default();
                 let bold = cell.map(|cell| cell.bold).unwrap_or(false);
-                let cursor_here = show_cursor && x == cur_x && y == cur_y;
-                let selected = sel.as_ref().is_some_and(|s| s.contains(x, sb + y));
+                let cursor_here = show_cursor && vx == cur_x && vy == cur_y;
+                let selected = sel.as_ref().is_some_and(|s| s.contains(vx, sb + vy));
                 if bg != zet_term::Color::Default || cursor_here || selected {
                     let fill = if cursor_here {
                         match fg {
@@ -510,8 +539,8 @@ impl Renderer {
                     };
                     if let Some(bg_slot) = self.bg_slot {
                         self.quads.extend(cell_quad(
-                            x as u32,
-                            y as u32 + y_off,
+                            vp.x + vx as u32,
+                            vp.y + vy as u32,
                             self.cell_w,
                             self.cell_h,
                             (bg_slot.x, bg_slot.y),
@@ -537,8 +566,8 @@ impl Renderer {
                     continue;
                 };
                 self.quads.extend(cell_quad(
-                    x as u32,
-                    y as u32 + y_off,
+                    vp.x + vx as u32,
+                    vp.y + vy as u32,
                     self.cell_w,
                     self.cell_h,
                     (slot.x, slot.y),
@@ -600,30 +629,38 @@ impl Renderer {
         term: &zet_term::Terminal,
         matches: &[(usize, usize, usize)],
         current: usize,
-        y_off: u32,
+        vp: Viewport,
     ) {
         let sb = term.visible_base();
         let rows = term.rows();
         for (k, &(abs, col, len)) in matches.iter().enumerate() {
-            let y = abs as isize - sb as isize;
-            if y < 0 || y >= rows as isize {
-                continue;
-            }
             let fill = if k == current {
                 SEARCH_CUR_RGBA
             } else {
                 SEARCH_RGBA
             };
-            let line: Vec<char> = term.visible_line_text(y as usize).chars().collect();
+            let line_row = abs as isize - sb as isize;
+            if line_row < 0 || line_row as usize >= rows {
+                continue;
+            }
+            let line: Vec<char> = term.visible_line_text(line_row as usize).chars().collect();
             for dx in 0..len {
                 let x = col + dx;
                 if x >= line.len() {
                     break;
                 }
+                let Some((cell_x, cell_y)) = viewport_search_cell(vp, abs, x, sb, rows) else {
+                    // Keep scanning within the same hit only if it can still
+                    // fit later columns; viewport_search_cell already clips.
+                    if x as u32 >= vp.cols {
+                        break;
+                    }
+                    continue;
+                };
                 if let Some(bg_slot) = self.bg_slot {
                     self.quads.extend(cell_quad(
-                        x as u32,
-                        y as u32 + y_off,
+                        cell_x,
+                        cell_y,
                         self.cell_w,
                         self.cell_h,
                         (bg_slot.x, bg_slot.y),
@@ -635,8 +672,8 @@ impl Renderer {
                 if c != ' ' {
                     if let Some(slot) = self.slot_for(c) {
                         self.quads.extend(cell_quad(
-                            x as u32,
-                            y as u32 + y_off,
+                            cell_x,
+                            cell_y,
                             self.cell_w,
                             self.cell_h,
                             (slot.x, slot.y),
@@ -653,8 +690,8 @@ impl Renderer {
     /// remainder of a suggestion after the typed prefix. Spaces advance
     /// without quads (matching draw_terminal). Wraps across rows so long
     /// previews and notices stay visible instead of clipping.
-    pub fn draw_ghost(&mut self, row: usize, col: usize, text: &str, cols: usize, rows: usize) {
-        for (x, y, c) in wrap_ghost(row, col, text, cols, rows) {
+    pub fn draw_ghost(&mut self, vp: Viewport, row: usize, col: usize, text: &str) {
+        for (x, y, c) in viewport_ghost_cells(vp, row, col, text) {
             if c != ' ' {
                 if let Some(slot) = self.slot_for(c) {
                     self.quads.extend(cell_quad(
@@ -759,5 +796,140 @@ impl Renderer {
         }
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
+    }
+}
+
+/// Pure coordinate helper: map an absolute scrollback row/column to a
+/// viewport cell, applying the viewport origin exactly once and clipping
+/// to the viewport and terminal bounds. Returns `None` when the hit is
+/// outside the viewport.
+pub fn viewport_search_cell(
+    vp: Viewport,
+    abs_row: usize,
+    col: usize,
+    visible_base: usize,
+    term_rows: usize,
+) -> Option<(u32, u32)> {
+    let y = abs_row as isize - visible_base as isize;
+    if y < 0 || y as usize >= term_rows || y as usize >= vp.rows as usize {
+        return None;
+    }
+    if col as u32 >= vp.cols {
+        return None;
+    }
+    Some((vp.x + col as u32, vp.y + y as u32))
+}
+
+/// Pure coordinate helper: ghost cells wrapped and clipped to the
+/// terminal viewport, then translated by the viewport origin.
+pub fn viewport_ghost_cells(
+    vp: Viewport,
+    row: usize,
+    col: usize,
+    text: &str,
+) -> Vec<(u32, u32, char)> {
+    wrap_ghost(row, col, text, vp.cols as usize, vp.rows as usize)
+        .into_iter()
+        .map(|(x, y, c)| (vp.x + x, vp.y + y, c))
+        .collect()
+}
+
+/// Pure hit test for a terminal viewport. The viewport origin is
+/// subtracted exactly once and out-of-bounds coordinates are rejected
+/// instead of clamped.
+pub fn viewport_hit_test(
+    px: f64,
+    py: f64,
+    vp: Viewport,
+    cell_w: u32,
+    cell_h: u32,
+    scrollback: usize,
+) -> Option<crate::selection::CellPos> {
+    if cell_w == 0 || cell_h == 0 || vp.cols == 0 || vp.rows == 0 {
+        return None;
+    }
+    let x = px - vp.x as f64 * cell_w as f64;
+    let y = py - vp.y as f64 * cell_h as f64;
+    if x < 0.0 || y < 0.0 {
+        return None;
+    }
+    let col = (x / cell_w as f64).floor() as usize;
+    let row = (y / cell_h as f64).floor() as usize;
+    if col >= vp.cols as usize || row >= vp.rows as usize {
+        return None;
+    }
+    Some(crate::selection::CellPos {
+        col,
+        row: row + scrollback,
+    })
+}
+
+#[cfg(test)]
+mod viewport_tests {
+    use super::*;
+
+    #[test]
+    fn viewport_origin_offsets_search_cell() {
+        let vp = Viewport {
+            x: 24,
+            y: 3,
+            cols: 40,
+            rows: 20,
+        };
+        assert_eq!(viewport_search_cell(vp, 103, 5, 100, 20), Some((29, 6)));
+        assert_eq!(viewport_search_cell(vp, 99, 5, 100, 20), None);
+        assert_eq!(viewport_search_cell(vp, 120, 5, 100, 20), None);
+        assert_eq!(viewport_search_cell(vp, 103, 40, 100, 20), None);
+    }
+
+    #[test]
+    fn viewport_origin_offsets_ghost_cells() {
+        let vp = Viewport {
+            x: 7,
+            y: 2,
+            cols: 5,
+            rows: 4,
+        };
+        let cells = viewport_ghost_cells(vp, 0, 3, "abcde");
+        assert_eq!(
+            cells,
+            vec![
+                (10, 2, 'a'),
+                (11, 2, 'b'),
+                (7, 3, 'c'),
+                (8, 3, 'd'),
+                (9, 3, 'e')
+            ]
+        );
+    }
+
+    #[test]
+    fn viewport_hit_test_rejects_out_of_bounds() {
+        let vp = Viewport {
+            x: 24,
+            y: 3,
+            cols: 40,
+            rows: 20,
+        };
+        assert_eq!(
+            viewport_hit_test(24.0 * 10.0, 3.0 * 20.0, vp, 10, 20, 7),
+            Some(crate::selection::CellPos { col: 0, row: 7 })
+        );
+        assert_eq!(
+            viewport_hit_test(23.0 * 10.0, 3.0 * 20.0, vp, 10, 20, 7),
+            None
+        );
+        assert_eq!(
+            viewport_hit_test(24.0 * 10.0, 2.0 * 20.0, vp, 10, 20, 7),
+            None
+        );
+        assert_eq!(
+            viewport_hit_test(64.0 * 10.0, 3.0 * 20.0, vp, 10, 20, 7),
+            None
+        );
+        assert_eq!(
+            viewport_hit_test(24.0 * 10.0, 23.0 * 20.0, vp, 10, 20, 7),
+            None
+        );
     }
 }

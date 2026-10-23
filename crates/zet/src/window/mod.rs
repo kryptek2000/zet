@@ -16,7 +16,7 @@ use zet_gpu::input::{
     is_agent_toggle, is_close_tab, is_copy, is_cycle_tab, is_new_tab, is_paste, is_search,
     is_select_all, translate,
 };
-use zet_gpu::selection::{pix_to_cell, Selection};
+use zet_gpu::selection::Selection;
 use zet_gpu::Renderer;
 use zet_pty::shell::ShellState;
 use zet_pty::Session;
@@ -198,6 +198,7 @@ struct App {
     mods: ModifiersState,
     cols: usize,
     rows: usize,
+    layout: crate::window::layout::Layout,
     env_spec: Option<String>,
     startup_spec: Option<String>,
     /// Commands that run without translation (PATH at startup +
@@ -683,18 +684,21 @@ impl App {
         let (x, y) = self.mouse_px?;
         let r = self.renderer.as_ref()?;
         let (cw, ch) = r.cell_px();
-        // Pixel row 0 belongs to the tab bar when visible: shift the
-        // grid mapping down (bar clicks are intercepted before select).
-        let y = y - self.bar_rows() as f64 * ch as f64;
-        Some(pix_to_cell(
+        let vp = self.frame_layout().term;
+        let gpu_vp = zet_gpu::renderer::Viewport {
+            x: vp.x,
+            y: vp.y,
+            cols: vp.cols,
+            rows: vp.rows,
+        };
+        zet_gpu::renderer::viewport_hit_test(
             x,
             y,
+            gpu_vp,
             cw,
             ch,
-            self.cols,
-            self.rows,
             self.tabs[self.active].term.visible_base(),
-        ))
+        )
     }
 
     /// Copy the mouse selection to the clipboard (no-op when empty).
@@ -835,13 +839,28 @@ impl App {
         (self.tabs.len() > 1) as usize
     }
 
+    #[allow(dead_code)]
     fn grid_rows(&self) -> usize {
         self.rows.saturating_sub(self.bar_rows())
     }
+    fn frame_layout(&self) -> layout::FrameLayout {
+        layout::resolve(
+            self.cols as u32,
+            self.rows as u32,
+            self.layout,
+            self.bar_rows(),
+        )
+    }
 
-    /// Size every tab's grid + PTY to the current window minus the bar.
+    /// Size every tab's grid + PTY to the terminal viewport.
     fn fit_all(&mut self) {
-        let (cols, rows) = (self.cols, self.grid_rows());
+        let (cols, rows) = layout::terminal_viewport(
+            self.layout,
+            self.cols as u32,
+            self.rows as u32,
+            self.bar_rows(),
+        );
+        let (cols, rows) = (cols as usize, rows as usize);
         for tab in &mut self.tabs {
             tab.term.resize(cols, rows);
             if let Some(s) = &tab.session {
@@ -1673,9 +1692,8 @@ impl ApplicationHandler for App {
                     }
                 }
                 // Snapshot draw params before borrowing the renderer:
-                // grid rows, bar offset, labels, selection are Copy/owned.
-                let (grid_rows, bar, cols, active) =
-                    (self.grid_rows(), self.bar_rows(), self.cols, self.active);
+                // bar offset, labels, selection are Copy/owned.
+                let (bar, cols, active) = (self.bar_rows(), self.cols, self.active);
                 let labels = self.tab_labels();
                 let sel = self.tabs[self.active].selection;
                 let ghost = self.tabs[self.active].ghost.visible().map(|g| {
@@ -1691,22 +1709,23 @@ impl ApplicationHandler for App {
                 } else {
                     None
                 };
+                let vp = self.frame_layout().term;
+                let gpu_vp = zet_gpu::renderer::Viewport {
+                    x: vp.x,
+                    y: vp.y,
+                    cols: vp.cols,
+                    rows: vp.rows,
+                };
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
-                    r.draw_terminal(
-                        &self.tabs[self.active].term,
-                        cols,
-                        grid_rows,
-                        sel,
-                        bar as u32,
-                    );
+                    r.draw_terminal_in(&self.tabs[self.active].term, gpu_vp, sel);
                     if bar > 0 {
                         r.draw_tabbar(&labels, active, cols);
                     }
                     if let Some((cx, cy, g)) = ghost {
-                        r.draw_ghost(cy + bar, cx, &g, cols, self.rows);
+                        r.draw_ghost(gpu_vp, cy, cx, &g);
                     }
                     if let Some((hits, cur)) = &search {
-                        r.draw_search(&self.tabs[self.active].term, hits, *cur, bar as u32);
+                        r.draw_search(&self.tabs[self.active].term, hits, *cur, gpu_vp);
                     }
                     r.render();
                     self.last_frame = std::time::Instant::now();
@@ -1850,6 +1869,7 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         mods: ModifiersState::empty(),
         cols: 80,
         rows: 24,
+        layout: crate::window::layout::LayoutMode::TerminalFocus.layout(),
         env_spec,
         startup_spec,
         known: zet_pty::KnownCommands::from_env(),
@@ -1974,5 +1994,110 @@ mod tests {
             text.contains("CHILD=[1712345678-4242]"),
             "child did not inherit the session id: {text}"
         );
+    }
+}
+
+#[cfg(test)]
+mod layout_fit_tests {
+    use super::App;
+    use super::Tab;
+
+    fn make_test_tab() -> Tab {
+        Tab {
+            session: None,
+            term: zet_term::Terminal::new(80, 24),
+            shell_state: zet_pty::shell::ShellState::new(),
+            rx: None,
+            dead: false,
+            erase: 127,
+            recorder: None,
+            ghost: zet_suggest::Ghost::new(zet_blocks::Store::open_in_memory().unwrap()),
+            selection: None,
+            selecting: false,
+            pending_fix: None,
+            nl_rx: None,
+            nl_wake: false,
+            goal_mode: false,
+            agent_busy: false,
+            agent_rx: None,
+            plan_rx: None,
+            pending_plan: None,
+            exec_req_rx: None,
+            exec_res_tx: None,
+            exec_pending: None,
+            last_journal: Vec::new(),
+            undo_rx: None,
+            was_alt: false,
+            search: super::SearchState {
+                on: false,
+                query: String::new(),
+                matches: Vec::new(),
+                current: 0,
+            },
+        }
+    }
+
+    fn make_test_app(cols: usize, rows: usize, layout: crate::window::layout::Layout) -> App {
+        App {
+            window: None,
+            renderer: None,
+            tabs: vec![make_test_tab()],
+            active: 0,
+            shell_name: "bash".to_string(),
+            prog: "bash".to_string(),
+            hook: None,
+            wake: None,
+            mods: winit::keyboard::ModifiersState::empty(),
+            cols,
+            rows,
+            layout,
+            env_spec: None,
+            startup_spec: None,
+            known: zet_pty::KnownCommands::from_env(),
+            mouse_px: None,
+            last_frame: std::time::Instant::now(),
+            needs_draw: true,
+            perf_t0: None,
+            perf_input: None,
+            perf_frames: 0,
+            cmd_t0: None,
+            perf_blocks: 0,
+            pending_goal: None,
+        }
+    }
+
+    #[test]
+    fn fit_all_uses_resolved_viewport() {
+        let mut app = make_test_app(
+            104,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        app.fit_all();
+        assert_eq!(app.tabs[0].term.cols(), 80);
+        assert_eq!(app.tabs[0].term.rows(), 24);
+
+        app.tabs.push(make_test_tab());
+        app.fit_all();
+        assert_eq!(app.tabs[0].term.cols(), 80);
+        assert_eq!(app.tabs[0].term.rows(), 23);
+        assert_eq!(app.tabs[1].term.cols(), 80);
+        assert_eq!(app.tabs[1].term.rows(), 23);
+
+        app.tabs.pop();
+        app.fit_all();
+        assert_eq!(app.tabs[0].term.rows(), 24);
+    }
+
+    #[test]
+    fn fit_all_terminal_focus_uses_full_window() {
+        let mut app = make_test_app(
+            80,
+            24,
+            crate::window::layout::LayoutMode::TerminalFocus.layout(),
+        );
+        app.fit_all();
+        assert_eq!(app.tabs[0].term.cols(), 80);
+        assert_eq!(app.tabs[0].term.rows(), 24);
     }
 }
