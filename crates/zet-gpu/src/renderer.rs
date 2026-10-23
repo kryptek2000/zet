@@ -634,32 +634,33 @@ impl Renderer {
         let sb = term.visible_base();
         let rows = term.rows();
         for (k, &(abs, col, len)) in matches.iter().enumerate() {
-            let y = abs as isize - sb as isize;
-            if y < 0 || y >= rows as isize {
-                continue;
-            }
-            let vis_row = y as u32;
-            if vis_row >= vp.rows {
-                continue;
-            }
             let fill = if k == current {
                 SEARCH_CUR_RGBA
             } else {
                 SEARCH_RGBA
             };
-            let line: Vec<char> = term.visible_line_text(y as usize).chars().collect();
+            let line_row = abs as isize - sb as isize;
+            if line_row < 0 || line_row as usize >= rows {
+                continue;
+            }
+            let line: Vec<char> = term.visible_line_text(line_row as usize).chars().collect();
             for dx in 0..len {
                 let x = col + dx;
                 if x >= line.len() {
                     break;
                 }
-                if x as u32 >= vp.cols {
-                    break;
-                }
+                let Some((cell_x, cell_y)) = viewport_search_cell(vp, abs, x, sb, rows) else {
+                    // Keep scanning within the same hit only if it can still
+                    // fit later columns; viewport_search_cell already clips.
+                    if x as u32 >= vp.cols {
+                        break;
+                    }
+                    continue;
+                };
                 if let Some(bg_slot) = self.bg_slot {
                     self.quads.extend(cell_quad(
-                        vp.x + x as u32,
-                        vp.y + vis_row,
+                        cell_x,
+                        cell_y,
                         self.cell_w,
                         self.cell_h,
                         (bg_slot.x, bg_slot.y),
@@ -671,8 +672,8 @@ impl Renderer {
                 if c != ' ' {
                     if let Some(slot) = self.slot_for(c) {
                         self.quads.extend(cell_quad(
-                            vp.x + x as u32,
-                            vp.y + vis_row,
+                            cell_x,
+                            cell_y,
                             self.cell_w,
                             self.cell_h,
                             (slot.x, slot.y),
@@ -690,12 +691,12 @@ impl Renderer {
     /// without quads (matching draw_terminal). Wraps across rows so long
     /// previews and notices stay visible instead of clipping.
     pub fn draw_ghost(&mut self, vp: Viewport, row: usize, col: usize, text: &str) {
-        for (x, y, c) in wrap_ghost(row, col, text, vp.cols as usize, vp.rows as usize) {
+        for (x, y, c) in viewport_ghost_cells(vp, row, col, text) {
             if c != ' ' {
                 if let Some(slot) = self.slot_for(c) {
                     self.quads.extend(cell_quad(
-                        vp.x + x,
-                        vp.y + y,
+                        x,
+                        y,
                         self.cell_w,
                         self.cell_h,
                         (slot.x, slot.y),

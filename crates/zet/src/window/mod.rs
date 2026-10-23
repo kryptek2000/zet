@@ -16,7 +16,7 @@ use zet_gpu::input::{
     is_agent_toggle, is_close_tab, is_copy, is_cycle_tab, is_new_tab, is_paste, is_search,
     is_select_all, translate,
 };
-use zet_gpu::selection::{pix_to_cell, Selection};
+use zet_gpu::selection::Selection;
 use zet_gpu::Renderer;
 use zet_pty::shell::ShellState;
 use zet_pty::Session;
@@ -684,25 +684,20 @@ impl App {
         let r = self.renderer.as_ref()?;
         let (cw, ch) = r.cell_px();
         let vp = self.frame_layout().term;
-        // Pixel -> cell relative to the terminal viewport. The viewport
-        // origin already includes the tab-bar row, so subtract it once.
-        let x = x - vp.x as f64 * cw as f64;
-        let y = y - vp.y as f64 * ch as f64;
-        if x < 0.0 || y < 0.0 {
-            return None;
-        }
-        if x >= vp.cols as f64 * cw as f64 || y >= vp.rows as f64 * ch as f64 {
-            return None;
-        }
-        Some(pix_to_cell(
+        let gpu_vp = zet_gpu::renderer::Viewport {
+            x: vp.x,
+            y: vp.y,
+            cols: vp.cols,
+            rows: vp.rows,
+        };
+        zet_gpu::renderer::viewport_hit_test(
             x,
             y,
+            gpu_vp,
             cw,
             ch,
-            vp.cols as usize,
-            vp.rows as usize,
             self.tabs[self.active].term.visible_base(),
-        ))
+        )
     }
 
     /// Copy the mouse selection to the clipboard (no-op when empty).
@@ -858,8 +853,9 @@ impl App {
 
     /// Size every tab's grid + PTY to the terminal viewport.
     fn fit_all(&mut self) {
-        let vp = self.frame_layout().term;
-        let (cols, rows) = (vp.cols as usize, vp.rows as usize);
+        let (cols, rows) =
+            layout::terminal_viewport(self.cols as u32, self.rows as u32, self.bar_rows());
+        let (cols, rows) = (cols as usize, rows as usize);
         for tab in &mut self.tabs {
             tab.term.resize(cols, rows);
             if let Some(s) = &tab.session {
