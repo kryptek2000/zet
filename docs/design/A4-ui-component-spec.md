@@ -1,3 +1,5 @@
+> **HISTORICAL UI REFERENCE — 2026-10-22:** The approved direction is [ZET Product Charter](../ZET-PRODUCT-CHARTER.md) and [Roadmap](../ROADMAP.md). This A4 design contains reusable native component/renderer constraints, but its Ghostty × Warp styling, panel composition, block-only interaction assumptions and exact shortcuts are **not an approved final implementation specification**. Reconcile before coding. The flagship UX is the outcome-aware Mission Control workspace with a first-class real PTY, collapsible panels, truthful evidence and no required agent platform.
+
 # A4 — Zet UI/UX Component Specification (Ghostty × Warp synthesis)
 
 **Status:** design · **Crate ownership:** `zet` (composition root / chrome) + `zet-gpu` (pure renderer) + `zet-blocks` / `zet-agent` / `zet-policy` / `zet-suggest` / `zet-term` / `zet-pty` as data sources.
