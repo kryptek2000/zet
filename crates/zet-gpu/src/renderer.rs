@@ -440,7 +440,7 @@ impl Renderer {
         };
         let (cw, ch) = (self.cell_w as u32, self.cell_h as u32);
         let ascent = self.shaper.ascent_px();
-        let rgba = crate::text::blit(cov, ascent, cw, ch);
+        let rgba = crate::text::blit(cov, ascent, cw, ch, self.shaper.left_pad());
         self.write_slot(&slot, &rgba, cw, ch);
         self.slots.insert(c, slot);
         Some(slot)
