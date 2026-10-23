@@ -707,6 +707,70 @@ impl Renderer {
             }
         }
     }
+    /// Solid, cell-aligned rectangle covering every cell of `vp`.
+    /// Appends to the current quad buffer; it never clears terminal
+    /// geometry. Uses the existing solid atlas texel.
+    pub fn draw_fill(&mut self, vp: Viewport, color: Rgba) {
+        let Some(bg_slot) = self.bg_slot else {
+            return;
+        };
+        for (cx, cy) in viewport_fill_cells(vp) {
+            self.quads.extend(cell_quad(
+                cx,
+                cy,
+                self.cell_w,
+                self.cell_h,
+                (bg_slot.x, bg_slot.y),
+                self.atlas_size,
+                color,
+            ));
+        }
+    }
+
+    /// One row of text at (`vp.x + col`, `vp.y + row`), clipped to the
+    /// viewport. Reuses the existing glyph cache and appends to the
+    /// current quad buffer.
+    pub fn draw_text_row(&mut self, vp: Viewport, row: u32, col: u32, text: &str, ink: Rgba) {
+        if row >= vp.rows || col >= vp.cols {
+            return;
+        }
+        for (cx, cy, c) in viewport_text_cells(vp, row, col, text) {
+            if c == ' ' {
+                continue;
+            }
+            if let Some(slot) = self.slot_for(c) {
+                self.quads.extend(cell_quad(
+                    cx,
+                    cy,
+                    self.cell_w,
+                    self.cell_h,
+                    (slot.x, slot.y),
+                    self.atlas_size,
+                    ink,
+                ));
+            }
+        }
+    }
+
+    /// A one-cell-wide vertical rule spanning rows `[y0, y1)` at column
+    /// `x`. Appends to the current quad buffer and is a no-op for empty
+    /// or inverted ranges.
+    pub fn draw_rule(&mut self, x: u32, y0: u32, y1: u32, color: Rgba) {
+        let Some(bg_slot) = self.bg_slot else {
+            return;
+        };
+        for y in rule_rows(y0, y1) {
+            self.quads.extend(cell_quad(
+                x,
+                y,
+                self.cell_w,
+                self.cell_h,
+                (bg_slot.x, bg_slot.y),
+                self.atlas_size,
+                color,
+            ));
+        }
+    }
 }
 
 /// Visible cells for ghost/notice text starting at (row, col), wrapped
@@ -864,6 +928,47 @@ pub fn viewport_hit_test(
     })
 }
 
+/// Pure geometry helper for `draw_fill`: every cell covered by `vp`.
+pub fn viewport_fill_cells(vp: Viewport) -> Vec<(u32, u32)> {
+    if vp.cols == 0 || vp.rows == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity((vp.cols as usize) * (vp.rows as usize));
+    for y in 0..vp.rows {
+        for x in 0..vp.cols {
+            out.push((vp.x + x, vp.y + y));
+        }
+    }
+    out
+}
+
+/// Pure geometry helper for `draw_text_row`: clipped text cells.
+pub fn viewport_text_cells(vp: Viewport, row: u32, col: u32, text: &str) -> Vec<(u32, u32, char)> {
+    if row >= vp.rows || col as usize >= vp.cols as usize {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (i, c) in text.chars().enumerate() {
+        let Some(x) = (col as usize).checked_add(i) else {
+            break;
+        };
+        if x >= vp.cols as usize {
+            break;
+        }
+        out.push((vp.x + x as u32, vp.y + row, c));
+    }
+    out
+}
+
+/// Pure geometry helper for `draw_rule`: rows in `[y0, y1)`.
+pub fn rule_rows(y0: u32, y1: u32) -> Vec<u32> {
+    if y1 <= y0 {
+        Vec::new()
+    } else {
+        (y0..y1).collect()
+    }
+}
+
 #[cfg(test)]
 mod viewport_tests {
     use super::*;
@@ -931,5 +1036,68 @@ mod viewport_tests {
             viewport_hit_test(24.0 * 10.0, 23.0 * 20.0, vp, 10, 20, 7),
             None
         );
+    }
+
+    #[test]
+    fn viewport_fill_covers_every_cell_once() {
+        let vp = Viewport {
+            x: 4,
+            y: 7,
+            cols: 3,
+            rows: 2,
+        };
+        assert_eq!(
+            viewport_fill_cells(vp),
+            vec![(4, 7), (5, 7), (6, 7), (4, 8), (5, 8), (6, 8)]
+        );
+    }
+
+    #[test]
+    fn viewport_fill_is_empty_for_zero_size() {
+        let vp = Viewport {
+            x: 4,
+            y: 7,
+            cols: 0,
+            rows: 2,
+        };
+        assert!(viewport_fill_cells(vp).is_empty());
+    }
+
+    #[test]
+    fn viewport_text_clips_to_viewport() {
+        let vp = Viewport {
+            x: 2,
+            y: 9,
+            cols: 4,
+            rows: 3,
+        };
+        assert_eq!(
+            viewport_text_cells(vp, 1, 2, "abcdef"),
+            vec![(4, 10, 'a'), (5, 10, 'b')]
+        );
+        assert!(viewport_text_cells(vp, 3, 0, "x").is_empty());
+        assert!(viewport_text_cells(vp, 0, 4, "x").is_empty());
+        assert!(viewport_text_cells(vp, 0, 0, "").is_empty());
+    }
+
+    #[test]
+    fn viewport_text_handles_unicode_chars() {
+        let vp = Viewport {
+            x: 0,
+            y: 0,
+            cols: 4,
+            rows: 1,
+        };
+        let cells = viewport_text_cells(vp, 0, 0, "aé😀");
+        assert_eq!(cells.len(), 3);
+        assert_eq!(cells[2].2, '😀');
+    }
+
+    #[test]
+    fn rule_rows_is_safe_and_ordered() {
+        assert_eq!(rule_rows(2, 5), vec![2, 3, 4]);
+        assert!(rule_rows(5, 5).is_empty());
+        assert!(rule_rows(7, 3).is_empty());
+        assert!(rule_rows(u32::MAX, u32::MAX).is_empty());
     }
 }
