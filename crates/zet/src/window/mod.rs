@@ -198,6 +198,7 @@ struct App {
     mods: ModifiersState,
     cols: usize,
     rows: usize,
+    layout: crate::window::layout::Layout,
     env_spec: Option<String>,
     startup_spec: Option<String>,
     /// Commands that run without translation (PATH at startup +
@@ -846,15 +847,19 @@ impl App {
         layout::resolve(
             self.cols as u32,
             self.rows as u32,
-            layout::LayoutMode::TerminalFocus.layout(),
+            self.layout,
             self.bar_rows(),
         )
     }
 
     /// Size every tab's grid + PTY to the terminal viewport.
     fn fit_all(&mut self) {
-        let (cols, rows) =
-            layout::terminal_viewport(self.cols as u32, self.rows as u32, self.bar_rows());
+        let (cols, rows) = layout::terminal_viewport(
+            self.layout,
+            self.cols as u32,
+            self.rows as u32,
+            self.bar_rows(),
+        );
         let (cols, rows) = (cols as usize, rows as usize);
         for tab in &mut self.tabs {
             tab.term.resize(cols, rows);
@@ -1864,6 +1869,7 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         mods: ModifiersState::empty(),
         cols: 80,
         rows: 24,
+        layout: crate::window::layout::LayoutMode::TerminalFocus.layout(),
         env_spec,
         startup_spec,
         known: zet_pty::KnownCommands::from_env(),
@@ -1988,5 +1994,110 @@ mod tests {
             text.contains("CHILD=[1712345678-4242]"),
             "child did not inherit the session id: {text}"
         );
+    }
+}
+
+#[cfg(test)]
+mod layout_fit_tests {
+    use super::App;
+    use super::Tab;
+
+    fn make_test_tab() -> Tab {
+        Tab {
+            session: None,
+            term: zet_term::Terminal::new(80, 24),
+            shell_state: zet_pty::shell::ShellState::new(),
+            rx: None,
+            dead: false,
+            erase: 127,
+            recorder: None,
+            ghost: zet_suggest::Ghost::new(zet_blocks::Store::open_in_memory().unwrap()),
+            selection: None,
+            selecting: false,
+            pending_fix: None,
+            nl_rx: None,
+            nl_wake: false,
+            goal_mode: false,
+            agent_busy: false,
+            agent_rx: None,
+            plan_rx: None,
+            pending_plan: None,
+            exec_req_rx: None,
+            exec_res_tx: None,
+            exec_pending: None,
+            last_journal: Vec::new(),
+            undo_rx: None,
+            was_alt: false,
+            search: super::SearchState {
+                on: false,
+                query: String::new(),
+                matches: Vec::new(),
+                current: 0,
+            },
+        }
+    }
+
+    fn make_test_app(cols: usize, rows: usize, layout: crate::window::layout::Layout) -> App {
+        App {
+            window: None,
+            renderer: None,
+            tabs: vec![make_test_tab()],
+            active: 0,
+            shell_name: "bash".to_string(),
+            prog: "bash".to_string(),
+            hook: None,
+            wake: None,
+            mods: winit::keyboard::ModifiersState::empty(),
+            cols,
+            rows,
+            layout,
+            env_spec: None,
+            startup_spec: None,
+            known: zet_pty::KnownCommands::from_env(),
+            mouse_px: None,
+            last_frame: std::time::Instant::now(),
+            needs_draw: true,
+            perf_t0: None,
+            perf_input: None,
+            perf_frames: 0,
+            cmd_t0: None,
+            perf_blocks: 0,
+            pending_goal: None,
+        }
+    }
+
+    #[test]
+    fn fit_all_uses_resolved_viewport() {
+        let mut app = make_test_app(
+            104,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        app.fit_all();
+        assert_eq!(app.tabs[0].term.cols(), 80);
+        assert_eq!(app.tabs[0].term.rows(), 24);
+
+        app.tabs.push(make_test_tab());
+        app.fit_all();
+        assert_eq!(app.tabs[0].term.cols(), 80);
+        assert_eq!(app.tabs[0].term.rows(), 23);
+        assert_eq!(app.tabs[1].term.cols(), 80);
+        assert_eq!(app.tabs[1].term.rows(), 23);
+
+        app.tabs.pop();
+        app.fit_all();
+        assert_eq!(app.tabs[0].term.rows(), 24);
+    }
+
+    #[test]
+    fn fit_all_terminal_focus_uses_full_window() {
+        let mut app = make_test_app(
+            80,
+            24,
+            crate::window::layout::LayoutMode::TerminalFocus.layout(),
+        );
+        app.fit_all();
+        assert_eq!(app.tabs[0].term.cols(), 80);
+        assert_eq!(app.tabs[0].term.rows(), 24);
     }
 }
