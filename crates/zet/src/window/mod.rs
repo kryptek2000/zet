@@ -1060,8 +1060,11 @@ impl App {
     fn handle_mouse_click(&mut self, x: f64, y: f64, cw: u32, ch: u32) {
         self.needs_draw = true;
         // Tab bar owns pixel row 0: clicks switch tabs.
-        if self.bar_rows() > 0 && (y / ch.max(1) as f64).floor() as usize == 0 {
-            let col = (x / cw.max(1) as f64).floor().max(0.0) as usize;
+        if self.bar_rows() > 0 && x >= 0.0 && (y / ch.max(1) as f64).floor() as usize == 0 {
+            let col = (x / cw.max(1) as f64).floor() as usize;
+            if col >= self.cols {
+                return;
+            }
             if let Some(seg) = zet_gpu::selection::tabbar_hit_segment(
                 col,
                 self.rail_cols(),
@@ -1082,7 +1085,7 @@ impl App {
             let rail_px = rail_cols as f64 * cw as f64;
             let top = vp.y as f64 * ch as f64;
             let bottom = (vp.y as f64 + vp.rows as f64) * ch as f64;
-            if x < rail_px && y >= top && y < bottom {
+            if x >= 0.0 && x < rail_px && y >= top && y < bottom {
                 let row = ((y - top) / ch as f64).floor() as usize as u32;
                 if let Some(session) = panels::rail_row_target(row, self.tabs.len(), vp.rows) {
                     self.rail_sel = session;
@@ -2796,5 +2799,196 @@ mod layout_fit_tests {
         let tabs_before = app.active;
         app.handle_mouse_click(0.0, 0.0, 10, 20);
         assert_eq!(app.active, tabs_before);
+    }
+
+    #[test]
+    fn tab_bar_clicks_reject_rail_and_activate_valid_tabs() {
+        let mut app = make_test_app(
+            104,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        app.tabs.push(make_test_tab());
+        app.active = 1;
+
+        app.handle_mouse_click(10.0, 0.0, 10, 20);
+        assert_eq!(app.active, 1);
+
+        app.handle_mouse_click(60.0, 0.0, 10, 20);
+        assert_eq!(app.active, 1);
+
+        app.handle_mouse_click(700.0, 0.0, 10, 20);
+        assert_eq!(app.active, 1);
+
+        app.handle_mouse_click(0.0, 0.0, 10, 20);
+        assert_eq!(app.active, 1);
+    }
+
+    #[test]
+    fn rail_session_rows_select_correct_sessions() {
+        let mut app = make_test_app(
+            104,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        app.tabs.push(make_test_tab());
+        app.layout.rail = true;
+        app.focus = super::Focus::Terminal;
+        app.rail_sel = 0;
+
+        app.handle_mouse_click(10.0, 80.0, 10, 20);
+        assert_eq!(app.focus, super::Focus::Rail);
+        assert_eq!(app.rail_sel, 0);
+        assert_eq!(app.active, 0);
+
+        app.handle_mouse_click(10.0, 100.0, 10, 20);
+        assert_eq!(app.rail_sel, 1);
+        assert_eq!(app.active, 0);
+
+        app.handle_mouse_click(10.0, 20.0, 10, 20);
+        assert_eq!(app.rail_sel, 1);
+
+        app.handle_mouse_click(10.0, 200.0, 10, 20);
+        assert_eq!(app.rail_sel, 1);
+
+        app.handle_mouse_click(-1.0, 100.0, 10, 20);
+        assert_eq!(app.rail_sel, 1);
+    }
+
+    #[test]
+    fn rail_keyboard_dispatch_is_safe() {
+        let mut app = make_test_app(
+            80,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        app.tabs.push(make_test_tab());
+        app.layout.rail = true;
+        app.focus = super::Focus::Rail;
+        app.rail_sel = 0;
+
+        let mut mods = winit::keyboard::ModifiersState::empty();
+        mods.insert(winit::keyboard::ModifiersState::CONTROL);
+        mods.insert(winit::keyboard::ModifiersState::SHIFT);
+        app.handle_key_parts(
+            winit::keyboard::Key::Character("m".into()),
+            None,
+            true,
+            mods,
+            None,
+        );
+        assert!(!app.layout.rail);
+        assert_eq!(app.focus, super::Focus::Terminal);
+
+        app.layout.rail = true;
+        app.focus = super::Focus::Rail;
+        app.rail_sel = 1;
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowUp),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.rail_sel, 0);
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.rail_sel, 1);
+
+        app.rail_sel = 1;
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.active, 1);
+        assert_eq!(app.focus, super::Focus::Terminal);
+
+        app.focus = super::Focus::Rail;
+        let mut ctrl = winit::keyboard::ModifiersState::empty();
+        ctrl.insert(winit::keyboard::ModifiersState::CONTROL);
+        app.handle_key_parts(
+            winit::keyboard::Key::Character("c".into()),
+            None,
+            true,
+            ctrl,
+            None,
+        );
+        assert_eq!(app.focus, super::Focus::Terminal);
+
+        app.focus = super::Focus::Rail;
+        app.handle_key_parts(
+            winit::keyboard::Key::Character("x".into()),
+            Some("x"),
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.focus, super::Focus::Rail);
+    }
+
+    #[test]
+    fn build_rail_snapshot_limits_and_isolates_commands() {
+        let mut app = make_test_app(
+            80,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        for i in 0..12 {
+            store
+                .append(&zet_blocks::Block {
+                    id: 0,
+                    session: "session-a".to_string(),
+                    command: format!("cmd {i}"),
+                    output: "output".to_string(),
+                    exit_code: i,
+                    cwd: "/tmp".to_string(),
+                    git_branch: String::new(),
+                    duration_ms: i as u64,
+                })
+                .unwrap();
+        }
+        let other_store = zet_blocks::Store::open_in_memory().unwrap();
+        other_store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-b".to_string(),
+                command: "other command".to_string(),
+                output: "other".to_string(),
+                exit_code: 7,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 9,
+            })
+            .unwrap();
+
+        let mut tab_a = make_test_tab();
+        tab_a.recorder = Some(zet_blocks::Recorder::new(store, "session-a"));
+        let mut tab_b = make_test_tab();
+        tab_b.recorder = Some(zet_blocks::Recorder::new(other_store, "session-b"));
+        app.tabs = vec![tab_a, tab_b];
+        app.active = 0;
+
+        let snapshot = app.build_rail_snapshot();
+        assert_eq!(snapshot.commands.len(), 8);
+        assert!(snapshot.commands[0].command.contains("cmd 4"));
+        assert!(snapshot.commands[7].command.contains("cmd 11"));
+        assert!(snapshot
+            .commands
+            .iter()
+            .all(|command| !command.command.contains("other")));
+
+        app.active = 1;
+        let snapshot = app.build_rail_snapshot();
+        assert_eq!(snapshot.commands.len(), 1);
+        assert!(snapshot.commands[0].command.contains("other command"));
     }
 }
