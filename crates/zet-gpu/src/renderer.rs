@@ -545,15 +545,17 @@ impl Renderer {
                         term_color(bg, false)
                     };
                     if let Some(bg_slot) = self.bg_slot {
-                        self.quads.extend(cell_quad(
-                            vp.x + vx as u32,
-                            vp.y + vy as u32,
-                            self.cell_w,
-                            self.cell_h,
-                            (bg_slot.x, bg_slot.y),
-                            self.atlas_size,
-                            fill,
-                        ));
+                        if let Some((cx, cy)) = viewport_cell_origin(vp, vx as u32, vy as u32) {
+                            self.quads.extend(cell_quad(
+                                cx,
+                                cy,
+                                self.cell_w,
+                                self.cell_h,
+                                (bg_slot.x, bg_slot.y),
+                                self.atlas_size,
+                                fill,
+                            ));
+                        }
                     }
                 }
                 if c == ' ' {
@@ -572,15 +574,17 @@ impl Renderer {
                 let Some(slot) = self.slot_for(c) else {
                     continue;
                 };
-                self.quads.extend(cell_quad(
-                    vp.x + vx as u32,
-                    vp.y + vy as u32,
-                    self.cell_w,
-                    self.cell_h,
-                    (slot.x, slot.y),
-                    self.atlas_size,
-                    ink,
-                ));
+                if let Some((cx, cy)) = viewport_cell_origin(vp, vx as u32, vy as u32) {
+                    self.quads.extend(cell_quad(
+                        cx,
+                        cy,
+                        self.cell_w,
+                        self.cell_h,
+                        (slot.x, slot.y),
+                        self.atlas_size,
+                        ink,
+                    ));
+                }
             }
         }
     }
@@ -588,11 +592,29 @@ impl Renderer {
     /// Tab bar on row 0: equal segments, active lifted + white ink,
     /// inactive dim. Labels pre-truncated by the caller; overlong text
     /// clips at the grid edge.
+    ///
+    /// With a zero-width rail this is byte-identical to the historical
+    /// full-window tab bar. With a nonzero rail, tab controls occupy only
+    /// the drawable strip `[rail_cols, cols)` so rail pixels are never
+    /// painted as tab controls and every tab with a nonempty strip has a
+    /// reachable hit region.
     pub fn draw_tabbar(&mut self, labels: &[String], active: usize, cols: usize) {
+        self.draw_tabbar_with_rail(labels, active, cols, 0);
+    }
+
+    /// Tab bar variant with an excluded leading rail region.
+    pub fn draw_tabbar_with_rail(
+        &mut self,
+        labels: &[String],
+        active: usize,
+        cols: usize,
+        rail_cols: usize,
+    ) {
         let n = labels.len().max(1);
+        let segments = crate::selection::tabbar_segments(cols, rail_cols, n);
         for x in 0..cols {
-            let seg = crate::selection::tab_segment(x, cols, labels.len());
-            let is_active = seg == active;
+            let seg = crate::selection::tabbar_segment_for_x(x, rail_cols, cols, n);
+            let is_active = seg == Some(active);
             let fill = if is_active { TAB_ACTIVE_BG } else { TABBAR_BG };
             if let Some(bg_slot) = self.bg_slot {
                 self.quads.extend(cell_quad(
@@ -605,9 +627,15 @@ impl Renderer {
                     fill,
                 ));
             }
-            let seg_w = cols / n;
-            let lx = x - seg * seg_w;
-            let text: Vec<char> = labels[seg].chars().collect();
+            let Some(seg) = seg else {
+                continue;
+            };
+            let (start, _) = segments[seg];
+            let lx = x - start;
+            let text: Vec<char> = labels
+                .get(seg)
+                .map(|s| s.chars().collect())
+                .unwrap_or_default();
             if lx < text.len() {
                 let c = text[lx];
                 if c != ' ' {
@@ -1111,6 +1139,18 @@ pub fn rule_rows(y0: u32, y1: u32) -> Vec<u32> {
     rule_rows_iter(y0, y1).collect()
 }
 
+/// Pure origin helper for terminal cells: apply viewport X/Y exactly
+/// once and clip to the viewport. Returns `None` for out-of-bounds or
+/// overflowing coordinates.
+pub fn viewport_cell_origin(vp: Viewport, col: u32, row: u32) -> Option<(u32, u32)> {
+    if col >= vp.cols || row >= vp.rows {
+        return None;
+    }
+    let x = vp.x.checked_add(col)?;
+    let y = vp.y.checked_add(row)?;
+    Some((x, y))
+}
+
 #[cfg(test)]
 mod viewport_tests {
     use super::*;
@@ -1428,5 +1468,122 @@ mod viewport_tests {
         );
         assert_eq!(viewport_text_iter(vp, 0, 0, "a\nb").count(), 3);
         assert_eq!(viewport_text_iter(vp, 1, 0, "a").count(), 0);
+    }
+
+    #[test]
+    fn viewport_cell_origin_applies_offsets_once() {
+        let vp = Viewport {
+            x: 24,
+            y: 3,
+            cols: 40,
+            rows: 20,
+        };
+        assert_eq!(viewport_cell_origin(vp, 0, 0), Some((24, 3)));
+        assert_eq!(viewport_cell_origin(vp, 39, 19), Some((63, 22)));
+        assert_eq!(viewport_cell_origin(vp, 40, 0), None);
+        assert_eq!(viewport_cell_origin(vp, 0, 20), None);
+    }
+
+    #[test]
+    fn viewport_cell_origin_does_not_wrap() {
+        let vp = Viewport {
+            x: u32::MAX - 1,
+            y: u32::MAX - 1,
+            cols: 3,
+            rows: 2,
+        };
+        assert_eq!(
+            viewport_cell_origin(vp, 0, 0),
+            Some((u32::MAX - 1, u32::MAX - 1))
+        );
+        assert_eq!(
+            viewport_cell_origin(vp, 1, 0),
+            Some((u32::MAX, u32::MAX - 1))
+        );
+        assert_eq!(viewport_cell_origin(vp, 2, 0), None);
+        assert_eq!(
+            viewport_cell_origin(vp, 0, 1),
+            Some((u32::MAX - 1, u32::MAX))
+        );
+        assert_eq!(viewport_cell_origin(vp, 0, 2), None);
+    }
+
+    #[test]
+    fn search_cell_nonzero_origin_and_scrollback() {
+        let vp = Viewport {
+            x: 12,
+            y: 2,
+            cols: 10,
+            rows: 4,
+        };
+        assert_eq!(viewport_search_cell(vp, 103, 3, 100, 4), Some((15, 5)));
+        assert_eq!(viewport_search_cell(vp, 100, 0, 100, 4), Some((12, 2)));
+        assert_eq!(viewport_search_cell(vp, 102, 9, 100, 4), Some((21, 4)));
+        assert_eq!(viewport_search_cell(vp, 103, 10, 100, 4), None);
+        assert_eq!(viewport_search_cell(vp, 99, 0, 100, 4), None);
+        assert_eq!(viewport_search_cell(vp, 104, 0, 100, 4), None);
+    }
+
+    #[test]
+    fn search_cell_clips_right_edge() {
+        let vp = Viewport {
+            x: 0,
+            y: 0,
+            cols: 3,
+            rows: 2,
+        };
+        assert_eq!(viewport_search_cell(vp, 0, 2, 0, 2), Some((2, 0)));
+        assert_eq!(viewport_search_cell(vp, 0, 3, 0, 2), None);
+    }
+
+    #[test]
+    fn ghost_cells_use_viewport_origin_and_width() {
+        let vp = Viewport {
+            x: 5,
+            y: 1,
+            cols: 4,
+            rows: 3,
+        };
+        assert_eq!(
+            viewport_ghost_cells(vp, 0, 2, "abcdef"),
+            vec![
+                (7, 1, 'a'),
+                (8, 1, 'b'),
+                (5, 2, 'c'),
+                (6, 2, 'd'),
+                (7, 2, 'e'),
+                (8, 2, 'f')
+            ]
+        );
+    }
+
+    #[test]
+    fn ghost_cells_reject_overflowing_origin() {
+        let vp = Viewport {
+            x: u32::MAX - 1,
+            y: u32::MAX - 1,
+            cols: 3,
+            rows: 2,
+        };
+        assert_eq!(
+            viewport_ghost_cells(vp, 0, 0, "abc"),
+            vec![
+                (u32::MAX - 1, u32::MAX - 1, 'a'),
+                (u32::MAX, u32::MAX - 1, 'b')
+            ]
+        );
+    }
+
+    #[test]
+    fn multiple_tab_offsets_are_viewport_relative() {
+        let vp = Viewport {
+            x: 24,
+            y: 1,
+            cols: 80,
+            rows: 23,
+        };
+        assert_eq!(viewport_cell_origin(vp, 0, 0), Some((24, 1)));
+        assert_eq!(viewport_cell_origin(vp, 79, 22), Some((103, 23)));
+        assert_eq!(viewport_cell_origin(vp, 80, 0), None);
     }
 }

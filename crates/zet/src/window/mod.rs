@@ -839,6 +839,13 @@ impl App {
         (self.tabs.len() > 1) as usize
     }
 
+    /// Width of the currently resolved rail, in columns. Zero in the
+    /// default Terminal Focus layout, so existing tab-bar behavior is
+    /// unchanged until a rail is actually enabled.
+    fn rail_cols(&self) -> usize {
+        self.frame_layout().rail.map_or(0, |vp| vp.cols as usize)
+    }
+
     #[allow(dead_code)]
     fn grid_rows(&self) -> usize {
         self.rows.saturating_sub(self.bar_rows())
@@ -1709,6 +1716,7 @@ impl ApplicationHandler for App {
                 } else {
                     None
                 };
+                let rail_cols = self.rail_cols();
                 let vp = self.frame_layout().term;
                 let gpu_vp = zet_gpu::renderer::Viewport {
                     x: vp.x,
@@ -1719,7 +1727,7 @@ impl ApplicationHandler for App {
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
                     r.draw_terminal_in(&self.tabs[self.active].term, gpu_vp, sel);
                     if bar > 0 {
-                        r.draw_tabbar(&labels, active, cols);
+                        r.draw_tabbar_with_rail(&labels, active, cols, rail_cols);
                     }
                     if let Some((cx, cy, g)) = ghost {
                         r.draw_ghost(gpu_vp, cy, cx, &g);
@@ -1745,13 +1753,20 @@ impl ApplicationHandler for App {
                                 let (cw, ch) = r.cell_px();
                                 if (y / ch as f64).floor() as usize == 0 {
                                     let col = (x / cw.max(1) as f64).floor().max(0.0) as usize;
-                                    self.active = zet_gpu::selection::tab_segment(
+                                    // Rail-area clicks are rejected so a
+                                    // future rail cannot accidentally switch
+                                    // tabs; with rail_cols == 0 this is the
+                                    // existing full-width behavior.
+                                    if let Some(seg) = zet_gpu::selection::tabbar_hit_segment(
                                         col,
+                                        self.rail_cols(),
                                         self.cols,
                                         self.tabs.len(),
-                                    );
-                                    self.needs_draw = true;
-                                    self.retitle();
+                                    ) {
+                                        self.active = seg;
+                                        self.needs_draw = true;
+                                        self.retitle();
+                                    }
                                     return;
                                 }
                             }
@@ -2099,5 +2114,61 @@ mod layout_fit_tests {
         app.fit_all();
         assert_eq!(app.tabs[0].term.cols(), 80);
         assert_eq!(app.tabs[0].term.rows(), 24);
+    }
+
+    #[test]
+    fn fit_all_resizes_real_sessions_and_preserves_tabs() {
+        let first = zet_pty::Session::spawn("sleep", &["30"], 80, 24).unwrap();
+        let second = zet_pty::Session::spawn("sleep", &["30"], 80, 24).unwrap();
+
+        let mut app = make_test_app(
+            104,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        app.tabs = vec![make_test_tab(), make_test_tab()];
+        app.tabs[0].session = Some(first);
+        app.tabs[1].session = Some(second);
+
+        app.fit_all();
+        for tab in &mut app.tabs {
+            assert_eq!((tab.term.cols(), tab.term.rows()), (80, 23));
+            if let Some(session) = &mut tab.session {
+                assert_eq!(session.size().unwrap(), (80, 23));
+            }
+        }
+
+        let mut removed = app.tabs.pop().unwrap();
+        if let Some(session) = &mut removed.session {
+            session.shutdown();
+        }
+
+        app.fit_all();
+        assert_eq!(app.tabs[0].term.cols(), 80);
+        assert_eq!(app.tabs[0].term.rows(), 24);
+        if let Some(session) = &mut app.tabs[0].session {
+            assert_eq!(session.size().unwrap(), (80, 24));
+            session.shutdown();
+        }
+    }
+
+    #[test]
+    fn fit_all_caps_pty_dimensions() {
+        let session = zet_pty::Session::spawn("sleep", &["30"], 80, 24).unwrap();
+        let mut app = make_test_app(
+            40000,
+            1,
+            crate::window::layout::LayoutMode::TerminalFocus.layout(),
+        );
+        app.tabs = vec![make_test_tab()];
+        app.tabs[0].session = Some(session);
+
+        app.fit_all();
+        assert_eq!(app.tabs[0].term.cols(), 40000);
+        assert_eq!(app.tabs[0].term.rows(), 1);
+        if let Some(session) = &mut app.tabs[0].session {
+            assert_eq!(session.size().unwrap(), (32767, 1));
+            session.shutdown();
+        }
     }
 }
