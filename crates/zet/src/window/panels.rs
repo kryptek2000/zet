@@ -4,6 +4,9 @@
 //! commands. Every row carries a provenance so the UI never implies more
 //! certainty than its source supports. Unknown stays unknown (`—`).
 
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 /// Where a displayed fact came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provenance {
@@ -65,15 +68,17 @@ pub struct RailSnapshot {
 /// once per frame and only when something observable changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChromeCache {
-    pub snapshot: Option<RailSnapshot>,
-    dirty: bool,
-    last_active: usize,
-    last_layout_rail: bool,
-    last_blocks: usize,
-    last_phase: Option<String>,
-    last_cwd: String,
-    last_tab_count: usize,
-    last_active_dead: bool,
+    pub snapshot: Option<Arc<RailSnapshot>>,
+    pub dirty: bool,
+    pub last_active: usize,
+    pub last_layout_rail: bool,
+    pub last_blocks: usize,
+    pub last_phase: Option<String>,
+    pub last_cwd: String,
+    pub last_tab_count: usize,
+    pub last_active_dead: bool,
+    pub last_refresh: Option<Instant>,
+    pub poll_interval: Duration,
 }
 
 impl ChromeCache {
@@ -88,6 +93,8 @@ impl ChromeCache {
             last_cwd: String::new(),
             last_tab_count: usize::MAX,
             last_active_dead: true,
+            last_refresh: None,
+            poll_interval: Duration::from_millis(250),
         }
     }
 
@@ -96,7 +103,90 @@ impl ChromeCache {
     }
 
     pub fn snapshot(&self) -> Option<&RailSnapshot> {
-        self.snapshot.as_ref()
+        self.snapshot.as_deref()
+    }
+
+    pub fn snapshot_handle(&self) -> Option<Arc<RailSnapshot>> {
+        self.snapshot.clone()
+    }
+
+    pub fn poll_due(&self, now: Instant) -> bool {
+        self.last_refresh
+            .is_none_or(|last| now.duration_since(last) >= self.poll_interval)
+    }
+
+    pub fn cheap_changed(
+        &self,
+        active: usize,
+        layout_rail: bool,
+        phase: Option<zet_pty::shell::Phase>,
+        cwd: &str,
+        tab_count: usize,
+        active_dead: bool,
+    ) -> bool {
+        let phase = phase.map(|phase| format!("{phase:?}"));
+        self.dirty
+            || self.last_active != active
+            || self.last_layout_rail != layout_rail
+            || self.last_tab_count != tab_count
+            || self.last_active_dead != active_dead
+            || self.last_phase != phase
+            || self.last_cwd != cwd
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn needs_refresh(
+        &self,
+        active: usize,
+        layout_rail: bool,
+        phase: Option<zet_pty::shell::Phase>,
+        cwd: &str,
+        tab_count: usize,
+        active_dead: bool,
+        now: Instant,
+    ) -> bool {
+        let phase = phase.map(|phase| format!("{phase:?}"));
+        if self.dirty
+            || self.last_active != active
+            || self.last_layout_rail != layout_rail
+            || self.last_tab_count != tab_count
+            || self.last_active_dead != active_dead
+            || self.last_phase != phase
+            || self.last_cwd != cwd
+        {
+            return true;
+        }
+        self.last_refresh
+            .is_none_or(|last| now.duration_since(last) >= self.poll_interval)
+    }
+
+    pub fn mark_refreshed(&mut self, now: Instant) {
+        self.last_refresh = Some(now);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_refresh(
+        &mut self,
+        active: usize,
+        layout_rail: bool,
+        block_count: usize,
+        phase: Option<zet_pty::shell::Phase>,
+        cwd: String,
+        tab_count: usize,
+        active_dead: bool,
+        snapshot: RailSnapshot,
+        now: Instant,
+    ) {
+        self.snapshot = Some(Arc::new(snapshot));
+        self.last_active = active;
+        self.last_layout_rail = layout_rail;
+        self.last_blocks = block_count;
+        self.last_phase = phase.map(|phase| format!("{phase:?}"));
+        self.last_cwd = cwd;
+        self.last_tab_count = tab_count;
+        self.last_active_dead = active_dead;
+        self.last_refresh = Some(now);
+        self.dirty = false;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -121,7 +211,7 @@ impl ChromeCache {
             || self.last_tab_count != tab_count
             || self.last_active_dead != active_dead
         {
-            self.snapshot = Some(build());
+            self.snapshot = Some(Arc::new(build()));
             self.last_active = active;
             self.last_layout_rail = layout_rail;
             self.last_blocks = block_count;

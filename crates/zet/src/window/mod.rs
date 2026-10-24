@@ -881,13 +881,6 @@ impl App {
         if !self.layout.rail {
             return;
         }
-        let block_count = self
-            .tabs
-            .get(self.active)
-            .and_then(|tab| tab.recorder.as_ref())
-            .map(|recorder| recorder.block_count())
-            .unwrap_or(0);
-        let snapshot = self.build_rail_snapshot();
         let phase = self
             .tabs
             .get(self.active)
@@ -903,7 +896,30 @@ impl App {
             .get(self.active)
             .map(|tab| tab.dead)
             .unwrap_or(true);
-        self.chrome.refresh_if_changed(
+        let now = std::time::Instant::now();
+        let cheap_changed = self.chrome.cheap_changed(
+            self.active,
+            self.layout.rail,
+            phase,
+            &cwd,
+            tab_count,
+            active_dead,
+        );
+        if !cheap_changed && !self.chrome.poll_due(now) {
+            return;
+        }
+        let block_count = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.recorder.as_ref())
+            .map(|recorder| recorder.block_count())
+            .unwrap_or(0);
+        if !cheap_changed && block_count == self.chrome.last_blocks {
+            self.chrome.mark_refreshed(now);
+            return;
+        }
+        let snapshot = self.build_rail_snapshot();
+        self.chrome.commit_refresh(
             self.active,
             self.layout.rail,
             block_count,
@@ -911,7 +927,8 @@ impl App {
             cwd,
             tab_count,
             active_dead,
-            || snapshot,
+            snapshot,
+            now,
         );
     }
 
@@ -1992,7 +2009,7 @@ impl ApplicationHandler for App {
                     rows: vp.rows,
                 };
                 let rail_snapshot = if rail_cols > 0 {
-                    self.chrome.snapshot().cloned()
+                    self.chrome.snapshot_handle()
                 } else {
                     None
                 };
