@@ -1033,73 +1033,64 @@ impl App {
     ) {
         use zet_gpu::quad::Rgba;
         let ink = zet_gpu::renderer::TAB_DIM_INK;
-        let mut row = 0u32;
-        if row < vp.rows {
-            r.draw_text_row(vp, row, 0, "ZET", Rgba::WHITE);
-            row += 1;
-        }
-        if row < vp.rows {
-            r.draw_text_row(vp, row, 0, &format!("mode {}", snapshot.mode), ink);
-            row += 1;
-        }
-        if row < vp.rows {
-            r.draw_text_row(vp, row, 0, "SESSIONS", ink);
-            row += 1;
-        }
-        if !snapshot.sessions.is_empty() && selected < snapshot.sessions.len() {
-            let selected_row = 3u32 + selected as u32;
-            if selected_row < vp.rows {
-                r.draw_fill(
-                    zet_gpu::renderer::Viewport {
-                        x: 0,
-                        y: vp.y + selected_row,
-                        cols: vp.cols,
-                        rows: 1,
-                    },
-                    zet_gpu::quad::Rgba::rgb(0.10, 0.30, 0.27),
-                );
+        let rows = panels::rail_rows(vp.rows, snapshot.sessions.len(), snapshot.commands.len());
+        for (row, kind) in rows.into_iter().enumerate() {
+            let row = row as u32;
+            match kind {
+                panels::RailRow::Header => {
+                    r.draw_text_row(vp, row, 0, "ZET", Rgba::WHITE);
+                }
+                panels::RailRow::Mode => {
+                    r.draw_text_row(vp, row, 0, &format!("mode {}", snapshot.mode), ink);
+                }
+                panels::RailRow::SessionsHeader => {
+                    r.draw_text_row(vp, row, 0, "SESSIONS", ink);
+                }
+                panels::RailRow::Session(index) => {
+                    if index == selected && index < snapshot.sessions.len() {
+                        r.draw_fill(
+                            zet_gpu::renderer::Viewport {
+                                x: 0,
+                                y: vp.y + row,
+                                cols: vp.cols,
+                                rows: 1,
+                            },
+                            zet_gpu::renderer::TAB_ACTIVE_BG,
+                        );
+                    }
+                    let session = &snapshot.sessions[index];
+                    let marker = if index == snapshot.active { "▸" } else { " " };
+                    let line = format!(
+                        "{} {} {} {}",
+                        marker, session.index, session.state, session.cwd_tail
+                    );
+                    let line_ink = if index == snapshot.active {
+                        Rgba::WHITE
+                    } else {
+                        ink
+                    };
+                    r.draw_text_row(vp, row, 0, &line, line_ink);
+                }
+                panels::RailRow::CommandsHeader => {
+                    r.draw_text_row(vp, row, 0, "OBSERVED COMMANDS", ink);
+                }
+                panels::RailRow::Command(index) => {
+                    if let Some(command) = snapshot.commands.get(index) {
+                        let line =
+                            format!("{} {} {}", command.command, command.exit, command.duration);
+                        r.draw_text_row(vp, row, 0, &line, ink);
+                    }
+                }
+                panels::RailRow::Footer => {
+                    let footer = if snapshot.footer == "—" {
+                        "cwd —".to_string()
+                    } else {
+                        format!("cwd {}", snapshot.footer)
+                    };
+                    r.draw_text_row(vp, row, 0, &footer, ink);
+                }
+                panels::RailRow::Empty => {}
             }
-        }
-        for session in &snapshot.sessions {
-            if row >= vp.rows {
-                break;
-            }
-            let marker = if session.index.saturating_sub(1) == snapshot.active {
-                "▸"
-            } else {
-                " "
-            };
-            let line = format!(
-                "{} {} {} {}",
-                marker, session.index, session.state, session.cwd_tail
-            );
-            let line_ink = if session.index.saturating_sub(1) == snapshot.active {
-                Rgba::WHITE
-            } else {
-                ink
-            };
-            r.draw_text_row(vp, row, 0, &line, line_ink);
-            row += 1;
-        }
-        if row < vp.rows {
-            r.draw_text_row(vp, row, 0, "OBSERVED COMMANDS", ink);
-            row += 1;
-        }
-        for command in &snapshot.commands {
-            if row + 1 >= vp.rows {
-                break;
-            }
-            let line = format!("{} {} {}", command.command, command.exit, command.duration);
-            r.draw_text_row(vp, row, 0, &line, ink);
-            row += 1;
-        }
-        if vp.rows > 0 {
-            let footer = if snapshot.footer == "—" {
-                "cwd —".to_string()
-            } else {
-                format!("cwd {}", snapshot.footer)
-            };
-            r.draw_text_row(vp, vp.rows - 1, 0, &footer, ink);
         }
     }
 
