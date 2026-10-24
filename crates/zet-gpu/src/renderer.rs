@@ -592,11 +592,29 @@ impl Renderer {
     /// Tab bar on row 0: equal segments, active lifted + white ink,
     /// inactive dim. Labels pre-truncated by the caller; overlong text
     /// clips at the grid edge.
+    ///
+    /// With a zero-width rail this is byte-identical to the historical
+    /// full-window tab bar. With a nonzero rail, tab controls occupy only
+    /// the drawable strip `[rail_cols, cols)` so rail pixels are never
+    /// painted as tab controls and every tab with a nonempty strip has a
+    /// reachable hit region.
     pub fn draw_tabbar(&mut self, labels: &[String], active: usize, cols: usize) {
+        self.draw_tabbar_with_rail(labels, active, cols, 0);
+    }
+
+    /// Tab bar variant with an excluded leading rail region.
+    pub fn draw_tabbar_with_rail(
+        &mut self,
+        labels: &[String],
+        active: usize,
+        cols: usize,
+        rail_cols: usize,
+    ) {
         let n = labels.len().max(1);
+        let segments = crate::selection::tabbar_segments(cols, rail_cols, n);
         for x in 0..cols {
-            let seg = crate::selection::tab_segment(x, cols, labels.len());
-            let is_active = seg == active;
+            let seg = crate::selection::tabbar_segment_for_x(x, rail_cols, cols, n);
+            let is_active = seg == Some(active);
             let fill = if is_active { TAB_ACTIVE_BG } else { TABBAR_BG };
             if let Some(bg_slot) = self.bg_slot {
                 self.quads.extend(cell_quad(
@@ -609,9 +627,15 @@ impl Renderer {
                     fill,
                 ));
             }
-            let seg_w = cols / n;
-            let lx = x - seg * seg_w;
-            let text: Vec<char> = labels[seg].chars().collect();
+            let Some(seg) = seg else {
+                continue;
+            };
+            let (start, _) = segments[seg];
+            let lx = x - start;
+            let text: Vec<char> = labels
+                .get(seg)
+                .map(|s| s.chars().collect())
+                .unwrap_or_default();
             if lx < text.len() {
                 let c = text[lx];
                 if c != ' ' {

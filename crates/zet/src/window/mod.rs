@@ -1716,6 +1716,7 @@ impl ApplicationHandler for App {
                 } else {
                     None
                 };
+                let rail_cols = self.rail_cols();
                 let vp = self.frame_layout().term;
                 let gpu_vp = zet_gpu::renderer::Viewport {
                     x: vp.x,
@@ -1726,7 +1727,7 @@ impl ApplicationHandler for App {
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
                     r.draw_terminal_in(&self.tabs[self.active].term, gpu_vp, sel);
                     if bar > 0 {
-                        r.draw_tabbar(&labels, active, cols);
+                        r.draw_tabbar_with_rail(&labels, active, cols, rail_cols);
                     }
                     if let Some((cx, cy, g)) = ghost {
                         r.draw_ghost(gpu_vp, cy, cx, &g);

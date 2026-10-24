@@ -121,12 +121,33 @@ pub fn tab_segment(x_cell: usize, cols: usize, n_tabs: usize) -> usize {
     (x_cell * n_tabs / cols).min(n_tabs - 1)
 }
 
-/// Tab-bar hit testing with an optional leading rail.
+/// Painted tab segments for a tab bar that starts after `rail_cols`.
 ///
-/// Clicks in the rail area are rejected (`None`) so a visible rail cannot
-/// accidentally activate a tab. Clicks elsewhere use the same segment math
-/// as the painted tab bar, keeping clickable and painted regions aligned.
-pub fn tabbar_hit_segment(
+/// With a zero-width rail this is identical to the historical full-window
+/// mapping. With a nonzero rail, tab controls occupy only the drawable
+/// remainder so every displayed tab can have a reachable hit region when
+/// enough columns exist.
+pub fn tabbar_segments(cols: usize, rail_cols: usize, n_tabs: usize) -> Vec<(usize, usize)> {
+    if n_tabs == 0 || cols <= rail_cols {
+        return Vec::new();
+    }
+    let drawable = cols - rail_cols;
+    (0..n_tabs)
+        .map(|i| {
+            let start = rail_cols + (i * drawable).div_ceil(n_tabs);
+            let end = if i + 1 == n_tabs {
+                cols
+            } else {
+                rail_cols + ((i + 1) * drawable).div_ceil(n_tabs)
+            };
+            (start.min(cols), end.max(start).min(cols))
+        })
+        .collect()
+}
+
+/// Shared tab index for a cell. `None` means outside the window or in the
+/// excluded rail region.
+pub fn tabbar_segment_for_x(
     x_cell: usize,
     rail_cols: usize,
     cols: usize,
@@ -135,7 +156,26 @@ pub fn tabbar_hit_segment(
     if n_tabs == 0 || cols == 0 || x_cell >= cols || x_cell < rail_cols {
         return None;
     }
-    Some(tab_segment(x_cell, cols, n_tabs))
+    let drawable = cols.saturating_sub(rail_cols);
+    if drawable == 0 {
+        return None;
+    }
+    Some(((x_cell - rail_cols) * n_tabs / drawable).min(n_tabs - 1))
+}
+
+/// Backwards-compatible alias.
+pub fn tab_bar_segments(cols: usize, rail_cols: usize, n_tabs: usize) -> Vec<(usize, usize)> {
+    tabbar_segments(cols, rail_cols, n_tabs)
+}
+
+/// Backwards-compatible alias.
+pub fn tabbar_hit_segment(
+    x_cell: usize,
+    rail_cols: usize,
+    cols: usize,
+    n_tabs: usize,
+) -> Option<usize> {
+    tabbar_segment_for_x(x_cell, rail_cols, cols, n_tabs)
 }
 
 /// Alias for callers that prefer snake_case words.
@@ -195,7 +235,7 @@ mod tabbar_hit_tests {
     fn rail_clicks_are_rejected() {
         assert_eq!(tabbar_hit_segment(0, 4, 10, 3), None);
         assert_eq!(tabbar_hit_segment(3, 4, 10, 3), None);
-        assert_eq!(tabbar_hit_segment(4, 4, 10, 3), Some(1));
+        assert_eq!(tabbar_hit_segment(4, 4, 10, 3), Some(0));
     }
 
     #[test]
@@ -212,9 +252,96 @@ mod tabbar_hit_tests {
             let expected = if x < 4 {
                 None
             } else {
-                Some(super::tab_segment(x, 20, 4))
+                super::tabbar_segment_for_x(x, 4, 20, 4)
             };
             assert_eq!(got, expected, "x={x}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tabbar_segment_tests {
+    use super::{tabbar_segment_for_x, tabbar_segments};
+
+    #[test]
+    fn zero_rail_segments_match_legacy_full_window() {
+        let segs = tabbar_segments(10, 0, 3);
+        assert_eq!(segs, vec![(0, 4), (4, 7), (7, 10)]);
+        for x in 0..10 {
+            assert_eq!(
+                tabbar_segment_for_x(x, 0, 10, 3),
+                Some(super::tab_segment(x, 10, 3))
+            );
+        }
+    }
+
+    #[test]
+    fn nonzero_rail_excludes_rail_from_tab_controls() {
+        let segs = tabbar_segments(104, 24, 5);
+        assert_eq!(segs[0].0, 24);
+        assert!(segs.iter().all(|(start, end)| *start >= 24 && *end <= 104));
+        for x in 0..24 {
+            assert_eq!(tabbar_segment_for_x(x, 24, 104, 5), None);
+        }
+    }
+
+    #[test]
+    fn every_tab_reachable_with_enough_columns() {
+        let cols = 125;
+        let rail = 24;
+        let tabs = 5;
+        let mut seen = [false; 5];
+        for x in rail..cols {
+            if let Some(seg) = tabbar_segment_for_x(x, rail, cols, tabs) {
+                seen[seg] = true;
+            }
+        }
+        assert!(seen.iter().all(|v| *v));
+    }
+
+    #[test]
+    fn five_or_more_tabs_do_not_panic() {
+        let segs = tabbar_segments(104, 24, 7);
+        assert_eq!(segs.len(), 7);
+        for x in 0..104 {
+            let _ = tabbar_segment_for_x(x, 24, 104, 7);
+        }
+    }
+
+    #[test]
+    fn narrow_degradation_is_deterministic() {
+        assert!(tabbar_segments(20, 24, 3).is_empty());
+        for x in 0..20 {
+            assert_eq!(tabbar_segment_for_x(x, 24, 20, 3), None);
+        }
+    }
+
+    #[test]
+    fn invalid_and_outside_coordinates_are_rejected() {
+        assert_eq!(tabbar_segment_for_x(104, 0, 104, 3), None);
+        assert_eq!(tabbar_segment_for_x(usize::MAX, 0, 104, 3), None);
+        assert!(tabbar_segments(0, 0, 3).is_empty());
+        assert!(tabbar_segments(10, 10, 3).is_empty());
+    }
+
+    #[test]
+    fn painted_and_clickable_regions_agree() {
+        for cols in [0usize, 1, 24, 25, 104, 125] {
+            for rail in [0usize, 24] {
+                for tabs in [1usize, 2, 5, 9] {
+                    let segs = tabbar_segments(cols, rail, tabs);
+                    for x in 0..cols {
+                        let hit = tabbar_segment_for_x(x, rail, cols, tabs);
+                        let painted = segs.iter().position(|(start, end)| x >= *start && x < *end);
+                        // Rail pixels are intentionally not painted as tabs.
+                        if x < rail {
+                            assert_eq!(hit, None);
+                        } else if cols > rail {
+                            assert_eq!(hit, painted);
+                        }
+                    }
+                }
+            }
         }
     }
 }
