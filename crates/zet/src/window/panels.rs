@@ -70,6 +70,10 @@ pub struct ChromeCache {
     last_active: usize,
     last_layout_rail: bool,
     last_blocks: usize,
+    last_phase: Option<String>,
+    last_cwd: String,
+    last_tab_count: usize,
+    last_active_dead: bool,
 }
 
 impl ChromeCache {
@@ -80,6 +84,10 @@ impl ChromeCache {
             last_active: usize::MAX,
             last_layout_rail: false,
             last_blocks: usize::MAX,
+            last_phase: None,
+            last_cwd: String::new(),
+            last_tab_count: usize::MAX,
+            last_active_dead: true,
         }
     }
 
@@ -91,22 +99,36 @@ impl ChromeCache {
         self.snapshot.as_ref()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn refresh_if_changed(
         &mut self,
         active: usize,
         layout_rail: bool,
         block_count: usize,
+        phase: Option<zet_pty::shell::Phase>,
+        cwd: String,
+        tab_count: usize,
+        active_dead: bool,
         build: impl FnOnce() -> RailSnapshot,
     ) {
+        let phase = phase.map(|phase| format!("{phase:?}"));
         if self.dirty
             || self.last_active != active
             || self.last_layout_rail != layout_rail
             || self.last_blocks != block_count
+            || self.last_phase != phase
+            || self.last_cwd != cwd
+            || self.last_tab_count != tab_count
+            || self.last_active_dead != active_dead
         {
             self.snapshot = Some(build());
             self.last_active = active;
             self.last_layout_rail = layout_rail;
             self.last_blocks = block_count;
+            self.last_phase = phase;
+            self.last_cwd = cwd;
+            self.last_tab_count = tab_count;
+            self.last_active_dead = active_dead;
             self.dirty = false;
         }
     }
@@ -115,6 +137,20 @@ impl ChromeCache {
 impl Default for ChromeCache {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Displayed rail row to session index. Header rows and non-session rows
+/// never select a session.
+pub fn rail_row_target(row: u32, session_count: usize, viewport_rows: u32) -> Option<usize> {
+    if session_count == 0 || viewport_rows < 4 || row < 3 {
+        return None;
+    }
+    let session_row = row as usize - 3;
+    if session_row < session_count && (row as usize) < viewport_rows as usize {
+        Some(session_row)
+    } else {
+        None
     }
 }
 
@@ -140,7 +176,7 @@ mod tests {
     fn cache_rebuilds_only_when_dirty_or_changed() {
         let mut cache = ChromeCache::new();
         let mut builds = 0;
-        cache.refresh_if_changed(0, false, 0, || {
+        cache.refresh_if_changed(0, false, 0, None, String::new(), 0, true, || {
             builds += 1;
             RailSnapshot {
                 mode: "Terminal Focus".to_string(),
@@ -152,7 +188,7 @@ mod tests {
             }
         });
         assert_eq!(builds, 1);
-        cache.refresh_if_changed(0, false, 0, || {
+        cache.refresh_if_changed(0, false, 0, None, String::new(), 0, true, || {
             builds += 1;
             RailSnapshot {
                 mode: "Terminal Focus".to_string(),
@@ -165,7 +201,7 @@ mod tests {
         });
         assert_eq!(builds, 1);
         cache.mark_dirty();
-        cache.refresh_if_changed(0, false, 0, || {
+        cache.refresh_if_changed(0, false, 0, None, String::new(), 0, true, || {
             builds += 1;
             RailSnapshot {
                 mode: "Terminal Focus".to_string(),

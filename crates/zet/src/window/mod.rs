@@ -878,16 +878,41 @@ impl App {
     }
 
     fn refresh_chrome(&mut self) {
+        if !self.layout.rail {
+            return;
+        }
         let block_count = self
             .tabs
             .get(self.active)
             .and_then(|tab| tab.recorder.as_ref())
-            .and_then(|recorder| recorder.blocks().ok())
-            .map(|blocks| blocks.len())
+            .map(|recorder| recorder.block_count())
             .unwrap_or(0);
         let snapshot = self.build_rail_snapshot();
-        self.chrome
-            .refresh_if_changed(self.active, self.layout.rail, block_count, || snapshot);
+        let phase = self
+            .tabs
+            .get(self.active)
+            .map(|tab| tab.shell_state.phase());
+        let cwd = self
+            .tabs
+            .get(self.active)
+            .map(|tab| shell_cwd(&tab.session))
+            .unwrap_or_default();
+        let tab_count = self.tabs.len();
+        let active_dead = self
+            .tabs
+            .get(self.active)
+            .map(|tab| tab.dead)
+            .unwrap_or(true);
+        self.chrome.refresh_if_changed(
+            self.active,
+            self.layout.rail,
+            block_count,
+            phase,
+            cwd,
+            tab_count,
+            active_dead,
+            || snapshot,
+        );
     }
 
     fn build_rail_snapshot(&self) -> panels::RailSnapshot {
@@ -927,7 +952,7 @@ impl App {
                     shell: self.shell_name.clone(),
                     state,
                     exit,
-                    provenance: panels::Provenance::Observed,
+                    provenance: panels::Provenance::Inferred,
                 }
             })
             .collect();
@@ -936,13 +961,10 @@ impl App {
             .get(self.active)
             .and_then(|tab| tab.recorder.as_ref())
             .map(|recorder| {
-                let mut blocks = recorder.blocks().unwrap_or_default();
-                blocks.sort_by_key(|block| block.id);
-                blocks
+                recorder
+                    .recent_commands(8)
+                    .unwrap_or_default()
                     .into_iter()
-                    .rev()
-                    .take(8)
-                    .rev()
                     .map(|block| panels::CommandRow {
                         command: truncate_for_rail(&block.command, 18),
                         exit: block.exit_code.to_string(),
@@ -1007,6 +1029,7 @@ impl App {
         r: &mut Renderer,
         vp: zet_gpu::renderer::Viewport,
         snapshot: &panels::RailSnapshot,
+        selected: usize,
     ) {
         use zet_gpu::quad::Rgba;
         let ink = zet_gpu::renderer::TAB_DIM_INK;
@@ -1022,6 +1045,20 @@ impl App {
         if row < vp.rows {
             r.draw_text_row(vp, row, 0, "SESSIONS", ink);
             row += 1;
+        }
+        if !snapshot.sessions.is_empty() && selected < snapshot.sessions.len() {
+            let selected_row = 3u32 + selected as u32;
+            if selected_row < vp.rows {
+                r.draw_fill(
+                    zet_gpu::renderer::Viewport {
+                        x: 0,
+                        y: vp.y + selected_row,
+                        cols: vp.cols,
+                        rows: 1,
+                    },
+                    zet_gpu::quad::Rgba::rgb(0.10, 0.30, 0.27),
+                );
+            }
         }
         for session in &snapshot.sessions {
             if row >= vp.rows {
@@ -1577,6 +1614,10 @@ impl ApplicationHandler for App {
                     if !pressed {
                         return;
                     }
+                    if is_rail_toggle(&event.logical_key, pressed, &self.mods) {
+                        self.toggle_rail();
+                        return;
+                    }
                     match &event.logical_key {
                         Key::Named(NamedKey::Escape) => self.focus = Focus::Terminal,
                         Key::Named(NamedKey::ArrowUp) => {
@@ -1598,8 +1639,17 @@ impl ApplicationHandler for App {
                         }
                         _ => {}
                     }
-                    self.needs_draw = true;
-                    return;
+                    let ctrl_c = self.mods.contains(ModifiersState::CONTROL)
+                        && matches!(&event.logical_key, Key::Character(s) if s.eq_ignore_ascii_case("c"));
+                    if ctrl_c {
+                        // A safe route back to the terminal; the byte is
+                        // then translated and sent normally below, preserving
+                        // the emergency-cancellation behavior.
+                        self.focus = Focus::Terminal;
+                    } else {
+                        self.needs_draw = true;
+                        return;
+                    }
                 }
                 // Agent running: input locked (its steps own the line).
                 // Copy is local, not shell input: reading the grid never
@@ -1950,10 +2000,15 @@ impl ApplicationHandler for App {
                     cols: vp.cols,
                     rows: vp.rows,
                 };
+                let rail_snapshot = if rail_cols > 0 {
+                    self.chrome.snapshot().cloned()
+                } else {
+                    None
+                };
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
                     r.draw_terminal_in(&self.tabs[self.active].term, gpu_vp, sel);
                     if rail_cols > 0 {
-                        if let Some(snapshot) = self.chrome.snapshot() {
+                        if let Some(snapshot) = rail_snapshot.as_ref() {
                             let rail_vp = zet_gpu::renderer::Viewport {
                                 x: 0,
                                 y: bar as u32,
@@ -1961,7 +2016,7 @@ impl ApplicationHandler for App {
                                 rows: (self.rows.saturating_sub(bar)) as u32,
                             };
                             r.draw_fill(rail_vp, zet_gpu::quad::Rgba::rgb(0.03, 0.04, 0.07));
-                            Self::draw_rail(r, rail_vp, snapshot);
+                            Self::draw_rail(r, rail_vp, snapshot, self.rail_sel);
                         }
                     }
                     if bar > 0 {
@@ -2021,9 +2076,11 @@ impl ApplicationHandler for App {
                                 let top = vp.y as f64 * ch as f64;
                                 let bottom = (vp.y as f64 + vp.rows as f64) * ch as f64;
                                 if px < rail_px && py >= top && py < bottom {
-                                    let row = ((py - top) / ch as f64).floor() as usize;
-                                    if !self.tabs.is_empty() {
-                                        self.rail_sel = row.min(self.tabs.len() - 1);
+                                    let row = ((py - top) / ch as f64).floor() as usize as u32;
+                                    if let Some(session) =
+                                        panels::rail_row_target(row, self.tabs.len(), vp.rows)
+                                    {
+                                        self.rail_sel = session;
                                     }
                                     self.focus = Focus::Rail;
                                     self.needs_draw = true;
