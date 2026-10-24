@@ -209,6 +209,10 @@ struct App {
     focus: Focus,
     rail_sel: usize,
     chrome: panels::ChromeCache,
+    #[cfg(test)]
+    pub chrome_query_count: usize,
+    #[cfg(test)]
+    pub chrome_build_count: usize,
     env_spec: Option<String>,
     startup_spec: Option<String>,
     /// Commands that run without translation (PATH at startup +
@@ -878,6 +882,10 @@ impl App {
     }
 
     fn refresh_chrome(&mut self) {
+        self.refresh_chrome_at(std::time::Instant::now());
+    }
+
+    pub fn refresh_chrome_at(&mut self, now: std::time::Instant) {
         if !self.layout.rail {
             return;
         }
@@ -896,7 +904,6 @@ impl App {
             .get(self.active)
             .map(|tab| tab.dead)
             .unwrap_or(true);
-        let now = std::time::Instant::now();
         let cheap_changed = self.chrome.cheap_changed(
             self.active,
             self.layout.rail,
@@ -908,6 +915,10 @@ impl App {
         if !cheap_changed && !self.chrome.poll_due(now) {
             return;
         }
+        #[cfg(test)]
+        {
+            self.chrome_query_count += 1;
+        }
         let block_count = self
             .tabs
             .get(self.active)
@@ -917,6 +928,10 @@ impl App {
         if !cheap_changed && block_count == self.chrome.last_blocks {
             self.chrome.mark_refreshed(now);
             return;
+        }
+        #[cfg(test)]
+        {
+            self.chrome_build_count += 1;
         }
         let snapshot = self.build_rail_snapshot();
         self.chrome.commit_refresh(
@@ -2214,6 +2229,10 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         focus: Focus::Terminal,
         rail_sel: 0,
         chrome: panels::ChromeCache::new(),
+        #[cfg(test)]
+        chrome_query_count: 0,
+        #[cfg(test)]
+        chrome_build_count: 0,
         env_spec,
         startup_spec,
         known: zet_pty::KnownCommands::from_env(),
@@ -2398,6 +2417,10 @@ mod layout_fit_tests {
             focus: super::Focus::Terminal,
             rail_sel: 0,
             chrome: super::panels::ChromeCache::new(),
+            #[cfg(test)]
+            chrome_query_count: 0,
+            #[cfg(test)]
+            chrome_build_count: 0,
             env_spec: None,
             startup_spec: None,
             known: zet_pty::KnownCommands::from_env(),
@@ -2502,5 +2525,172 @@ mod layout_fit_tests {
             assert_eq!(session.size().unwrap(), (32767, 1));
             session.shutdown();
         }
+    }
+
+    #[test]
+    fn chrome_cache_hidden_rail_does_not_query() {
+        let mut app = make_test_app(
+            80,
+            24,
+            crate::window::layout::LayoutMode::TerminalFocus.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        let now = std::time::Instant::now();
+
+        app.refresh_chrome_at(now);
+        assert_eq!(app.chrome_query_count, 0);
+        assert_eq!(app.chrome_build_count, 0);
+        assert!(app.chrome.snapshot().is_none());
+    }
+
+    #[test]
+    fn chrome_cache_visible_first_refresh_builds_once() {
+        let mut app = make_test_app(
+            80,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        let now = std::time::Instant::now();
+
+        app.refresh_chrome_at(now);
+        assert_eq!(app.chrome_query_count, 1);
+        assert_eq!(app.chrome_build_count, 1);
+        assert!(app.chrome.snapshot().is_some());
+
+        app.refresh_chrome_at(now);
+        assert_eq!(app.chrome_query_count, 1);
+        assert_eq!(app.chrome_build_count, 1);
+    }
+
+    #[test]
+    fn chrome_cache_unchanged_poll_does_not_rebuild() {
+        let mut app = make_test_app(
+            80,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        let now = std::time::Instant::now();
+
+        app.refresh_chrome_at(now);
+        let later = now + std::time::Duration::from_millis(250);
+        app.refresh_chrome_at(later);
+        assert_eq!(app.chrome_query_count, 2);
+        assert_eq!(app.chrome_build_count, 1);
+    }
+
+    #[test]
+    fn chrome_cache_new_command_rebuilds() {
+        let mut app = make_test_app(
+            80,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        let now = std::time::Instant::now();
+
+        app.refresh_chrome_at(now);
+        assert_eq!(app.chrome_query_count, 1);
+        assert_eq!(app.chrome_build_count, 1);
+        assert_eq!(app.chrome.snapshot().unwrap().commands.len(), 0);
+
+        app.tabs[0]
+            .recorder
+            .as_ref()
+            .unwrap()
+            .store()
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo hi".to_string(),
+                output: "hi".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+
+        let later = now + std::time::Duration::from_millis(250);
+        app.refresh_chrome_at(later);
+        assert_eq!(app.chrome_query_count, 2);
+        assert_eq!(app.chrome_build_count, 2);
+        assert_eq!(app.chrome.snapshot().unwrap().commands.len(), 1);
+    }
+
+    #[test]
+    fn chrome_cache_active_tab_switch_rebuilds() {
+        let mut app = make_test_app(
+            80,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        let store_a = zet_blocks::Store::open_in_memory().unwrap();
+        store_a
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo a".to_string(),
+                output: "a".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let store_b = zet_blocks::Store::open_in_memory().unwrap();
+        store_b
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-b".to_string(),
+                command: "echo b".to_string(),
+                output: "b".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let mut tab_a = make_test_tab();
+        tab_a.recorder = Some(zet_blocks::Recorder::new(store_a, "session-a"));
+        let mut tab_b = make_test_tab();
+        tab_b.recorder = Some(zet_blocks::Recorder::new(store_b, "session-b"));
+        app.tabs = vec![tab_a, tab_b];
+        app.active = 0;
+        let now = std::time::Instant::now();
+        app.refresh_chrome_at(now);
+        assert_eq!(app.chrome.snapshot().unwrap().commands[0].command, "echo a");
+
+        app.active = 1;
+        let later = now + std::time::Duration::from_millis(250);
+        app.refresh_chrome_at(later);
+        assert_eq!(app.chrome.snapshot().unwrap().commands[0].command, "echo b");
+    }
+
+    #[test]
+    fn chrome_cache_dirty_rebuilds() {
+        let mut app = make_test_app(
+            80,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        let now = std::time::Instant::now();
+        app.refresh_chrome_at(now);
+        app.chrome.mark_dirty();
+        let later = now + std::time::Duration::from_millis(250);
+        app.refresh_chrome_at(later);
+        assert_eq!(app.chrome_build_count, 2);
     }
 }
