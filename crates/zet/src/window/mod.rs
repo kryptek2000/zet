@@ -13,8 +13,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::Window;
 use zet_gpu::input::{
-    is_agent_toggle, is_close_tab, is_copy, is_cycle_tab, is_new_tab, is_paste, is_search,
-    is_select_all, translate,
+    is_agent_toggle, is_close_tab, is_copy, is_cycle_tab, is_new_tab, is_paste, is_rail_toggle,
+    is_search, is_select_all, translate,
 };
 use zet_gpu::selection::Selection;
 use zet_gpu::Renderer;
@@ -23,6 +23,7 @@ use zet_pty::Session;
 use zet_term::Terminal;
 
 pub mod layout;
+pub mod panels;
 
 const HOOKS: [(&str, &str); 2] = [
     ("bash", "zet-integration.bash"),
@@ -185,6 +186,12 @@ impl Tab {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Terminal,
+    Rail,
+}
+
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
@@ -199,6 +206,9 @@ struct App {
     cols: usize,
     rows: usize,
     layout: crate::window::layout::Layout,
+    focus: Focus,
+    rail_sel: usize,
+    chrome: panels::ChromeCache,
     env_spec: Option<String>,
     startup_spec: Option<String>,
     /// Commands that run without translation (PATH at startup +
@@ -280,6 +290,14 @@ impl zet_agent::Approver for AgentMode {
 const FRAME: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Shell's current directory via /proc (unix). Best effort: "" when unknown.
+fn truncate_for_rail(text: &str, max: usize) -> String {
+    let mut out: String = text.chars().take(max).collect();
+    if text.chars().count() > max {
+        out.push('…');
+    }
+    out
+}
+
 fn shell_cwd(session: &Option<Session>) -> String {
     #[cfg(unix)]
     {
@@ -859,6 +877,105 @@ impl App {
         )
     }
 
+    fn refresh_chrome(&mut self) {
+        let block_count = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.recorder.as_ref())
+            .and_then(|recorder| recorder.blocks().ok())
+            .map(|blocks| blocks.len())
+            .unwrap_or(0);
+        let snapshot = self.build_rail_snapshot();
+        self.chrome
+            .refresh_if_changed(self.active, self.layout.rail, block_count, || snapshot);
+    }
+
+    fn build_rail_snapshot(&self) -> panels::RailSnapshot {
+        let mode = if self.layout.rail {
+            "Workspace"
+        } else {
+            "Terminal Focus"
+        };
+        let sessions = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, tab)| {
+                let cwd = shell_cwd(&tab.session);
+                let cwd_tail = if cwd.is_empty() {
+                    "—".to_string()
+                } else {
+                    cwd.rsplit('/').next().unwrap_or(&cwd).to_string()
+                };
+                let state = if tab.dead {
+                    "exited".to_string()
+                } else {
+                    match tab.shell_state.phase() {
+                        zet_pty::shell::Phase::Prompt => "prompt".to_string(),
+                        zet_pty::shell::Phase::Input => "input".to_string(),
+                        zet_pty::shell::Phase::Running => "running".to_string(),
+                    }
+                };
+                let exit = tab
+                    .shell_state
+                    .last_exit()
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "—".to_string());
+                panels::SessionRow {
+                    index: i + 1,
+                    cwd_tail,
+                    shell: self.shell_name.clone(),
+                    state,
+                    exit,
+                    provenance: panels::Provenance::Observed,
+                }
+            })
+            .collect();
+        let commands = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.recorder.as_ref())
+            .map(|recorder| {
+                let mut blocks = recorder.blocks().unwrap_or_default();
+                blocks.sort_by_key(|block| block.id);
+                blocks
+                    .into_iter()
+                    .rev()
+                    .take(8)
+                    .rev()
+                    .map(|block| panels::CommandRow {
+                        command: truncate_for_rail(&block.command, 18),
+                        exit: block.exit_code.to_string(),
+                        duration: if block.duration_ms == 0 {
+                            "—".to_string()
+                        } else {
+                            format!("{}ms", block.duration_ms)
+                        },
+                        provenance: panels::Provenance::Observed,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let footer = self
+            .tabs
+            .get(self.active)
+            .map(|tab| shell_cwd(&tab.session))
+            .unwrap_or_default();
+        let (footer, footer_provenance) = if footer.is_empty() {
+            ("—".to_string(), panels::Provenance::Unknown)
+        } else {
+            (footer, panels::Provenance::Observed)
+        };
+        panels::RailSnapshot {
+            mode: mode.to_string(),
+            active: self.active,
+            sessions,
+            commands,
+            footer,
+            footer_provenance,
+        }
+    }
+
     /// Size every tab's grid + PTY to the terminal viewport.
     fn fit_all(&mut self) {
         let (cols, rows) = layout::terminal_viewport(
@@ -873,6 +990,79 @@ impl App {
             if let Some(s) = &tab.session {
                 let _ = s.resize(cols.min(32767) as u16, rows.min(32767) as u16);
             }
+        }
+    }
+
+    fn toggle_rail(&mut self) {
+        self.layout.rail = !self.layout.rail;
+        self.layout.inspector = false;
+        self.focus = Focus::Terminal;
+        self.chrome.mark_dirty();
+        self.fit_all();
+        self.needs_draw = true;
+        self.retitle();
+    }
+
+    fn draw_rail(
+        r: &mut Renderer,
+        vp: zet_gpu::renderer::Viewport,
+        snapshot: &panels::RailSnapshot,
+    ) {
+        use zet_gpu::quad::Rgba;
+        let ink = zet_gpu::renderer::TAB_DIM_INK;
+        let mut row = 0u32;
+        if row < vp.rows {
+            r.draw_text_row(vp, row, 0, "ZET", Rgba::WHITE);
+            row += 1;
+        }
+        if row < vp.rows {
+            r.draw_text_row(vp, row, 0, &format!("mode {}", snapshot.mode), ink);
+            row += 1;
+        }
+        if row < vp.rows {
+            r.draw_text_row(vp, row, 0, "SESSIONS", ink);
+            row += 1;
+        }
+        for session in &snapshot.sessions {
+            if row >= vp.rows {
+                break;
+            }
+            let marker = if session.index.saturating_sub(1) == snapshot.active {
+                "▸"
+            } else {
+                " "
+            };
+            let line = format!(
+                "{} {} {} {}",
+                marker, session.index, session.state, session.cwd_tail
+            );
+            let line_ink = if session.index.saturating_sub(1) == snapshot.active {
+                Rgba::WHITE
+            } else {
+                ink
+            };
+            r.draw_text_row(vp, row, 0, &line, line_ink);
+            row += 1;
+        }
+        if row < vp.rows {
+            r.draw_text_row(vp, row, 0, "OBSERVED COMMANDS", ink);
+            row += 1;
+        }
+        for command in &snapshot.commands {
+            if row + 1 >= vp.rows {
+                break;
+            }
+            let line = format!("{} {} {}", command.command, command.exit, command.duration);
+            r.draw_text_row(vp, row, 0, &line, ink);
+            row += 1;
+        }
+        if vp.rows > 0 {
+            let footer = if snapshot.footer == "—" {
+                "cwd —".to_string()
+            } else {
+                format!("cwd {}", snapshot.footer)
+            };
+            r.draw_text_row(vp, vp.rows - 1, 0, &footer, ink);
         }
     }
 
@@ -1381,6 +1571,36 @@ impl ApplicationHandler for App {
                 if pressed && self.perf_t0.is_some() {
                     self.perf_input = Some(std::time::Instant::now());
                 }
+                // Panel focus owns the keyboard: typing never leaks to
+                // the PTY while the rail is focused.
+                if self.focus != Focus::Terminal {
+                    if !pressed {
+                        return;
+                    }
+                    match &event.logical_key {
+                        Key::Named(NamedKey::Escape) => self.focus = Focus::Terminal,
+                        Key::Named(NamedKey::ArrowUp) => {
+                            if self.focus == Focus::Rail && !self.tabs.is_empty() {
+                                self.rail_sel = self.rail_sel.saturating_sub(1);
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowDown) => {
+                            if self.focus == Focus::Rail && !self.tabs.is_empty() {
+                                self.rail_sel = (self.rail_sel + 1).min(self.tabs.len() - 1);
+                            }
+                        }
+                        Key::Named(NamedKey::Enter)
+                            if self.focus == Focus::Rail && self.rail_sel < self.tabs.len() =>
+                        {
+                            self.active = self.rail_sel;
+                            self.focus = Focus::Terminal;
+                            self.retitle();
+                        }
+                        _ => {}
+                    }
+                    self.needs_draw = true;
+                    return;
+                }
                 // Agent running: input locked (its steps own the line).
                 // Copy is local, not shell input: reading the grid never
                 // disturbs the turn, so it stays available while busy.
@@ -1445,6 +1665,11 @@ impl ApplicationHandler for App {
                 }
                 if let Some(dir) = is_cycle_tab(&event.logical_key, pressed, &self.mods) {
                     self.cycle_tab(dir);
+                    return;
+                }
+                // Mission Rail toggle (Ctrl+Shift+M).
+                if is_rail_toggle(&event.logical_key, pressed, &self.mods) {
+                    self.toggle_rail();
                     return;
                 }
                 // Scrollback find: typing goes to the query, never the PTY.
@@ -1717,6 +1942,7 @@ impl ApplicationHandler for App {
                     None
                 };
                 let rail_cols = self.rail_cols();
+                self.refresh_chrome();
                 let vp = self.frame_layout().term;
                 let gpu_vp = zet_gpu::renderer::Viewport {
                     x: vp.x,
@@ -1726,6 +1952,18 @@ impl ApplicationHandler for App {
                 };
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
                     r.draw_terminal_in(&self.tabs[self.active].term, gpu_vp, sel);
+                    if rail_cols > 0 {
+                        if let Some(snapshot) = self.chrome.snapshot() {
+                            let rail_vp = zet_gpu::renderer::Viewport {
+                                x: 0,
+                                y: bar as u32,
+                                cols: rail_cols as u32,
+                                rows: (self.rows.saturating_sub(bar)) as u32,
+                            };
+                            r.draw_fill(rail_vp, zet_gpu::quad::Rgba::rgb(0.03, 0.04, 0.07));
+                            Self::draw_rail(r, rail_vp, snapshot);
+                        }
+                    }
                     if bar > 0 {
                         r.draw_tabbar_with_rail(&labels, active, cols, rail_cols);
                     }
@@ -1764,6 +2002,7 @@ impl ApplicationHandler for App {
                                         self.tabs.len(),
                                     ) {
                                         self.active = seg;
+                                        self.focus = Focus::Terminal;
                                         self.needs_draw = true;
                                         self.retitle();
                                     }
@@ -1771,7 +2010,29 @@ impl ApplicationHandler for App {
                                 }
                             }
                         }
+                        // Rail clicks focus the rail instead of selecting
+                        // terminal cells. With rail_cols == 0 this is a no-op.
+                        let rail_cols = self.rail_cols();
+                        if rail_cols > 0 {
+                            if let (Some((px, py)), Some(r)) = (self.mouse_px, &self.renderer) {
+                                let (cw, ch) = r.cell_px();
+                                let vp = self.frame_layout().term;
+                                let rail_px = rail_cols as f64 * cw as f64;
+                                let top = vp.y as f64 * ch as f64;
+                                let bottom = (vp.y as f64 + vp.rows as f64) * ch as f64;
+                                if px < rail_px && py >= top && py < bottom {
+                                    let row = ((py - top) / ch as f64).floor() as usize;
+                                    if !self.tabs.is_empty() {
+                                        self.rail_sel = row.min(self.tabs.len() - 1);
+                                    }
+                                    self.focus = Focus::Rail;
+                                    self.needs_draw = true;
+                                    return;
+                                }
+                            }
+                        }
                         if let Some(cell) = self.mouse_cell() {
+                            self.focus = Focus::Terminal;
                             self.tabs[self.active].selecting = true;
                             self.tabs[self.active].selection =
                                 Some(Selection::new((cell.col, cell.row), (cell.col, cell.row)));
@@ -1885,6 +2146,9 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         cols: 80,
         rows: 24,
         layout: crate::window::layout::LayoutMode::TerminalFocus.layout(),
+        focus: Focus::Terminal,
+        rail_sel: 0,
+        chrome: panels::ChromeCache::new(),
         env_spec,
         startup_spec,
         known: zet_pty::KnownCommands::from_env(),
@@ -2066,6 +2330,9 @@ mod layout_fit_tests {
             cols,
             rows,
             layout,
+            focus: super::Focus::Terminal,
+            rail_sel: 0,
+            chrome: super::panels::ChromeCache::new(),
             env_spec: None,
             startup_spec: None,
             known: zet_pty::KnownCommands::from_env(),

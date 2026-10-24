@@ -91,19 +91,19 @@ const SEL_RGBA: Rgba = Rgba {
 
 /// Tab bar: near-black strip; the active segment lifts lighter with
 /// white ink, inactive segments dim. Same quad machinery as cells.
-const TABBAR_BG: Rgba = Rgba {
+pub const TABBAR_BG: Rgba = Rgba {
     r: 0.03,
     g: 0.04,
     b: 0.07,
     a: 1.0,
 };
-const TAB_ACTIVE_BG: Rgba = Rgba {
+pub const TAB_ACTIVE_BG: Rgba = Rgba {
     r: 0.10,
     g: 0.13,
     b: 0.20,
     a: 1.0,
 };
-const TAB_DIM_INK: Rgba = Rgba {
+pub const TAB_DIM_INK: Rgba = Rgba {
     r: 0.45,
     g: 0.48,
     b: 0.55,
