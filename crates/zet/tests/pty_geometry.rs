@@ -34,3 +34,14 @@ fn terminal_focus_remains_full_window() {
         layout::terminal_viewport(layout::LayoutMode::TerminalFocus.layout(), 104, 24, 1);
     assert_eq!((cols, rows), (104, 23));
 }
+
+#[test]
+fn real_pty_observes_resize() {
+    let mut session = Session::spawn("sleep", &["30"], 80, 24).unwrap();
+    assert_eq!(session.size().unwrap(), (80, 24));
+    session.resize(80, 23).unwrap();
+    assert_eq!(session.size().unwrap(), (80, 23));
+    session.resize(104, 24).unwrap();
+    assert_eq!(session.size().unwrap(), (104, 24));
+    session.shutdown();
+}

@@ -121,6 +121,12 @@ impl Session {
             .unwrap_or(0x7f)
     }
 
+    /// Current terminal size reported by the PTY master.
+    pub fn size(&self) -> std::io::Result<(u16, u16)> {
+        let size = self.master.get_size().map_err(std::io::Error::other)?;
+        Ok((size.cols, size.rows))
+    }
+
     pub fn resize(&self, cols: u16, rows: u16) -> std::io::Result<()> {
         self.master
             .resize(PtySize {

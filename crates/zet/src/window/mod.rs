@@ -2114,4 +2114,60 @@ mod layout_fit_tests {
         assert_eq!(app.tabs[0].term.cols(), 80);
         assert_eq!(app.tabs[0].term.rows(), 24);
     }
+
+    #[test]
+    fn fit_all_resizes_real_sessions_and_preserves_tabs() {
+        let first = zet_pty::Session::spawn("sleep", &["30"], 80, 24).unwrap();
+        let second = zet_pty::Session::spawn("sleep", &["30"], 80, 24).unwrap();
+
+        let mut app = make_test_app(
+            104,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        app.tabs = vec![make_test_tab(), make_test_tab()];
+        app.tabs[0].session = Some(first);
+        app.tabs[1].session = Some(second);
+
+        app.fit_all();
+        for tab in &mut app.tabs {
+            assert_eq!((tab.term.cols(), tab.term.rows()), (80, 23));
+            if let Some(session) = &mut tab.session {
+                assert_eq!(session.size().unwrap(), (80, 23));
+            }
+        }
+
+        let mut removed = app.tabs.pop().unwrap();
+        if let Some(session) = &mut removed.session {
+            session.shutdown();
+        }
+
+        app.fit_all();
+        assert_eq!(app.tabs[0].term.cols(), 80);
+        assert_eq!(app.tabs[0].term.rows(), 24);
+        if let Some(session) = &mut app.tabs[0].session {
+            assert_eq!(session.size().unwrap(), (80, 24));
+            session.shutdown();
+        }
+    }
+
+    #[test]
+    fn fit_all_caps_pty_dimensions() {
+        let session = zet_pty::Session::spawn("sleep", &["30"], 80, 24).unwrap();
+        let mut app = make_test_app(
+            40000,
+            1,
+            crate::window::layout::LayoutMode::TerminalFocus.layout(),
+        );
+        app.tabs = vec![make_test_tab()];
+        app.tabs[0].session = Some(session);
+
+        app.fit_all();
+        assert_eq!(app.tabs[0].term.cols(), 40000);
+        assert_eq!(app.tabs[0].term.rows(), 1);
+        if let Some(session) = &mut app.tabs[0].session {
+            assert_eq!(session.size().unwrap(), (32767, 1));
+            session.shutdown();
+        }
+    }
 }
