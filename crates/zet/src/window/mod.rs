@@ -1060,7 +1060,11 @@ impl App {
     fn handle_mouse_click(&mut self, x: f64, y: f64, cw: u32, ch: u32) {
         self.needs_draw = true;
         // Tab bar owns pixel row 0: clicks switch tabs.
-        if self.bar_rows() > 0 && x >= 0.0 && (y / ch.max(1) as f64).floor() as usize == 0 {
+        if self.bar_rows() > 0
+            && x >= 0.0
+            && y >= 0.0
+            && (y / ch.max(1) as f64).floor() as usize == 0
+        {
             let col = (x / cw.max(1) as f64).floor() as usize;
             if col >= self.cols {
                 return;
@@ -2737,6 +2741,16 @@ mod layout_fit_tests {
         app.layout.rail = true;
         app.focus = super::Focus::Rail;
         app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.focus, super::Focus::Terminal);
+
+        app.focus = super::Focus::Rail;
+        app.handle_key_parts(
             winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown),
             None,
             true,
@@ -2764,6 +2778,31 @@ mod layout_fit_tests {
             ctrl,
             None,
         );
+        assert_eq!(app.focus, super::Focus::Terminal);
+
+        app.focus = super::Focus::Rail;
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.focus, super::Focus::Terminal);
+
+        app.focus = super::Focus::Terminal;
+        app.layout.rail = false;
+        let mut toggle_mods = winit::keyboard::ModifiersState::empty();
+        toggle_mods.insert(winit::keyboard::ModifiersState::CONTROL);
+        toggle_mods.insert(winit::keyboard::ModifiersState::SHIFT);
+        app.handle_key_parts(
+            winit::keyboard::Key::Character("m".into()),
+            None,
+            true,
+            toggle_mods,
+            None,
+        );
+        assert!(app.layout.rail);
         assert_eq!(app.focus, super::Focus::Terminal);
 
         app.focus = super::Focus::Rail;
@@ -2811,17 +2850,36 @@ mod layout_fit_tests {
         app.tabs.push(make_test_tab());
         app.active = 1;
 
+        // Rail-area clicks never switch tabs.
         app.handle_mouse_click(10.0, 0.0, 10, 20);
         assert_eq!(app.active, 1);
 
-        app.handle_mouse_click(60.0, 0.0, 10, 20);
+        // The first valid tab segment is tab 0.
+        app.handle_mouse_click(240.0, 0.0, 10, 20);
+        assert_eq!(app.active, 0);
+
+        // The second valid tab segment is tab 1.
+        app.handle_mouse_click(640.0, 0.0, 10, 20);
         assert_eq!(app.active, 1);
 
-        app.handle_mouse_click(700.0, 0.0, 10, 20);
+        // Outside the window cannot switch tabs.
+        app.handle_mouse_click(1040.0, 0.0, 10, 20);
         assert_eq!(app.active, 1);
 
-        app.handle_mouse_click(0.0, 0.0, 10, 20);
+        // A click above the window cannot switch tabs.
+        app.handle_mouse_click(240.0, -1.0, 10, 20);
         assert_eq!(app.active, 1);
+
+        // Zero-rail behavior remains unchanged.
+        let mut zero_rail = make_test_app(
+            104,
+            24,
+            crate::window::layout::LayoutMode::TerminalFocus.layout(),
+        );
+        zero_rail.tabs.push(make_test_tab());
+        zero_rail.active = 1;
+        zero_rail.handle_mouse_click(30.0, 0.0, 10, 20);
+        assert_eq!(zero_rail.active, 0);
     }
 
     #[test]
@@ -2921,6 +2979,31 @@ mod layout_fit_tests {
             ctrl,
             None,
         );
+        assert_eq!(app.focus, super::Focus::Terminal);
+
+        app.focus = super::Focus::Rail;
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.focus, super::Focus::Terminal);
+
+        app.focus = super::Focus::Terminal;
+        app.layout.rail = false;
+        let mut toggle_mods = winit::keyboard::ModifiersState::empty();
+        toggle_mods.insert(winit::keyboard::ModifiersState::CONTROL);
+        toggle_mods.insert(winit::keyboard::ModifiersState::SHIFT);
+        app.handle_key_parts(
+            winit::keyboard::Key::Character("m".into()),
+            None,
+            true,
+            toggle_mods,
+            None,
+        );
+        assert!(app.layout.rail);
         assert_eq!(app.focus, super::Focus::Terminal);
 
         app.focus = super::Focus::Rail;
