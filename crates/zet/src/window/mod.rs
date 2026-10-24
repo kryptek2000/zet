@@ -294,14 +294,6 @@ impl zet_agent::Approver for AgentMode {
 const FRAME: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Shell's current directory via /proc (unix). Best effort: "" when unknown.
-fn truncate_for_rail(text: &str, max: usize) -> String {
-    let mut out: String = text.chars().take(max).collect();
-    if text.chars().count() > max {
-        out.push('…');
-    }
-    out
-}
-
 fn shell_cwd(session: &Option<Session>) -> String {
     #[cfg(unix)]
     {
@@ -998,7 +990,7 @@ impl App {
                     .unwrap_or_default()
                     .into_iter()
                     .map(|block| panels::CommandRow {
-                        command: truncate_for_rail(&block.command, 18),
+                        command: block.command,
                         exit: block.exit_code.to_string(),
                         duration: if block.duration_ms == 0 {
                             "—".to_string()
@@ -1156,9 +1148,12 @@ impl App {
                     }
                     let session = &snapshot.sessions[index];
                     let marker = if index == snapshot.active { "▸" } else { " " };
-                    let line = format!(
-                        "{} {} {} {}",
-                        marker, session.index, session.state, session.cwd_tail
+                    let line = panels::format_session_row(
+                        marker,
+                        session.index,
+                        &session.state,
+                        &session.cwd_tail,
+                        vp.cols,
                     );
                     let line_ink = if index == snapshot.active {
                         Rgba::WHITE
@@ -1172,17 +1167,17 @@ impl App {
                 }
                 panels::RailRow::Command(index) => {
                     if let Some(command) = snapshot.commands.get(index) {
-                        let line =
-                            format!("{} {} {}", command.command, command.exit, command.duration);
+                        let line = panels::format_command_row(
+                            &command.command,
+                            &command.exit,
+                            &command.duration,
+                            vp.cols,
+                        );
                         r.draw_text_row(vp, row, 0, &line, ink);
                     }
                 }
                 panels::RailRow::Footer => {
-                    let footer = if snapshot.footer == "—" {
-                        "cwd —".to_string()
-                    } else {
-                        format!("cwd {}", snapshot.footer)
-                    };
+                    let footer = panels::format_footer(&snapshot.footer, vp.cols);
                     r.draw_text_row(vp, row, 0, &footer, ink);
                 }
                 panels::RailRow::Empty => {}
@@ -3015,6 +3010,47 @@ mod layout_fit_tests {
             None,
         );
         assert_eq!(app.focus, super::Focus::Rail);
+    }
+
+    #[test]
+    fn rail_snapshot_keeps_full_command_for_width_budgeting() {
+        let mut app = make_test_app(
+            104,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let command = "echo hello-from-zet-audit-with-a-much-longer-suffix";
+        store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: command.to_string(),
+                output: String::new(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 14,
+            })
+            .unwrap();
+        let mut tab = make_test_tab();
+        tab.recorder = Some(zet_blocks::Recorder::new(store, "session-a"));
+        app.tabs = vec![tab];
+
+        let snapshot = app.build_rail_snapshot();
+        assert_eq!(snapshot.commands[0].command, command);
+        let row = super::panels::format_command_row(
+            &snapshot.commands[0].command,
+            &snapshot.commands[0].exit,
+            &snapshot.commands[0].duration,
+            24,
+        );
+        assert!(row.ends_with("0 14ms"), "{row:?}");
+        assert!(row.contains('…'), "{row:?}");
+        assert!(
+            super::panels::text_cells(&row) <= 24,
+            "{row:?} exceeds the 24-column rail"
+        );
     }
 
     #[test]

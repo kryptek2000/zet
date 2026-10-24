@@ -64,6 +64,228 @@ pub struct RailSnapshot {
     pub footer_provenance: Provenance,
 }
 
+/// Cells consumed by one Unicode scalar in a rail row.
+///
+/// The rail paints one glyph per scalar, so every printable scalar needs
+/// at least one cell. East Asian wide and emoji scalars are budgeted at
+/// two cells so the same budget is also safe on a double-width terminal.
+/// Control scalars do not paint and consume no cell.
+pub fn char_cells(c: char) -> usize {
+    if c.is_control() {
+        0
+    } else if is_wide_scalar(c) {
+        2
+    } else {
+        1
+    }
+}
+
+/// Terminal cells occupied by `text` under the rail's width model.
+pub fn text_cells(text: &str) -> usize {
+    text.chars().map(char_cells).sum()
+}
+
+fn is_wide_scalar(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x1100..=0x115F
+            | 0x2329..=0x232A
+            | 0x2E80..=0x303E
+            | 0x3041..=0x33FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xA000..=0xA4CF
+            | 0xA960..=0xA97F
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE10..=0xFE19
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F300..=0x1F64F
+            | 0x1F680..=0x1F6FF
+            | 0x1F900..=0x1F9FF
+            | 0x1FA70..=0x1FAFF
+            | 0x20000..=0x3FFFD
+    )
+}
+
+/// Replace control scalars with spaces so a row always paints as one
+/// visible line and the width model matches the painted cells.
+fn single_line(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+/// Truncate from the right to `max_cells`, using a trailing ellipsis that
+/// counts against the budget. Never splits a scalar.
+pub fn truncate_to_cells(text: &str, max_cells: usize) -> String {
+    if text_cells(text) <= max_cells {
+        return text.to_string();
+    }
+    if max_cells == 0 {
+        return String::new();
+    }
+    let budget = max_cells - 1;
+    let mut out = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let cells = char_cells(c);
+        if used + cells > budget {
+            break;
+        }
+        out.push(c);
+        used += cells;
+    }
+    if !out.ends_with('…') {
+        out.push('…');
+    }
+    out
+}
+
+/// Truncate from the left to `max_cells`, keeping the rightmost (most
+/// specific) part of a label or path behind a leading ellipsis.
+pub fn truncate_left_to_cells(text: &str, max_cells: usize) -> String {
+    if text_cells(text) <= max_cells {
+        return text.to_string();
+    }
+    if max_cells == 0 {
+        return String::new();
+    }
+    let budget = max_cells - 1;
+    let mut kept: Vec<char> = Vec::new();
+    let mut used = 0;
+    for c in text.chars().rev() {
+        let cells = char_cells(c);
+        if used + cells > budget {
+            break;
+        }
+        kept.push(c);
+        used += cells;
+    }
+    let mut out = String::new();
+    if kept.last() != Some(&'…') {
+        out.push('…');
+    }
+    out.extend(kept.into_iter().rev());
+    out
+}
+
+/// A command row in exactly `cols` cells or fewer:
+/// `<command> <exit> <duration>`.
+///
+/// The exit and duration fields are reserved before the command is given
+/// the remainder, so a long command can never clip a duration unit. If the
+/// rail is too narrow for the exit code, the complete duration survives;
+/// if even the complete duration cannot fit, only an ellipsis plus its
+/// unit is shown — never a bare number that could be misread.
+pub fn format_command_row(command: &str, exit: &str, duration: &str, cols: u32) -> String {
+    let cols = cols as usize;
+    if cols == 0 {
+        return String::new();
+    }
+    let command = single_line(command);
+    let exit = single_line(exit);
+    let duration = single_line(duration);
+
+    let duration_cells = text_cells(&duration);
+    if duration.is_empty() || duration_cells > cols {
+        return compact_duration(&duration, cols);
+    }
+
+    let exit_cells = text_cells(&exit);
+    let right = if !exit.is_empty() && exit_cells + 1 + duration_cells <= cols {
+        format!("{exit} {duration}")
+    } else {
+        duration
+    };
+    let right_cells = text_cells(&right);
+    if right_cells >= cols {
+        return right;
+    }
+    let command_budget = cols - right_cells - 1;
+    let command = truncate_to_cells(&command, command_budget);
+    if command.is_empty() {
+        right
+    } else {
+        format!("{command} {right}")
+    }
+}
+
+fn compact_duration(duration: &str, cols: usize) -> String {
+    if cols == 0 {
+        return String::new();
+    }
+    if duration.is_empty() {
+        return "…".to_string();
+    }
+    let unit: String = duration
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphabetic())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let suffix = if unit.is_empty() {
+        "…".to_string()
+    } else {
+        format!("…{unit}")
+    };
+    if text_cells(&suffix) <= cols {
+        suffix
+    } else {
+        "…".to_string()
+    }
+}
+
+/// A session row in exactly `cols` cells or fewer. The marker, index and
+/// state are fixed; the cwd tail gets the remainder and keeps its most
+/// specific right-hand part.
+pub fn format_session_row(
+    marker: &str,
+    index: usize,
+    state: &str,
+    cwd_tail: &str,
+    cols: u32,
+) -> String {
+    let cols = cols as usize;
+    if cols == 0 {
+        return String::new();
+    }
+    let marker = single_line(marker);
+    let state = single_line(state);
+    let cwd_tail = single_line(cwd_tail);
+    let prefix = format!("{marker} {index} {state}");
+    let prefix_cells = text_cells(&prefix);
+    if prefix_cells >= cols {
+        return truncate_to_cells(&prefix, cols);
+    }
+    let budget = cols - prefix_cells - 1;
+    if budget == 0 || cwd_tail.is_empty() {
+        return prefix;
+    }
+    format!("{prefix} {}", truncate_left_to_cells(&cwd_tail, budget))
+}
+
+/// Footer row in exactly `cols` cells or fewer. The path keeps its tail
+/// so the current directory stays identifiable in a narrow rail.
+pub fn format_footer(cwd: &str, cols: u32) -> String {
+    let cols = cols as usize;
+    if cols == 0 {
+        return String::new();
+    }
+    let cwd = single_line(cwd);
+    let prefix = "cwd ";
+    let prefix_cells = text_cells(prefix);
+    if cols <= prefix_cells || cwd.is_empty() {
+        return truncate_to_cells("cwd", cols);
+    }
+    let budget = cols - prefix_cells;
+    format!("{prefix}{}", truncate_left_to_cells(&cwd, budget))
+}
+
 /// Dirty-flagged cache for panel snapshots. The rail is rebuilt at most
 /// once per frame and only when something observable changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -382,6 +604,185 @@ mod tests {
         };
         assert_eq!(snap.footer, "—");
         assert_eq!(snap.footer_provenance, Provenance::Unknown);
+    }
+
+    fn assert_fits(line: &str, cols: u32) {
+        let cells = text_cells(line);
+        assert!(
+            cells <= cols as usize,
+            "{line:?} uses {cells} cells, rail has {cols}"
+        );
+        // The rail paints one glyph per scalar, so the painted glyph count
+        // must fit too, even when wide scalars were budgeted at two cells.
+        assert!(
+            line.chars().count() <= cols as usize,
+            "{line:?} paints {} glyphs, rail has {cols}",
+            line.chars().count()
+        );
+    }
+
+    #[test]
+    fn cell_width_counts_scalars_not_bytes() {
+        assert_eq!(text_cells("abc"), 3);
+        assert_eq!(text_cells("café"), 4);
+        assert_eq!(text_cells("日本語"), 6);
+        assert_eq!(text_cells("🙂"), 2);
+        assert_eq!(text_cells("a\nb"), 2); // control scalars do not paint
+        assert_eq!(chars_in("日本語"), 3);
+    }
+
+    fn chars_in(text: &str) -> usize {
+        text.chars().count()
+    }
+
+    #[test]
+    fn truncation_keeps_scalar_boundaries() {
+        assert_eq!(truncate_to_cells("abcdef", 3), "ab…");
+        assert_eq!(truncate_to_cells("abc", 3), "abc");
+        assert_eq!(truncate_to_cells("abcdef", 0), "");
+        assert_eq!(truncate_to_cells("abcdef", 1), "…");
+        assert_eq!(truncate_left_to_cells("abcdef", 3), "…ef");
+        assert_eq!(truncate_left_to_cells("abc", 3), "abc");
+        assert_eq!(truncate_left_to_cells("abcdef", 0), "");
+        assert_eq!(truncate_left_to_cells("abcdef", 1), "…");
+        // A wide scalar never straddles the budget: it is dropped whole.
+        assert_eq!(truncate_to_cells("日本語", 4), "日…");
+        assert_eq!(truncate_to_cells("日本語", 3), "日…");
+    }
+
+    #[test]
+    fn short_command_rows_keep_their_observed_values() {
+        assert_eq!(format_command_row("pwd", "0", "6ms", 24), "pwd 0 6ms");
+        assert_eq!(format_command_row("ls -la", "0", "5ms", 24), "ls -la 0 5ms");
+        assert_eq!(
+            format_command_row("cargo test", "127", "812ms", 24),
+            "cargo test 127 812ms"
+        );
+    }
+
+    #[test]
+    fn duration_unit_survives_rail_command_truncation() {
+        // The confirmed native defect: a long command consumed the whole
+        // 24-column rail and `14ms` was painted as `14`.
+        let row = format_command_row("echo hello-from-zet-audit", "0", "14ms", 24);
+        assert_eq!(row, "echo hello-from-… 0 14ms");
+        assert!(row.ends_with(" 0 14ms"));
+        assert!(!row.ends_with("14"));
+        assert!(row.contains('…'), "truncation must be visible: {row:?}");
+        assert_fits(&row, 24);
+    }
+
+    #[test]
+    fn long_command_never_clips_duration_or_exit_code() {
+        for (command, exit, duration) in [
+            ("echo hello-from-zet-audit", "0", "14ms"),
+            ("cargo build --release --all-targets", "127", "123456ms"),
+            (
+                "git push origin feat/p2a-slice-4b-mission-rail",
+                "-1",
+                "9ms",
+            ),
+            ("rg --files-with-matches needle .", "255", "1000000ms"),
+        ] {
+            let row = format_command_row(command, exit, duration, 24);
+            assert!(
+                row.ends_with(&format!("{exit} {duration}")),
+                "row {row:?} lost exit/duration for {command:?}"
+            );
+            assert!(row.contains('…'), "row {row:?} hides truncation");
+            assert_fits(&row, 24);
+        }
+    }
+
+    #[test]
+    fn unknown_values_stay_unknown_and_bounded() {
+        assert_eq!(format_command_row("make", "—", "—", 24), "make — —");
+        let row = format_command_row("make --a-very-long-target-name", "—", "—", 24);
+        assert!(row.ends_with("— —"));
+        assert_fits(&row, 24);
+    }
+
+    #[test]
+    fn narrow_rails_never_lose_duration_units() {
+        for cols in 0..=24u32 {
+            let row = format_command_row("echo hello-from-zet-audit", "0", "14ms", cols);
+            assert_fits(&row, cols);
+            if cols >= 4 {
+                assert!(
+                    row.ends_with("14ms"),
+                    "cols={cols}: duration unit lost in {row:?}"
+                );
+            } else {
+                assert!(
+                    !row.chars().any(|c| c.is_ascii_digit()),
+                    "cols={cols}: bare number {row:?}"
+                );
+            }
+            if cols >= 6 {
+                assert!(row.contains("0 14ms"), "cols={cols}: {row:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn minimal_and_empty_command_rows_are_safe() {
+        for cols in 0..=10u32 {
+            let row = format_command_row("", "0", "14ms", cols);
+            assert_fits(&row, cols);
+            if cols >= 4 {
+                assert!(row.ends_with("14ms"), "cols={cols}: {row:?}");
+            }
+        }
+        assert_eq!(format_command_row("", "0", "14ms", 0), "");
+        assert_eq!(format_command_row("", "0", "14ms", 1), "…");
+        assert_eq!(format_command_row("ls", "0", "14ms", 0), "");
+    }
+
+    #[test]
+    fn non_ascii_commands_are_bounded_without_corruption() {
+        let row = format_command_row("日本語のコマンドを実行する", "0", "14ms", 24);
+        assert!(row.ends_with("0 14ms"));
+        assert!(row.contains('…'));
+        assert_fits(&row, 24);
+        assert!(!row.contains('\u{fffd}'));
+
+        let row = format_command_row("café --crème", "0", "14ms", 12);
+        assert!(row.ends_with("0 14ms"));
+        assert_fits(&row, 12);
+    }
+
+    #[test]
+    fn session_rows_keep_state_and_show_long_label_tails() {
+        assert_eq!(
+            format_session_row("▸", 1, "input", "home", 24),
+            "▸ 1 input home"
+        );
+        let label = "0123456789abcdefghijklmnopqrstuvwxyz";
+        let row = format_session_row("▸", 1, "input", label, 24);
+        assert!(row.starts_with("▸ 1 input …"));
+        assert!(row.ends_with("nopqrstuvwxyz"));
+        assert_fits(&row, 24);
+
+        for cols in 0..=24u32 {
+            let row = format_session_row(" ", 12, "running", label, cols);
+            assert_fits(&row, cols);
+        }
+    }
+
+    #[test]
+    fn footer_keeps_the_meaningful_path_tail() {
+        assert_eq!(format_footer("/home/bandit", 24), "cwd /home/bandit");
+        assert_eq!(format_footer("—", 24), "cwd —");
+        let path = "/home/bandit/Projects/zet/crates/zet/src/window";
+        let row = format_footer(path, 24);
+        assert!(row.starts_with("cwd …"), "{row:?}");
+        assert!(row.ends_with("src/window"), "{row:?}");
+        assert_fits(&row, 24);
+        for cols in 0..=24u32 {
+            let row = format_footer(path, cols);
+            assert_fits(&row, cols);
+            assert!(!row.contains('\u{0}'));
+        }
     }
 
     #[test]
