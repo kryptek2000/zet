@@ -121,6 +121,33 @@ pub fn tab_segment(x_cell: usize, cols: usize, n_tabs: usize) -> usize {
     (x_cell * n_tabs / cols).min(n_tabs - 1)
 }
 
+/// Tab-bar hit testing with an optional leading rail.
+///
+/// Clicks in the rail area are rejected (`None`) so a visible rail cannot
+/// accidentally activate a tab. Clicks elsewhere use the same segment math
+/// as the painted tab bar, keeping clickable and painted regions aligned.
+pub fn tabbar_hit_segment(
+    x_cell: usize,
+    rail_cols: usize,
+    cols: usize,
+    n_tabs: usize,
+) -> Option<usize> {
+    if n_tabs == 0 || cols == 0 || x_cell >= cols || x_cell < rail_cols {
+        return None;
+    }
+    Some(tab_segment(x_cell, cols, n_tabs))
+}
+
+/// Alias for callers that prefer snake_case words.
+pub fn tab_bar_hit_segment(
+    x_cell: usize,
+    rail_cols: usize,
+    cols: usize,
+    n_tabs: usize,
+) -> Option<usize> {
+    tabbar_hit_segment(x_cell, rail_cols, cols, n_tabs)
+}
+
 pub fn pix_to_cell(
     x: f64,
     y: f64,
@@ -151,5 +178,43 @@ pub fn drag_scroll_lines(mouse_y: f64, view_h: f64, cell_h: f64) -> isize {
         -((2.0 + ((mouse_y - view_h) / cell_h)).min(24.0) as isize)
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod tabbar_hit_tests {
+    use super::tabbar_hit_segment;
+
+    #[test]
+    fn zero_rail_uses_existing_segments() {
+        assert_eq!(tabbar_hit_segment(0, 0, 10, 3), Some(0));
+        assert_eq!(tabbar_hit_segment(9, 0, 10, 3), Some(2));
+    }
+
+    #[test]
+    fn rail_clicks_are_rejected() {
+        assert_eq!(tabbar_hit_segment(0, 4, 10, 3), None);
+        assert_eq!(tabbar_hit_segment(3, 4, 10, 3), None);
+        assert_eq!(tabbar_hit_segment(4, 4, 10, 3), Some(1));
+    }
+
+    #[test]
+    fn invalid_clicks_are_rejected() {
+        assert_eq!(tabbar_hit_segment(10, 0, 10, 3), None);
+        assert_eq!(tabbar_hit_segment(0, 0, 0, 3), None);
+        assert_eq!(tabbar_hit_segment(0, 0, 10, 0), None);
+    }
+
+    #[test]
+    fn painted_and_clickable_segments_agree() {
+        for x in 0..20 {
+            let got = tabbar_hit_segment(x, 4, 20, 4);
+            let expected = if x < 4 {
+                None
+            } else {
+                Some(super::tab_segment(x, 20, 4))
+            };
+            assert_eq!(got, expected, "x={x}");
+        }
     }
 }

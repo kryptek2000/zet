@@ -839,6 +839,13 @@ impl App {
         (self.tabs.len() > 1) as usize
     }
 
+    /// Width of the currently resolved rail, in columns. Zero in the
+    /// default Terminal Focus layout, so existing tab-bar behavior is
+    /// unchanged until a rail is actually enabled.
+    fn rail_cols(&self) -> usize {
+        self.frame_layout().rail.map_or(0, |vp| vp.cols as usize)
+    }
+
     #[allow(dead_code)]
     fn grid_rows(&self) -> usize {
         self.rows.saturating_sub(self.bar_rows())
@@ -1745,13 +1752,20 @@ impl ApplicationHandler for App {
                                 let (cw, ch) = r.cell_px();
                                 if (y / ch as f64).floor() as usize == 0 {
                                     let col = (x / cw.max(1) as f64).floor().max(0.0) as usize;
-                                    self.active = zet_gpu::selection::tab_segment(
+                                    // Rail-area clicks are rejected so a
+                                    // future rail cannot accidentally switch
+                                    // tabs; with rail_cols == 0 this is the
+                                    // existing full-width behavior.
+                                    if let Some(seg) = zet_gpu::selection::tabbar_hit_segment(
                                         col,
+                                        self.rail_cols(),
                                         self.cols,
                                         self.tabs.len(),
-                                    );
-                                    self.needs_draw = true;
-                                    self.retitle();
+                                    ) {
+                                        self.active = seg;
+                                        self.needs_draw = true;
+                                        self.retitle();
+                                    }
                                     return;
                                 }
                             }
