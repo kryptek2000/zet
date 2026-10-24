@@ -13,8 +13,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::Window;
 use zet_gpu::input::{
-    is_agent_toggle, is_close_tab, is_copy, is_cycle_tab, is_new_tab, is_paste, is_search,
-    is_select_all, translate,
+    is_agent_toggle, is_close_tab, is_copy, is_cycle_tab, is_new_tab, is_paste, is_rail_toggle,
+    is_search, is_select_all, translate,
 };
 use zet_gpu::selection::Selection;
 use zet_gpu::Renderer;
@@ -23,6 +23,7 @@ use zet_pty::Session;
 use zet_term::Terminal;
 
 pub mod layout;
+pub mod panels;
 
 const HOOKS: [(&str, &str); 2] = [
     ("bash", "zet-integration.bash"),
@@ -185,6 +186,12 @@ impl Tab {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Terminal,
+    Rail,
+}
+
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
@@ -199,6 +206,13 @@ struct App {
     cols: usize,
     rows: usize,
     layout: crate::window::layout::Layout,
+    focus: Focus,
+    rail_sel: usize,
+    chrome: panels::ChromeCache,
+    #[cfg(test)]
+    pub chrome_query_count: usize,
+    #[cfg(test)]
+    pub chrome_build_count: usize,
     env_spec: Option<String>,
     startup_spec: Option<String>,
     /// Commands that run without translation (PATH at startup +
@@ -859,6 +873,155 @@ impl App {
         )
     }
 
+    fn refresh_chrome(&mut self) {
+        self.refresh_chrome_at(std::time::Instant::now());
+    }
+
+    pub fn refresh_chrome_at(&mut self, now: std::time::Instant) {
+        if !self.layout.rail {
+            return;
+        }
+        let phase = self
+            .tabs
+            .get(self.active)
+            .map(|tab| tab.shell_state.phase());
+        let cwd = self
+            .tabs
+            .get(self.active)
+            .map(|tab| shell_cwd(&tab.session))
+            .unwrap_or_default();
+        let tab_count = self.tabs.len();
+        let active_dead = self
+            .tabs
+            .get(self.active)
+            .map(|tab| tab.dead)
+            .unwrap_or(true);
+        let cheap_changed = self.chrome.cheap_changed(
+            self.active,
+            self.layout.rail,
+            phase,
+            &cwd,
+            tab_count,
+            active_dead,
+        );
+        if !cheap_changed && !self.chrome.poll_due(now) {
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.chrome_query_count += 1;
+        }
+        let block_count = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.recorder.as_ref())
+            .map(|recorder| recorder.block_count())
+            .unwrap_or(0);
+        if !cheap_changed && block_count == self.chrome.last_blocks {
+            self.chrome.mark_refreshed(now);
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.chrome_build_count += 1;
+        }
+        let snapshot = self.build_rail_snapshot();
+        self.chrome.commit_refresh(
+            self.active,
+            self.layout.rail,
+            block_count,
+            phase,
+            cwd,
+            tab_count,
+            active_dead,
+            snapshot,
+            now,
+        );
+    }
+
+    fn build_rail_snapshot(&self) -> panels::RailSnapshot {
+        let mode = if self.layout.rail {
+            "Workspace"
+        } else {
+            "Terminal Focus"
+        };
+        let sessions = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, tab)| {
+                let cwd = shell_cwd(&tab.session);
+                let cwd_tail = if cwd.is_empty() {
+                    "—".to_string()
+                } else {
+                    cwd.rsplit('/').next().unwrap_or(&cwd).to_string()
+                };
+                let state = if tab.dead {
+                    "exited".to_string()
+                } else {
+                    match tab.shell_state.phase() {
+                        zet_pty::shell::Phase::Prompt => "prompt".to_string(),
+                        zet_pty::shell::Phase::Input => "input".to_string(),
+                        zet_pty::shell::Phase::Running => "running".to_string(),
+                    }
+                };
+                let exit = tab
+                    .shell_state
+                    .last_exit()
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "—".to_string());
+                panels::SessionRow {
+                    index: i + 1,
+                    cwd_tail,
+                    shell: self.shell_name.clone(),
+                    state,
+                    exit,
+                    provenance: panels::Provenance::Inferred,
+                }
+            })
+            .collect();
+        let commands = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.recorder.as_ref())
+            .map(|recorder| {
+                recorder
+                    .recent_commands(8)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|block| panels::CommandRow {
+                        command: block.command,
+                        exit: block.exit_code.to_string(),
+                        duration: if block.duration_ms == 0 {
+                            "—".to_string()
+                        } else {
+                            format!("{}ms", block.duration_ms)
+                        },
+                        provenance: panels::Provenance::Observed,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let footer = self
+            .tabs
+            .get(self.active)
+            .map(|tab| shell_cwd(&tab.session))
+            .unwrap_or_default();
+        let (footer, footer_provenance) = if footer.is_empty() {
+            ("—".to_string(), panels::Provenance::Unknown)
+        } else {
+            (footer, panels::Provenance::Observed)
+        };
+        panels::RailSnapshot {
+            mode: mode.to_string(),
+            active: self.active,
+            sessions,
+            commands,
+            footer,
+            footer_provenance,
+        }
+    }
+
     /// Size every tab's grid + PTY to the terminal viewport.
     fn fit_all(&mut self) {
         let (cols, rows) = layout::terminal_viewport(
@@ -872,6 +1035,152 @@ impl App {
             tab.term.resize(cols, rows);
             if let Some(s) = &tab.session {
                 let _ = s.resize(cols.min(32767) as u16, rows.min(32767) as u16);
+            }
+        }
+    }
+
+    fn toggle_rail(&mut self) {
+        self.layout.rail = !self.layout.rail;
+        self.layout.inspector = false;
+        self.focus = Focus::Terminal;
+        self.chrome.mark_dirty();
+        self.fit_all();
+        self.needs_draw = true;
+        self.retitle();
+    }
+
+    fn handle_mouse_click(&mut self, x: f64, y: f64, cw: u32, ch: u32) {
+        self.needs_draw = true;
+        // Tab bar owns pixel row 0: clicks switch tabs.
+        if self.bar_rows() > 0
+            && x >= 0.0
+            && y >= 0.0
+            && (y / ch.max(1) as f64).floor() as usize == 0
+        {
+            let col = (x / cw.max(1) as f64).floor() as usize;
+            if col >= self.cols {
+                return;
+            }
+            if let Some(seg) = zet_gpu::selection::tabbar_hit_segment(
+                col,
+                self.rail_cols(),
+                self.cols,
+                self.tabs.len(),
+            ) {
+                self.active = seg;
+                self.focus = Focus::Terminal;
+                self.needs_draw = true;
+                self.retitle();
+            }
+            return;
+        }
+        // Rail clicks focus the rail instead of selecting terminal cells.
+        let rail_cols = self.rail_cols();
+        if rail_cols > 0 {
+            let vp = self.frame_layout().term;
+            let rail_px = rail_cols as f64 * cw as f64;
+            let top = vp.y as f64 * ch as f64;
+            let bottom = (vp.y as f64 + vp.rows as f64) * ch as f64;
+            if x >= 0.0 && x < rail_px && y >= top && y < bottom {
+                let row = ((y - top) / ch as f64).floor() as usize as u32;
+                if let Some(session) = panels::rail_row_target(row, self.tabs.len(), vp.rows) {
+                    self.rail_sel = session;
+                }
+                self.focus = Focus::Rail;
+                self.needs_draw = true;
+                return;
+            }
+        }
+        let vp = self.frame_layout().term;
+        let gpu_vp = zet_gpu::renderer::Viewport {
+            x: vp.x,
+            y: vp.y,
+            cols: vp.cols,
+            rows: vp.rows,
+        };
+        if let Some(cell) = zet_gpu::renderer::viewport_hit_test(
+            x,
+            y,
+            gpu_vp,
+            cw,
+            ch,
+            self.tabs[self.active].term.visible_base(),
+        ) {
+            self.focus = Focus::Terminal;
+            self.tabs[self.active].selecting = true;
+            self.tabs[self.active].selection =
+                Some(Selection::new((cell.col, cell.row), (cell.col, cell.row)));
+        }
+    }
+
+    fn draw_rail(
+        r: &mut Renderer,
+        vp: zet_gpu::renderer::Viewport,
+        snapshot: &panels::RailSnapshot,
+        selected: usize,
+    ) {
+        use zet_gpu::quad::Rgba;
+        let ink = zet_gpu::renderer::TAB_DIM_INK;
+        let rows = panels::rail_rows(vp.rows, snapshot.sessions.len(), snapshot.commands.len());
+        for (row, kind) in rows.into_iter().enumerate() {
+            let row = row as u32;
+            match kind {
+                panels::RailRow::Header => {
+                    r.draw_text_row(vp, row, 0, "ZET", Rgba::WHITE);
+                }
+                panels::RailRow::Mode => {
+                    r.draw_text_row(vp, row, 0, &format!("mode {}", snapshot.mode), ink);
+                }
+                panels::RailRow::SessionsHeader => {
+                    r.draw_text_row(vp, row, 0, "SESSIONS", ink);
+                }
+                panels::RailRow::Session(index) => {
+                    if index == selected && index < snapshot.sessions.len() {
+                        r.draw_fill(
+                            zet_gpu::renderer::Viewport {
+                                x: 0,
+                                y: vp.y + row,
+                                cols: vp.cols,
+                                rows: 1,
+                            },
+                            zet_gpu::renderer::TAB_ACTIVE_BG,
+                        );
+                    }
+                    let session = &snapshot.sessions[index];
+                    let marker = if index == snapshot.active { "▸" } else { " " };
+                    let line = panels::format_session_row(
+                        marker,
+                        session.index,
+                        &session.state,
+                        &session.cwd_tail,
+                        vp.cols,
+                    );
+                    let line_ink = if index == snapshot.active {
+                        Rgba::WHITE
+                    } else {
+                        ink
+                    };
+                    r.draw_text_row(vp, row, 0, &line, line_ink);
+                }
+                panels::RailRow::CommandsHeader => {
+                    r.draw_text_row(vp, row, 0, "OBSERVED COMMANDS", ink);
+                }
+                panels::RailRow::Command(index) => {
+                    if let Some(command) = snapshot.commands.get(index) {
+                        let line = panels::format_command_row(
+                            &command.command,
+                            &command.exit,
+                            &command.duration,
+                            vp.cols,
+                        );
+                        r.draw_text_row(vp, row, 0, &line, ink);
+                    }
+                }
+                panels::RailRow::Footer => {
+                    let footer = panels::format_footer(&snapshot.footer, vp.cols);
+                    r.draw_text_row(vp, row, 0, &footer, ink);
+                }
+                panels::RailRow::Empty => {}
             }
         }
     }
@@ -1260,6 +1569,320 @@ impl App {
             eprintln!("perf: frames={}", self.perf_frames);
         }
     }
+
+    pub fn handle_key_parts(
+        &mut self,
+        logical: winit::keyboard::Key,
+        text: Option<&str>,
+        pressed: bool,
+        mods: winit::keyboard::ModifiersState,
+        event_loop: Option<&ActiveEventLoop>,
+    ) {
+        // Any key gets a prompt frame; the heartbeat covers the rest.
+        self.needs_draw = true;
+        // Typing returns to live (the cursor is there, not in history).
+        // Search mode keeps its revealed view (snap would fight it).
+        if pressed && !self.tabs[self.active].search.on {
+            self.tabs[self.active].term.snap_to_bottom();
+        }
+        if pressed && self.perf_t0.is_some() {
+            self.perf_input = Some(std::time::Instant::now());
+        }
+        // Panel focus owns the keyboard: typing never leaks to
+        // the PTY while the rail is focused.
+        if self.focus != Focus::Terminal {
+            if !pressed {
+                return;
+            }
+            if is_rail_toggle(&logical, pressed, &mods) {
+                self.toggle_rail();
+                return;
+            }
+            match &logical {
+                Key::Named(NamedKey::Escape) => self.focus = Focus::Terminal,
+                Key::Named(NamedKey::ArrowUp) => {
+                    if self.focus == Focus::Rail && !self.tabs.is_empty() {
+                        self.rail_sel = self.rail_sel.saturating_sub(1);
+                    }
+                }
+                Key::Named(NamedKey::ArrowDown) => {
+                    if self.focus == Focus::Rail && !self.tabs.is_empty() {
+                        self.rail_sel = (self.rail_sel + 1).min(self.tabs.len() - 1);
+                    }
+                }
+                Key::Named(NamedKey::Enter)
+                    if self.focus == Focus::Rail && self.rail_sel < self.tabs.len() =>
+                {
+                    self.active = self.rail_sel;
+                    self.focus = Focus::Terminal;
+                    self.retitle();
+                }
+                _ => {}
+            }
+            let ctrl_c = mods.contains(ModifiersState::CONTROL)
+                && matches!(&logical, Key::Character(s) if s.eq_ignore_ascii_case("c"));
+            if ctrl_c {
+                // A safe route back to the terminal; the byte is
+                // then translated and sent normally below, preserving
+                // the emergency-cancellation behavior.
+                self.focus = Focus::Terminal;
+            } else {
+                self.needs_draw = true;
+                return;
+            }
+        }
+        // Agent running: input locked (its steps own the line).
+        // Copy is local, not shell input: reading the grid never
+        // disturbs the turn, so it stays available while busy.
+        // Ctrl+C still reaches the shell: the emergency brake that
+        // cancels the agent's running command (D fires, step ends).
+        if self.tabs[self.active].agent_busy {
+            if is_copy(&logical, pressed, &mods) {
+                self.copy_selection();
+                return;
+            }
+            // Select-all is local grid reading: safe while busy.
+            if is_select_all(&logical, pressed, &mods) {
+                self.select_all();
+                return;
+            }
+            if let Some(bytes) = translate(&logical, text, pressed, &mods) {
+                if bytes == [0x03] {
+                    if let Some(s) = &mut self.tabs[self.active].session {
+                        let _ = s.write_all(&bytes);
+                    }
+                }
+            }
+            return;
+        }
+        // Paste first: Ctrl+Shift+V would otherwise type a SYN byte.
+        if is_paste(&logical, pressed, &mods) {
+            if let Ok(mut clip) = arboard::Clipboard::new() {
+                if let Ok(text) = clip.get_text() {
+                    let bracketed = self.tabs[self.active].term.bracketed_paste();
+                    if let Some(s) = &mut self.tabs[self.active].session {
+                        let _ = s.write_all(&zet_gpu::input::paste_wrapped(&text, bracketed));
+                    }
+                }
+            }
+            return;
+        }
+        // Copy: Ctrl+Shift+C copies the mouse selection (never ETX).
+        if is_copy(&logical, pressed, &mods) {
+            self.copy_selection();
+            return;
+        }
+        // Select all: Ctrl+Shift+A highlights scrollback + grid.
+        // (Bare Ctrl+A stays readline's line-start.)
+        if is_select_all(&logical, pressed, &mods) {
+            self.select_all();
+            return;
+        }
+        // Tabs: new/close/cycle never reach the shell.
+        if is_new_tab(&logical, pressed, &mods) {
+            self.new_tab();
+            return;
+        }
+        if is_close_tab(&logical, pressed, &mods) {
+            if let Some(event_loop) = event_loop {
+                self.close_tab(event_loop);
+            }
+            return;
+        }
+        if let Some(dir) = is_cycle_tab(&logical, pressed, &mods) {
+            self.cycle_tab(dir);
+            return;
+        }
+        // Mission Rail toggle (Ctrl+Shift+M).
+        if is_rail_toggle(&logical, pressed, &mods) {
+            self.toggle_rail();
+            return;
+        }
+        // Scrollback find: typing goes to the query, never the PTY.
+        if is_search(&logical, pressed, &mods) && !self.tabs[self.active].search.on {
+            self.tabs[self.active].search.on = true;
+            self.tabs[self.active].search.query.clear();
+            self.research();
+            return;
+        }
+        if self.tabs[self.active].search.on {
+            if !pressed {
+                return;
+            }
+            let shift = mods.contains(ModifiersState::SHIFT);
+            match &logical {
+                Key::Named(NamedKey::Escape) => self.search_exit(),
+                Key::Named(NamedKey::Enter) => self.search_step(if shift { -1 } else { 1 }),
+                Key::Named(NamedKey::Backspace) => {
+                    self.tabs[self.active].search.query.pop();
+                    self.research();
+                }
+                Key::Character(_) => {
+                    let ctrl = mods.contains(ModifiersState::CONTROL);
+                    if !ctrl {
+                        if let Some(text) = text {
+                            self.tabs[self.active].search.query.push_str(text);
+                            self.research();
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        // Agent goal mode toggle: Ctrl+G would otherwise type BEL.
+        if is_agent_toggle(&logical, pressed, &mods) {
+            self.tabs[self.active].goal_mode = !self.tabs[self.active].goal_mode;
+            self.tabs[self.active].ghost.reset();
+            self.tabs[self.active].nl_rx = None;
+            self.tabs[self.active].nl_wake = false;
+            // Leaving goal mode abandons any draft, or it could
+            // land and launch after the mode is gone.
+            self.tabs[self.active].plan_rx = None;
+            self.tabs[self.active].pending_plan = None;
+            self.retitle();
+            return;
+        }
+        let is_tab = pressed && matches!(&logical, Key::Named(NamedKey::Tab));
+        let is_enter = pressed && matches!(&logical, Key::Named(NamedKey::Enter));
+        let is_esc = pressed && matches!(&logical, Key::Named(NamedKey::Escape));
+        // F12: one-key undo of the last checkpointed agent step.
+        // (While busy the early gate above already swallowed this.)
+        // Runs on a thread: git in a giant repo must not hitch frames.
+        if pressed && matches!(&logical, Key::Named(NamedKey::F12)) {
+            let input = self.current_text().unwrap_or_default();
+            if self.tabs[self.active].undo_rx.is_some() {
+                // Never swallow silently: a stuck undo used to eat
+                // every later F12 with zero feedback.
+                self.tabs[self.active]
+                    .ghost
+                    .notify(input, "(undo already running)".to_string());
+                return;
+            }
+            let cp = self.tabs[self.active]
+                .last_journal
+                .iter()
+                .rev()
+                .find_map(|e| e.checkpoint.clone());
+            match cp {
+                None => {
+                    self.tabs[self.active]
+                        .ghost
+                        .notify(input, "(nothing to undo)".to_string());
+                }
+                Some(cp) => {
+                    let cwd = shell_cwd(&self.tabs[self.active].session);
+                    let (tx, rx) = mpsc::channel();
+                    self.tabs[self.active].undo_rx = Some(rx);
+                    std::thread::spawn(move || {
+                        // Wrong-repo use fails closed: reset --hard
+                        // with an unknown SHA errors, touching nothing.
+                        let res = zet_agent::undo_checkpoint(std::path::Path::new(&cwd), &Some(cp))
+                            .map_err(|e| e.to_string());
+                        let _ = tx.send(res);
+                    });
+                }
+            }
+            return;
+        }
+        // Tab accepts only a completable history ghost; notices
+        // ("…", hints) fall through to the shell untouched.
+        if is_tab {
+            if let Some(suffix) = self.tabs[self.active].ghost.accept() {
+                if let Some(s) = &mut self.tabs[self.active].session {
+                    let _ = s.write_all(suffix.as_bytes());
+                }
+                return;
+            }
+        }
+        // Escape clears ghost / cancels an in-flight answer / exits
+        // goal mode; swallowed only when it did something.
+        if is_esc {
+            let was_pending = self.tabs[self.active].nl_rx.is_some();
+            let was_goal = self.tabs[self.active].goal_mode;
+            let had_fix = self.tabs[self.active].pending_fix.take().is_some();
+            let swallowed = self.tabs[self.active].ghost.cancel();
+            if was_pending || was_goal {
+                self.tabs[self.active].ghost.dismiss_current();
+            }
+            self.tabs[self.active].nl_rx = None;
+            self.tabs[self.active].nl_wake = false;
+            self.tabs[self.active].plan_rx = None;
+            self.tabs[self.active].pending_plan = None;
+            if self.tabs[self.active].goal_mode {
+                self.tabs[self.active].goal_mode = false;
+                self.retitle();
+            }
+            if swallowed || was_pending || was_goal || had_fix {
+                return;
+            }
+        }
+        // Enter in goal mode starts an agent turn on the line.
+        // With a pending plan, this Enter is the once-and-done
+        // approval: the agreed steps run under normal policy.
+        // The stored goal runs (approval was for it, not for
+        // whatever was typed since).
+        if is_enter && self.tabs[self.active].goal_mode {
+            let input = self.current_text().unwrap_or_default();
+            if !input.trim().is_empty() {
+                if let Some((goal, plan)) = self.tabs[self.active].pending_plan.take() {
+                    self.start_agent(goal, Some(plan));
+                } else {
+                    self.start_plan(input);
+                }
+            }
+            return;
+        }
+        // Modeless routing: `zet <words>` translates the rest;
+        // known commands run; unknown first words translate
+        // (preview swaps in, never runs blind). The line stays
+        // put when there's no model (notice shown).
+        if is_enter && self.tabs[self.active].nl_rx.is_none() {
+            let input = self.current_text().unwrap_or_default();
+            if !input.trim().is_empty() {
+                if let Some(rest) = zet_pty::zet_fallback(&input) {
+                    // Wake word: an order, not a question.
+                    self.start_nl_request(rest, true);
+                    return;
+                }
+                if !self.route_direct(&input) {
+                    self.start_nl_request(input, false);
+                    return;
+                }
+            }
+        }
+        // Enter while an NL answer is in flight: wait for it.
+        if is_enter && self.tabs[self.active].nl_rx.is_some() {
+            return;
+        }
+        if let Some(mut bytes) = translate(&logical, text, pressed, &mods) {
+            // Typing clears the mouse selection.
+            if pressed {
+                self.tabs[self.active].selection = None;
+            }
+            // Send exactly what the line discipline erases with.
+            if bytes == [0x7f] {
+                bytes = vec![self.tabs[self.active].erase];
+            }
+            if let Some(s) = &mut self.tabs[self.active].session {
+                let _ = s.write_all(&bytes);
+            }
+            // Settle-probe stamps (ZET_PERF=1 only): Enter on a
+            // non-empty line starts the clock; Ctrl+C voids it
+            // (aborted typing records no block). NL/goal/agent
+            // paths return before here, so this is human shell
+            // commands only.
+            if self.perf_t0.is_some() {
+                if bytes.as_slice() == b"\r" {
+                    if self.current_text().is_some_and(|t| !t.trim().is_empty()) {
+                        self.cmd_t0 = Some(std::time::Instant::now());
+                    }
+                } else if bytes.as_slice() == b"\x03" {
+                    self.cmd_t0 = None;
+                }
+            }
+        }
+    }
 }
 
 /// Keychain search order, shared by spec validation and client builds
@@ -1370,278 +1993,15 @@ impl ApplicationHandler for App {
                 self.mods = m.state();
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                let pressed = event.state == ElementState::Pressed;
-                // Any key gets a prompt frame; the heartbeat covers the rest.
-                self.needs_draw = true;
-                // Typing returns to live (the cursor is there, not in history).
-                // Search mode keeps its revealed view (snap would fight it).
-                if pressed && !self.tabs[self.active].search.on {
-                    self.tabs[self.active].term.snap_to_bottom();
-                }
-                if pressed && self.perf_t0.is_some() {
-                    self.perf_input = Some(std::time::Instant::now());
-                }
-                // Agent running: input locked (its steps own the line).
-                // Copy is local, not shell input: reading the grid never
-                // disturbs the turn, so it stays available while busy.
-                // Ctrl+C still reaches the shell: the emergency brake that
-                // cancels the agent's running command (D fires, step ends).
-                if self.tabs[self.active].agent_busy {
-                    if is_copy(&event.logical_key, pressed, &self.mods) {
-                        self.copy_selection();
-                        return;
-                    }
-                    // Select-all is local grid reading: safe while busy.
-                    if is_select_all(&event.logical_key, pressed, &self.mods) {
-                        self.select_all();
-                        return;
-                    }
-                    if let Some(bytes) = translate(
-                        &event.logical_key,
-                        event.text.as_deref(),
-                        pressed,
-                        &self.mods,
-                    ) {
-                        if bytes == [0x03] {
-                            if let Some(s) = &mut self.tabs[self.active].session {
-                                let _ = s.write_all(&bytes);
-                            }
-                        }
-                    }
-                    return;
-                }
-                // Paste first: Ctrl+Shift+V would otherwise type a SYN byte.
-                if is_paste(&event.logical_key, pressed, &self.mods) {
-                    if let Ok(mut clip) = arboard::Clipboard::new() {
-                        if let Ok(text) = clip.get_text() {
-                            let bracketed = self.tabs[self.active].term.bracketed_paste();
-                            if let Some(s) = &mut self.tabs[self.active].session {
-                                let _ =
-                                    s.write_all(&zet_gpu::input::paste_wrapped(&text, bracketed));
-                            }
-                        }
-                    }
-                    return;
-                }
-                // Copy: Ctrl+Shift+C copies the mouse selection (never ETX).
-                if is_copy(&event.logical_key, pressed, &self.mods) {
-                    self.copy_selection();
-                    return;
-                }
-                // Select all: Ctrl+Shift+A highlights scrollback + grid.
-                // (Bare Ctrl+A stays readline's line-start.)
-                if is_select_all(&event.logical_key, pressed, &self.mods) {
-                    self.select_all();
-                    return;
-                }
-                // Tabs: new/close/cycle never reach the shell.
-                if is_new_tab(&event.logical_key, pressed, &self.mods) {
-                    self.new_tab();
-                    return;
-                }
-                if is_close_tab(&event.logical_key, pressed, &self.mods) {
-                    self.close_tab(event_loop);
-                    return;
-                }
-                if let Some(dir) = is_cycle_tab(&event.logical_key, pressed, &self.mods) {
-                    self.cycle_tab(dir);
-                    return;
-                }
-                // Scrollback find: typing goes to the query, never the PTY.
-                if is_search(&event.logical_key, pressed, &self.mods)
-                    && !self.tabs[self.active].search.on
-                {
-                    self.tabs[self.active].search.on = true;
-                    self.tabs[self.active].search.query.clear();
-                    self.research();
-                    return;
-                }
-                if self.tabs[self.active].search.on {
-                    if !pressed {
-                        return;
-                    }
-                    let shift = self.mods.contains(ModifiersState::SHIFT);
-                    match &event.logical_key {
-                        Key::Named(NamedKey::Escape) => self.search_exit(),
-                        Key::Named(NamedKey::Enter) => self.search_step(if shift { -1 } else { 1 }),
-                        Key::Named(NamedKey::Backspace) => {
-                            self.tabs[self.active].search.query.pop();
-                            self.research();
-                        }
-                        Key::Character(_) => {
-                            let ctrl = self.mods.contains(ModifiersState::CONTROL);
-                            if !ctrl {
-                                if let Some(text) = event.text.as_deref() {
-                                    self.tabs[self.active].search.query.push_str(text);
-                                    self.research();
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                    return;
-                }
-                // Agent goal mode toggle: Ctrl+G would otherwise type BEL.
-                if is_agent_toggle(&event.logical_key, pressed, &self.mods) {
-                    self.tabs[self.active].goal_mode = !self.tabs[self.active].goal_mode;
-                    self.tabs[self.active].ghost.reset();
-                    self.tabs[self.active].nl_rx = None;
-                    self.tabs[self.active].nl_wake = false;
-                    // Leaving goal mode abandons any draft, or it could
-                    // land and launch after the mode is gone.
-                    self.tabs[self.active].plan_rx = None;
-                    self.tabs[self.active].pending_plan = None;
-                    self.retitle();
-                    return;
-                }
-                let is_tab = pressed && matches!(&event.logical_key, Key::Named(NamedKey::Tab));
-                let is_enter = pressed && matches!(&event.logical_key, Key::Named(NamedKey::Enter));
-                let is_esc = pressed && matches!(&event.logical_key, Key::Named(NamedKey::Escape));
-                // F12: one-key undo of the last checkpointed agent step.
-                // (While busy the early gate above already swallowed this.)
-                // Runs on a thread: git in a giant repo must not hitch frames.
-                if pressed && matches!(&event.logical_key, Key::Named(NamedKey::F12)) {
-                    let input = self.current_text().unwrap_or_default();
-                    if self.tabs[self.active].undo_rx.is_some() {
-                        // Never swallow silently: a stuck undo used to eat
-                        // every later F12 with zero feedback.
-                        self.tabs[self.active]
-                            .ghost
-                            .notify(input, "(undo already running)".to_string());
-                        return;
-                    }
-                    let cp = self.tabs[self.active]
-                        .last_journal
-                        .iter()
-                        .rev()
-                        .find_map(|e| e.checkpoint.clone());
-                    match cp {
-                        None => {
-                            self.tabs[self.active]
-                                .ghost
-                                .notify(input, "(nothing to undo)".to_string());
-                        }
-                        Some(cp) => {
-                            let cwd = shell_cwd(&self.tabs[self.active].session);
-                            let (tx, rx) = mpsc::channel();
-                            self.tabs[self.active].undo_rx = Some(rx);
-                            std::thread::spawn(move || {
-                                // Wrong-repo use fails closed: reset --hard
-                                // with an unknown SHA errors, touching nothing.
-                                let res = zet_agent::undo_checkpoint(
-                                    std::path::Path::new(&cwd),
-                                    &Some(cp),
-                                )
-                                .map_err(|e| e.to_string());
-                                let _ = tx.send(res);
-                            });
-                        }
-                    }
-                    return;
-                }
-                // Tab accepts only a completable history ghost; notices
-                // ("…", hints) fall through to the shell untouched.
-                if is_tab {
-                    if let Some(suffix) = self.tabs[self.active].ghost.accept() {
-                        if let Some(s) = &mut self.tabs[self.active].session {
-                            let _ = s.write_all(suffix.as_bytes());
-                        }
-                        return;
-                    }
-                }
-                // Escape clears ghost / cancels an in-flight answer / exits
-                // goal mode; swallowed only when it did something.
-                if is_esc {
-                    let was_pending = self.tabs[self.active].nl_rx.is_some();
-                    let was_goal = self.tabs[self.active].goal_mode;
-                    let had_fix = self.tabs[self.active].pending_fix.take().is_some();
-                    let swallowed = self.tabs[self.active].ghost.cancel();
-                    if was_pending || was_goal {
-                        self.tabs[self.active].ghost.dismiss_current();
-                    }
-                    self.tabs[self.active].nl_rx = None;
-                    self.tabs[self.active].nl_wake = false;
-                    self.tabs[self.active].plan_rx = None;
-                    self.tabs[self.active].pending_plan = None;
-                    if self.tabs[self.active].goal_mode {
-                        self.tabs[self.active].goal_mode = false;
-                        self.retitle();
-                    }
-                    if swallowed || was_pending || was_goal || had_fix {
-                        return;
-                    }
-                }
-                // Enter in goal mode starts an agent turn on the line.
-                // With a pending plan, this Enter is the once-and-done
-                // approval: the agreed steps run under normal policy.
-                // The stored goal runs (approval was for it, not for
-                // whatever was typed since).
-                if is_enter && self.tabs[self.active].goal_mode {
-                    let input = self.current_text().unwrap_or_default();
-                    if !input.trim().is_empty() {
-                        if let Some((goal, plan)) = self.tabs[self.active].pending_plan.take() {
-                            self.start_agent(goal, Some(plan));
-                        } else {
-                            self.start_plan(input);
-                        }
-                    }
-                    return;
-                }
-                // Modeless routing: `zet <words>` translates the rest;
-                // known commands run; unknown first words translate
-                // (preview swaps in, never runs blind). The line stays
-                // put when there's no model (notice shown).
-                if is_enter && self.tabs[self.active].nl_rx.is_none() {
-                    let input = self.current_text().unwrap_or_default();
-                    if !input.trim().is_empty() {
-                        if let Some(rest) = zet_pty::zet_fallback(&input) {
-                            // Wake word: an order, not a question.
-                            self.start_nl_request(rest, true);
-                            return;
-                        }
-                        if !self.route_direct(&input) {
-                            self.start_nl_request(input, false);
-                            return;
-                        }
-                    }
-                }
-                // Enter while an NL answer is in flight: wait for it.
-                if is_enter && self.tabs[self.active].nl_rx.is_some() {
-                    return;
-                }
-                if let Some(mut bytes) = translate(
-                    &event.logical_key,
+                self.handle_key_parts(
+                    event.logical_key.clone(),
                     event.text.as_deref(),
-                    pressed,
-                    &self.mods,
-                ) {
-                    // Typing clears the mouse selection.
-                    if pressed {
-                        self.tabs[self.active].selection = None;
-                    }
-                    // Send exactly what the line discipline erases with.
-                    if bytes == [0x7f] {
-                        bytes = vec![self.tabs[self.active].erase];
-                    }
-                    if let Some(s) = &mut self.tabs[self.active].session {
-                        let _ = s.write_all(&bytes);
-                    }
-                    // Settle-probe stamps (ZET_PERF=1 only): Enter on a
-                    // non-empty line starts the clock; Ctrl+C voids it
-                    // (aborted typing records no block). NL/goal/agent
-                    // paths return before here, so this is human shell
-                    // commands only.
-                    if self.perf_t0.is_some() {
-                        if bytes.as_slice() == b"\r" {
-                            if self.current_text().is_some_and(|t| !t.trim().is_empty()) {
-                                self.cmd_t0 = Some(std::time::Instant::now());
-                            }
-                        } else if bytes.as_slice() == b"\x03" {
-                            self.cmd_t0 = None;
-                        }
-                    }
-                }
+                    event.state == ElementState::Pressed,
+                    self.mods,
+                    Some(event_loop),
+                );
             }
+
             WindowEvent::Resized(size) => {
                 self.needs_draw = true;
                 if let Some(r) = &mut self.renderer {
@@ -1717,6 +2077,7 @@ impl ApplicationHandler for App {
                     None
                 };
                 let rail_cols = self.rail_cols();
+                self.refresh_chrome();
                 let vp = self.frame_layout().term;
                 let gpu_vp = zet_gpu::renderer::Viewport {
                     x: vp.x,
@@ -1724,8 +2085,25 @@ impl ApplicationHandler for App {
                     cols: vp.cols,
                     rows: vp.rows,
                 };
+                let rail_snapshot = if rail_cols > 0 {
+                    self.chrome.snapshot_handle()
+                } else {
+                    None
+                };
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
                     r.draw_terminal_in(&self.tabs[self.active].term, gpu_vp, sel);
+                    if rail_cols > 0 {
+                        if let Some(snapshot) = rail_snapshot.as_ref() {
+                            let rail_vp = zet_gpu::renderer::Viewport {
+                                x: 0,
+                                y: bar as u32,
+                                cols: rail_cols as u32,
+                                rows: (self.rows.saturating_sub(bar)) as u32,
+                            };
+                            r.draw_fill(rail_vp, zet_gpu::quad::Rgba::rgb(0.03, 0.04, 0.07));
+                            Self::draw_rail(r, rail_vp, snapshot, self.rail_sel);
+                        }
+                    }
                     if bar > 0 {
                         r.draw_tabbar_with_rail(&labels, active, cols, rail_cols);
                     }
@@ -1747,34 +2125,13 @@ impl ApplicationHandler for App {
                 match (button, state) {
                     // Left-drag selects; click without drag clears.
                     (MouseButton::Left, ElementState::Pressed) => {
-                        // Tab bar owns pixel row 0: clicks switch tabs.
-                        if self.bar_rows() > 0 {
-                            if let (Some((x, y)), Some(r)) = (self.mouse_px, &self.renderer) {
+                        if let Some((x, y)) = self.mouse_px {
+                            if let Some(r) = &self.renderer {
                                 let (cw, ch) = r.cell_px();
-                                if (y / ch as f64).floor() as usize == 0 {
-                                    let col = (x / cw.max(1) as f64).floor().max(0.0) as usize;
-                                    // Rail-area clicks are rejected so a
-                                    // future rail cannot accidentally switch
-                                    // tabs; with rail_cols == 0 this is the
-                                    // existing full-width behavior.
-                                    if let Some(seg) = zet_gpu::selection::tabbar_hit_segment(
-                                        col,
-                                        self.rail_cols(),
-                                        self.cols,
-                                        self.tabs.len(),
-                                    ) {
-                                        self.active = seg;
-                                        self.needs_draw = true;
-                                        self.retitle();
-                                    }
-                                    return;
-                                }
+                                self.handle_mouse_click(x, y, cw, ch);
+                            } else {
+                                self.handle_mouse_click(x, y, 1, 1);
                             }
-                        }
-                        if let Some(cell) = self.mouse_cell() {
-                            self.tabs[self.active].selecting = true;
-                            self.tabs[self.active].selection =
-                                Some(Selection::new((cell.col, cell.row), (cell.col, cell.row)));
                         }
                     }
                     (MouseButton::Left, ElementState::Released) => {
@@ -1885,6 +2242,13 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         cols: 80,
         rows: 24,
         layout: crate::window::layout::LayoutMode::TerminalFocus.layout(),
+        focus: Focus::Terminal,
+        rail_sel: 0,
+        chrome: panels::ChromeCache::new(),
+        #[cfg(test)]
+        chrome_query_count: 0,
+        #[cfg(test)]
+        chrome_build_count: 0,
         env_spec,
         startup_spec,
         known: zet_pty::KnownCommands::from_env(),
@@ -2066,6 +2430,13 @@ mod layout_fit_tests {
             cols,
             rows,
             layout,
+            focus: super::Focus::Terminal,
+            rail_sel: 0,
+            chrome: super::panels::ChromeCache::new(),
+            #[cfg(test)]
+            chrome_query_count: 0,
+            #[cfg(test)]
+            chrome_build_count: 0,
             env_spec: None,
             startup_spec: None,
             known: zet_pty::KnownCommands::from_env(),
@@ -2170,5 +2541,573 @@ mod layout_fit_tests {
             assert_eq!(session.size().unwrap(), (32767, 1));
             session.shutdown();
         }
+    }
+
+    #[test]
+    fn chrome_cache_hidden_rail_does_not_query() {
+        let mut app = make_test_app(
+            80,
+            24,
+            crate::window::layout::LayoutMode::TerminalFocus.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        let now = std::time::Instant::now();
+
+        app.refresh_chrome_at(now);
+        assert_eq!(app.chrome_query_count, 0);
+        assert_eq!(app.chrome_build_count, 0);
+        assert!(app.chrome.snapshot().is_none());
+    }
+
+    #[test]
+    fn chrome_cache_visible_first_refresh_builds_once() {
+        let mut app = make_test_app(
+            80,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        let now = std::time::Instant::now();
+
+        app.refresh_chrome_at(now);
+        assert_eq!(app.chrome_query_count, 1);
+        assert_eq!(app.chrome_build_count, 1);
+        assert!(app.chrome.snapshot().is_some());
+
+        app.refresh_chrome_at(now);
+        assert_eq!(app.chrome_query_count, 1);
+        assert_eq!(app.chrome_build_count, 1);
+    }
+
+    #[test]
+    fn chrome_cache_unchanged_poll_does_not_rebuild() {
+        let mut app = make_test_app(
+            80,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        let now = std::time::Instant::now();
+
+        app.refresh_chrome_at(now);
+        let later = now + std::time::Duration::from_millis(250);
+        app.refresh_chrome_at(later);
+        assert_eq!(app.chrome_query_count, 2);
+        assert_eq!(app.chrome_build_count, 1);
+    }
+
+    #[test]
+    fn chrome_cache_new_command_rebuilds() {
+        let mut app = make_test_app(
+            80,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        let now = std::time::Instant::now();
+
+        app.refresh_chrome_at(now);
+        assert_eq!(app.chrome_query_count, 1);
+        assert_eq!(app.chrome_build_count, 1);
+        assert_eq!(app.chrome.snapshot().unwrap().commands.len(), 0);
+
+        app.tabs[0]
+            .recorder
+            .as_ref()
+            .unwrap()
+            .store()
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo hi".to_string(),
+                output: "hi".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+
+        let later = now + std::time::Duration::from_millis(250);
+        app.refresh_chrome_at(later);
+        assert_eq!(app.chrome_query_count, 2);
+        assert_eq!(app.chrome_build_count, 2);
+        assert_eq!(app.chrome.snapshot().unwrap().commands.len(), 1);
+    }
+
+    #[test]
+    fn chrome_cache_active_tab_switch_rebuilds() {
+        let mut app = make_test_app(
+            80,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        let store_a = zet_blocks::Store::open_in_memory().unwrap();
+        store_a
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo a".to_string(),
+                output: "a".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let store_b = zet_blocks::Store::open_in_memory().unwrap();
+        store_b
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-b".to_string(),
+                command: "echo b".to_string(),
+                output: "b".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let mut tab_a = make_test_tab();
+        tab_a.recorder = Some(zet_blocks::Recorder::new(store_a, "session-a"));
+        let mut tab_b = make_test_tab();
+        tab_b.recorder = Some(zet_blocks::Recorder::new(store_b, "session-b"));
+        app.tabs = vec![tab_a, tab_b];
+        app.active = 0;
+        let now = std::time::Instant::now();
+        app.refresh_chrome_at(now);
+        assert_eq!(app.chrome.snapshot().unwrap().commands[0].command, "echo a");
+
+        app.active = 1;
+        let later = now + std::time::Duration::from_millis(250);
+        app.refresh_chrome_at(later);
+        assert_eq!(app.chrome.snapshot().unwrap().commands[0].command, "echo b");
+    }
+
+    #[test]
+    fn chrome_cache_dirty_rebuilds() {
+        let mut app = make_test_app(
+            80,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        let now = std::time::Instant::now();
+        app.refresh_chrome_at(now);
+        app.chrome.mark_dirty();
+        let later = now + std::time::Duration::from_millis(250);
+        app.refresh_chrome_at(later);
+        assert_eq!(app.chrome_build_count, 2);
+    }
+
+    #[test]
+    fn production_key_dispatch_keeps_rail_focus_safe() {
+        let mut app = make_test_app(
+            80,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        app.layout.rail = true;
+        app.focus = super::Focus::Rail;
+        app.rail_sel = 0;
+
+        let mut mods = winit::keyboard::ModifiersState::empty();
+        mods.insert(winit::keyboard::ModifiersState::CONTROL);
+        mods.insert(winit::keyboard::ModifiersState::SHIFT);
+        app.handle_key_parts(
+            winit::keyboard::Key::Character("m".into()),
+            None,
+            true,
+            mods,
+            None,
+        );
+        assert!(!app.layout.rail);
+
+        app.layout.rail = true;
+        app.focus = super::Focus::Rail;
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.focus, super::Focus::Terminal);
+
+        app.focus = super::Focus::Rail;
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.rail_sel, 0); // one tab
+
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.focus, super::Focus::Terminal);
+
+        app.focus = super::Focus::Rail;
+        let mut ctrl = winit::keyboard::ModifiersState::empty();
+        ctrl.insert(winit::keyboard::ModifiersState::CONTROL);
+        app.handle_key_parts(
+            winit::keyboard::Key::Character("c".into()),
+            None,
+            true,
+            ctrl,
+            None,
+        );
+        assert_eq!(app.focus, super::Focus::Terminal);
+
+        app.focus = super::Focus::Rail;
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.focus, super::Focus::Terminal);
+
+        app.focus = super::Focus::Terminal;
+        app.layout.rail = false;
+        let mut toggle_mods = winit::keyboard::ModifiersState::empty();
+        toggle_mods.insert(winit::keyboard::ModifiersState::CONTROL);
+        toggle_mods.insert(winit::keyboard::ModifiersState::SHIFT);
+        app.handle_key_parts(
+            winit::keyboard::Key::Character("m".into()),
+            None,
+            true,
+            toggle_mods,
+            None,
+        );
+        assert!(app.layout.rail);
+        assert_eq!(app.focus, super::Focus::Terminal);
+
+        app.focus = super::Focus::Rail;
+        app.handle_key_parts(
+            winit::keyboard::Key::Character("x".into()),
+            Some("x"),
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.focus, super::Focus::Rail);
+    }
+
+    #[test]
+    fn production_mouse_clicks_respect_rail_and_tabs() {
+        let mut app = make_test_app(
+            104,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        app.tabs.push(make_test_tab());
+        app.mouse_px = Some((10.0, 100.0));
+        app.handle_mouse_click(10.0, 100.0, 10, 20);
+        assert_eq!(app.focus, super::Focus::Rail);
+        assert_eq!(app.rail_sel, 1);
+
+        app.mouse_px = Some((300.0, 40.0));
+        app.handle_mouse_click(300.0, 40.0, 10, 20);
+        assert_eq!(app.focus, super::Focus::Terminal);
+        assert!(app.tabs[app.active].selection.is_some());
+
+        app.mouse_px = Some((0.0, 0.0));
+        let tabs_before = app.active;
+        app.handle_mouse_click(0.0, 0.0, 10, 20);
+        assert_eq!(app.active, tabs_before);
+    }
+
+    #[test]
+    fn tab_bar_clicks_reject_rail_and_activate_valid_tabs() {
+        let mut app = make_test_app(
+            104,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        app.tabs.push(make_test_tab());
+        app.active = 1;
+
+        // Rail-area clicks never switch tabs.
+        app.handle_mouse_click(10.0, 0.0, 10, 20);
+        assert_eq!(app.active, 1);
+
+        // The first valid tab segment is tab 0.
+        app.handle_mouse_click(240.0, 0.0, 10, 20);
+        assert_eq!(app.active, 0);
+
+        // The second valid tab segment is tab 1.
+        app.handle_mouse_click(640.0, 0.0, 10, 20);
+        assert_eq!(app.active, 1);
+
+        // Outside the window cannot switch tabs.
+        app.handle_mouse_click(1040.0, 0.0, 10, 20);
+        assert_eq!(app.active, 1);
+
+        // A click above the window cannot switch tabs.
+        app.handle_mouse_click(240.0, -1.0, 10, 20);
+        assert_eq!(app.active, 1);
+
+        // Zero-rail behavior remains unchanged.
+        let mut zero_rail = make_test_app(
+            104,
+            24,
+            crate::window::layout::LayoutMode::TerminalFocus.layout(),
+        );
+        zero_rail.tabs.push(make_test_tab());
+        zero_rail.active = 1;
+        zero_rail.handle_mouse_click(30.0, 0.0, 10, 20);
+        assert_eq!(zero_rail.active, 0);
+    }
+
+    #[test]
+    fn rail_session_rows_select_correct_sessions() {
+        let mut app = make_test_app(
+            104,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        app.tabs.push(make_test_tab());
+        app.layout.rail = true;
+        app.focus = super::Focus::Terminal;
+        app.rail_sel = 0;
+
+        app.handle_mouse_click(10.0, 80.0, 10, 20);
+        assert_eq!(app.focus, super::Focus::Rail);
+        assert_eq!(app.rail_sel, 0);
+        assert_eq!(app.active, 0);
+
+        app.handle_mouse_click(10.0, 100.0, 10, 20);
+        assert_eq!(app.rail_sel, 1);
+        assert_eq!(app.active, 0);
+
+        app.handle_mouse_click(10.0, 20.0, 10, 20);
+        assert_eq!(app.rail_sel, 1);
+
+        app.handle_mouse_click(10.0, 200.0, 10, 20);
+        assert_eq!(app.rail_sel, 1);
+
+        app.handle_mouse_click(-1.0, 100.0, 10, 20);
+        assert_eq!(app.rail_sel, 1);
+    }
+
+    #[test]
+    fn rail_keyboard_dispatch_is_safe() {
+        let mut app = make_test_app(
+            80,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        app.tabs.push(make_test_tab());
+        app.layout.rail = true;
+        app.focus = super::Focus::Rail;
+        app.rail_sel = 0;
+
+        let mut mods = winit::keyboard::ModifiersState::empty();
+        mods.insert(winit::keyboard::ModifiersState::CONTROL);
+        mods.insert(winit::keyboard::ModifiersState::SHIFT);
+        app.handle_key_parts(
+            winit::keyboard::Key::Character("m".into()),
+            None,
+            true,
+            mods,
+            None,
+        );
+        assert!(!app.layout.rail);
+        assert_eq!(app.focus, super::Focus::Terminal);
+
+        app.layout.rail = true;
+        app.focus = super::Focus::Rail;
+        app.rail_sel = 1;
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowUp),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.rail_sel, 0);
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.rail_sel, 1);
+
+        app.rail_sel = 1;
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.active, 1);
+        assert_eq!(app.focus, super::Focus::Terminal);
+
+        app.focus = super::Focus::Rail;
+        let mut ctrl = winit::keyboard::ModifiersState::empty();
+        ctrl.insert(winit::keyboard::ModifiersState::CONTROL);
+        app.handle_key_parts(
+            winit::keyboard::Key::Character("c".into()),
+            None,
+            true,
+            ctrl,
+            None,
+        );
+        assert_eq!(app.focus, super::Focus::Terminal);
+
+        app.focus = super::Focus::Rail;
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.focus, super::Focus::Terminal);
+
+        app.focus = super::Focus::Terminal;
+        app.layout.rail = false;
+        let mut toggle_mods = winit::keyboard::ModifiersState::empty();
+        toggle_mods.insert(winit::keyboard::ModifiersState::CONTROL);
+        toggle_mods.insert(winit::keyboard::ModifiersState::SHIFT);
+        app.handle_key_parts(
+            winit::keyboard::Key::Character("m".into()),
+            None,
+            true,
+            toggle_mods,
+            None,
+        );
+        assert!(app.layout.rail);
+        assert_eq!(app.focus, super::Focus::Terminal);
+
+        app.focus = super::Focus::Rail;
+        app.handle_key_parts(
+            winit::keyboard::Key::Character("x".into()),
+            Some("x"),
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.focus, super::Focus::Rail);
+    }
+
+    #[test]
+    fn rail_snapshot_keeps_full_command_for_width_budgeting() {
+        let mut app = make_test_app(
+            104,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let command = "echo hello-from-zet-audit-with-a-much-longer-suffix";
+        store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: command.to_string(),
+                output: String::new(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 14,
+            })
+            .unwrap();
+        let mut tab = make_test_tab();
+        tab.recorder = Some(zet_blocks::Recorder::new(store, "session-a"));
+        app.tabs = vec![tab];
+
+        let snapshot = app.build_rail_snapshot();
+        assert_eq!(snapshot.commands[0].command, command);
+        let row = super::panels::format_command_row(
+            &snapshot.commands[0].command,
+            &snapshot.commands[0].exit,
+            &snapshot.commands[0].duration,
+            24,
+        );
+        assert!(row.ends_with("0 14ms"), "{row:?}");
+        assert!(row.contains('…'), "{row:?}");
+        assert!(
+            super::panels::text_cells(&row) <= 24,
+            "{row:?} exceeds the 24-column rail"
+        );
+    }
+
+    #[test]
+    fn build_rail_snapshot_limits_and_isolates_commands() {
+        let mut app = make_test_app(
+            80,
+            24,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        for i in 0..12 {
+            store
+                .append(&zet_blocks::Block {
+                    id: 0,
+                    session: "session-a".to_string(),
+                    command: format!("cmd {i}"),
+                    output: "output".to_string(),
+                    exit_code: i,
+                    cwd: "/tmp".to_string(),
+                    git_branch: String::new(),
+                    duration_ms: i as u64,
+                })
+                .unwrap();
+        }
+        let other_store = zet_blocks::Store::open_in_memory().unwrap();
+        other_store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-b".to_string(),
+                command: "other command".to_string(),
+                output: "other".to_string(),
+                exit_code: 7,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 9,
+            })
+            .unwrap();
+
+        let mut tab_a = make_test_tab();
+        tab_a.recorder = Some(zet_blocks::Recorder::new(store, "session-a"));
+        let mut tab_b = make_test_tab();
+        tab_b.recorder = Some(zet_blocks::Recorder::new(other_store, "session-b"));
+        app.tabs = vec![tab_a, tab_b];
+        app.active = 0;
+
+        let snapshot = app.build_rail_snapshot();
+        assert_eq!(snapshot.commands.len(), 8);
+        assert!(snapshot.commands[0].command.contains("cmd 4"));
+        assert!(snapshot.commands[7].command.contains("cmd 11"));
+        assert!(snapshot
+            .commands
+            .iter()
+            .all(|command| !command.command.contains("other")));
+
+        app.active = 1;
+        let snapshot = app.build_rail_snapshot();
+        assert_eq!(snapshot.commands.len(), 1);
+        assert!(snapshot.commands[0].command.contains("other command"));
     }
 }

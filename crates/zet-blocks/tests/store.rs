@@ -189,3 +189,64 @@ fn append_scrubs_key_material() {
     let got2 = store.get(id2).unwrap();
     assert_eq!(got2.command, "ls sk-folders run-09999");
 }
+
+#[test]
+fn count_and_recent_commands_are_session_scoped() {
+    let store = Store::open_in_memory().unwrap();
+    for session in ["a", "b", "a"] {
+        store
+            .append(&Block {
+                id: 0,
+                session: session.to_string(),
+                command: format!("echo {session}"),
+                output: "secret output".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 3,
+            })
+            .unwrap();
+    }
+    assert_eq!(store.count("a").unwrap(), 2);
+    assert_eq!(store.count("b").unwrap(), 1);
+    assert_eq!(store.count("missing").unwrap(), 0);
+
+    let recent = store.recent_commands("a", 8).unwrap();
+    assert_eq!(recent.len(), 2);
+    assert_eq!(recent[0].command, "echo a");
+    assert_eq!(recent[1].command, "echo a");
+    assert!(recent.iter().all(|block| block.output.is_empty()));
+    assert!(store.recent_commands("missing", 8).unwrap().is_empty());
+}
+
+#[test]
+fn recent_commands_selects_newest_eight_in_display_order() {
+    let store = Store::open_in_memory().unwrap();
+    for i in 0..12 {
+        store
+            .append(&Block {
+                id: 0,
+                session: "s".to_string(),
+                command: format!("cmd {i}"),
+                output: "output".to_string(),
+                exit_code: i,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: i as u64,
+            })
+            .unwrap();
+    }
+    let recent = store.recent_commands("s", 8).unwrap();
+    assert_eq!(recent.len(), 8);
+    assert_eq!(recent[0].command, "cmd 4");
+    assert_eq!(recent[7].command, "cmd 11");
+    assert!(recent.iter().all(|block| block.output.is_empty()));
+}
+
+#[test]
+fn recent_commands_empty_history_and_zero_limit() {
+    let store = Store::open_in_memory().unwrap();
+    assert!(store.recent_commands("s", 8).unwrap().is_empty());
+    assert!(store.recent_commands("s", 0).unwrap().is_empty());
+    assert_eq!(store.count("s").unwrap(), 0);
+}
