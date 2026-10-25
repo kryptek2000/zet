@@ -145,6 +145,52 @@ impl Store {
         rows.collect()
     }
 
+    /// Number of recorded blocks for a session, without loading rows.
+    pub fn count(&self, session: &str) -> Result<usize> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM blocks WHERE session = ?1",
+                params![session],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| usize::try_from(count).unwrap_or(0))
+    }
+
+    /// The most recent commands for a session, without loading their
+    /// output blobs. Returned oldest-first for display.
+    pub fn recent_commands(&self, session: &str, limit: usize) -> Result<Vec<Block>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session, command, exit_code, cwd, git_branch, duration_ms
+             FROM blocks WHERE session = ?1 ORDER BY id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![session, limit as i64], |row| {
+            let raw_duration: i64 = row.get(6)?;
+            let duration_ms = u64::try_from(raw_duration).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Integer,
+                    Box::new(e),
+                )
+            })?;
+            Ok(Block {
+                id: row.get(0)?,
+                session: row.get(1)?,
+                command: row.get(2)?,
+                output: String::new(),
+                exit_code: row.get(3)?,
+                cwd: row.get(4)?,
+                git_branch: row.get(5)?,
+                duration_ms,
+            })
+        })?;
+        let mut blocks: Vec<Block> = rows.collect::<Result<Vec<_>>>()?;
+        blocks.reverse();
+        Ok(blocks)
+    }
+
     /// Newest blocks across sessions, most recent last (display order).
     pub fn recent(&self, limit: usize) -> Result<Vec<Block>> {
         let mut stmt = self.conn.prepare(

@@ -1,0 +1,25 @@
+1|echo "one-line-output"|0|1|/tmp/opencode/zet-repair/home
+2|printf 'zet-native-repair-ok\n' && sleep 0.02|0|20|/tmp/opencode/zet-repair/home
+3|echo this-is-a-deliberately-long-command-name-for-rail-clipping-test|0|1|/tmp/opencode/zet-repair/home
+4|false|1|1|/tmp/opencode/zet-repair/home
+5|clear|0|31|/tmp/opencode/zet-repair/home
+6|echo this-is-a-deliberately-long-command-name-for-rail-clipping-test|0|1|/tmp/opencode/zet-repair/home
+7|printf 'zet-native-repair-ok\n' && sleep 0.02|0|24|/tmp/opencode/zet-repair/home
+8|command this-command-does-not-exist-zet-audit|127|7|/tmp/opencode/zet-repair/home
+9|sleep 0.123|0|111|/tmp/opencode/zet-repair/home
+10|ls /nonexistent-zet-audit-path|2|2|/tmp/opencode/zet-repair/home
+11|sleep 1.234|0|1222|/tmp/opencode/zet-repair/home
+12|cd /tmp/opencode/zet-repair/a-very-long-directory-name-for-session-label|0|1|/tmp/opencode/zet-repair/a-very-long-directory-name-for-session-label
+13|pwd|0|2|/tmp/opencode/zet-repair/a-very-long-directory-name-for-session-label
+14|echo done|0|1|/tmp/opencode/zet-repair/a-very-long-directory-name-for-session-label
+15|clear|0|7|/tmp/opencode/zet-repair/home
+16|cd /tmp|0|1|/tmp
+17|echo second-session-command-with-a-long-name|0|1|/tmp
+18|clear|0|8|/tmp/opencode/zet-repair/home
+19|cd /home/bandit/Projects/zet/crates/zet/src/window|0|34|/home/bandit/Projects/zet/crates/zet/src/window
+20|echo third-session-command|0|2|/home/bandit/Projects/zet/crates/zet/src/window
+21|stty size|0|7|/home/bandit/Projects/zet/crates/zet/src/window
+22|stty size|0|12|/home/bandit/Projects/zet/crates/zet/src/window
+23|printf 'zet-native-repair-final\n' && sleep 0.01|0|41|/home/bandit/Projects/zet/crates/zet/src/window
+24|sleep 1.234|0|1237|/home/bandit/Projects/zet/crates/zet/src/window
+25|echo final-done|0|2|/home/bandit/Projects/zet/crates/zet/src/window

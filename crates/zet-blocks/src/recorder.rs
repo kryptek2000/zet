@@ -76,6 +76,17 @@ impl Recorder {
         self.store.list(&self.session)
     }
 
+    /// Number of recorded blocks for this session, without loading rows.
+    pub fn block_count(&self) -> usize {
+        self.store.count(&self.session).unwrap_or(0)
+    }
+
+    /// The most recent recorded commands for this session, without
+    /// loading their output blobs.
+    pub fn recent_commands(&self, limit: usize) -> rusqlite::Result<Vec<Block>> {
+        self.store.recent_commands(&self.session, limit)
+    }
+
     pub fn store(&self) -> &Store {
         &self.store
     }
