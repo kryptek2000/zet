@@ -1,10 +1,18 @@
-# ZET — The Outcome-Aware Terminal
+<div align="center">
 
-**A native Linux-first terminal that connects commands, development work, and verified results.**
+# ZET
 
-> Terminal that does the work, not just the commands.
+### Old-school roots. Next-generation intelligence.
 
-**ZET** is the product name. **“The Outcome-Aware Terminal”** is the proposed descriptive positioning, subject to further naming/trademark clearance—not a claim of exclusive rights.
+**The Outcome-Aware Terminal**
+
+*A native Linux-first terminal connecting commands, development work, and verifiable outcomes.*
+
+</div>
+
+**ZET** is the product name. **“Old-school roots. Next-generation intelligence.”** is the owner-selected brand slogan. **“The Outcome-Aware Terminal”** is the proposed product descriptor, pending naming/trademark clearance; neither phrase is asserted to be exclusive.
+
+The signature ZET ASCII wordmark is a planned part of the P2-B native flagship identity. Its precise artwork remains subject to owner visual approval; decorative art must never impersonate shell output or delay access to the real terminal.
 
 ZET is a genuine **Rust + wgpu desktop terminal** with an ambitious new layer: **Mission Control**. The goal is to connect real commands, errors, files, changes, human decisions, agent activity, checkpoints, and verification into an inspectable development workstream.
 
@@ -25,7 +33,9 @@ No Electron, Chromium shell, webview UI, or browser required for operation. No f
 
 ## Current status
 
-**In development.** A native terminal, renderer, tabs, shell integration, command recording and some agent infrastructure already exist. The flagship Mission Control interface, persisted mission/evidence graph, CI verification linking, native SSH transport and multi-agent orchestration are **not shipped**. The visual mockup is a **design reference**, not implementation evidence. The baseline renderer regression is being addressed in [PR #13](https://github.com/kryptek2000/zet/pull/13); release requires green CI on the final merged commit.
+**In development; not a production release.** ZET already has a native Rust/wgpu Linux terminal, real PTY, tabs, shell integration, scrollback, observed command recording, a first native collapsible Mission Rail ([PR #28](https://github.com/kryptek2000/zet/pull/28), merged), and Wayland clipboard paste support ([PR #30](https://github.com/kryptek2000/zet/pull/30), merged).
+
+**Still planned:** the fully styled flagship Mission Control workspace and optional Inspector, mission/evidence graph, exact-commit CI verification receipts, ZET-managed SSH transport, and broader agent-aware workstreams. The [approved visual reference](docs/design/ZET-FLAGSHIP-UI-REFERENCE.md) and [P2-B branding plan](https://github.com/kryptek2000/zet/pull/31) are **design/planning targets, not screenshots or claims of shipped features**.
 
 ## Build and verify
 
@@ -42,8 +52,10 @@ cargo test --workspace
 - [Execution Roadmap](docs/ROADMAP.md) — ordered milestones and acceptance criteria
 - [Architecture and performance baseline](docs/ZET-DESIGN.md) — original system design, retained for implementation constraints; superseded where positioning conflicts with charter
 - [Engineering rules](AGENTS.md) — authoritative security/performance/testing gates
-- [Native Mission Control architecture — PR #16](https://github.com/kryptek2000/zet/pull/16) — proposed A5 layout / PTY plan, pending audit and merge
+- [Native Mission Control architecture](docs/design/A5-mission-control-architecture.md) — native layout, render and PTY constraints
 - [UI component design reference](docs/design/A4-ui-component-spec.md) — historical design proposal, to reconcile before implementation
+- [Flagship UI reference](docs/design/ZET-FLAGSHIP-UI-REFERENCE.md) — original approved visual north star
+- [P2-B ASCII wordmark planning — PR #31](https://github.com/kryptek2000/zet/pull/31) — draft planning PR, not merged
 - [Shortcuts](docs/SHORTCUTS.md) — existing behavior (do not break it to implement mockup shortcuts)
 
 **Decision hierarchy:** product vision and scope: Product Charter → Roadmap. Implementation: code, engineering rules, technical specs. Security, performance and compatibility protections cannot be relaxed by marketing copy.
