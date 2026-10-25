@@ -970,6 +970,7 @@ impl App {
         } else {
             "Terminal Focus"
         };
+        let home = std::env::var("HOME").unwrap_or_default();
         let sessions = self
             .tabs
             .iter()
@@ -980,6 +981,11 @@ impl App {
                     "—".to_string()
                 } else {
                     cwd.rsplit('/').next().unwrap_or(&cwd).to_string()
+                };
+                let cwd_display = if cwd.is_empty() {
+                    "—".to_string()
+                } else {
+                    panels::shorten_home(&cwd, &home)
                 };
                 let state = if tab.dead {
                     "exited".to_string()
@@ -998,6 +1004,7 @@ impl App {
                 panels::SessionRow {
                     index: i + 1,
                     cwd_tail,
+                    cwd: cwd_display,
                     shell: self.shell_name.clone(),
                     state,
                     exit,
@@ -1035,7 +1042,10 @@ impl App {
         let (footer, footer_provenance) = if footer.is_empty() {
             ("—".to_string(), panels::Provenance::Unknown)
         } else {
-            (footer, panels::Provenance::Observed)
+            (
+                panels::shorten_home(&footer, &home),
+                panels::Provenance::Observed,
+            )
         };
         panels::RailSnapshot {
             mode: mode.to_string(),
@@ -1093,6 +1103,7 @@ impl App {
                 self.tabs.len(),
             ) {
                 self.active = seg;
+                self.rail_sel = seg;
                 self.focus = Focus::Terminal;
                 self.needs_draw = true;
                 self.retitle();
@@ -1143,67 +1154,232 @@ impl App {
         vp: zet_gpu::renderer::Viewport,
         snapshot: &panels::RailSnapshot,
         selected: usize,
+        focused: bool,
     ) {
-        use zet_gpu::quad::Rgba;
-        let ink = zet_gpu::renderer::TAB_DIM_INK;
+        use zet_gpu::renderer::{
+            RAIL_ACCENT, RAIL_ACTIVE_BG, RAIL_BAD, RAIL_BORDER, RAIL_DIM_INK, RAIL_FOCUS,
+            RAIL_FOOTER_BG, RAIL_FOOTER_INK, RAIL_HEADER_INK, RAIL_OK, RAIL_SECTION_INK,
+            RAIL_SELECTED_BG, RAIL_TEXT_INK,
+        };
+        // The rightmost rail cell is the panel rule, so content uses the
+        // remaining columns. This keeps text out of the terminal grid.
+        let content_cols = vp.cols.saturating_sub(1).max(1);
+        let content = zet_gpu::renderer::Viewport {
+            x: vp.x,
+            y: vp.y,
+            cols: content_cols,
+            rows: vp.rows,
+        };
+        r.draw_rule(
+            vp.x + vp.cols.saturating_sub(1),
+            vp.y,
+            vp.y + vp.rows,
+            RAIL_BORDER,
+        );
+
         let rows = panels::rail_rows(vp.rows, snapshot.sessions.len(), snapshot.commands.len());
         for (row, kind) in rows.into_iter().enumerate() {
             let row = row as u32;
             match kind {
                 panels::RailRow::Header => {
-                    r.draw_text_row(vp, row, 0, "ZET", Rgba::WHITE);
+                    r.draw_fill(
+                        zet_gpu::renderer::Viewport {
+                            x: vp.x,
+                            y: vp.y + row,
+                            cols: 1,
+                            rows: 1,
+                        },
+                        RAIL_ACCENT,
+                    );
+                    r.draw_text_row(content, row, 2, "ZET", RAIL_HEADER_INK);
                 }
                 panels::RailRow::Mode => {
-                    r.draw_text_row(vp, row, 0, &format!("mode {}", snapshot.mode), ink);
+                    r.draw_text_row(content, row, 1, "WORKSPACE", RAIL_SECTION_INK);
                 }
                 panels::RailRow::SessionsHeader => {
-                    r.draw_text_row(vp, row, 0, "SESSIONS", ink);
+                    r.draw_text_row(content, row, 1, "SESSIONS", RAIL_SECTION_INK);
+                    let count = snapshot.sessions.len().to_string();
+                    let count_col = content_cols.saturating_sub(panels::text_cells(&count) as u32);
+                    if count_col > 1 {
+                        r.draw_text_row(content, row, count_col, &count, RAIL_DIM_INK);
+                    }
                 }
                 panels::RailRow::Session(index) => {
-                    if index == selected && index < snapshot.sessions.len() {
+                    let Some(session) = snapshot.sessions.get(index) else {
+                        continue;
+                    };
+                    let is_active = index == snapshot.active;
+                    let is_selected = index == selected;
+                    // In terminal focus the live tab is the strong card; the
+                    // keyboard selection only gets its own fill once the rail
+                    // actually owns focus. This prevents a stale rail_sel from
+                    // looking like the active session.
+                    let fill = if is_selected && focused {
+                        Some(RAIL_SELECTED_BG)
+                    } else if is_active && !focused {
+                        Some(RAIL_ACTIVE_BG)
+                    } else {
+                        None
+                    };
+                    if let Some(fill) = fill {
                         r.draw_fill(
                             zet_gpu::renderer::Viewport {
-                                x: 0,
+                                x: vp.x,
                                 y: vp.y + row,
-                                cols: vp.cols,
+                                cols: content_cols,
                                 rows: 1,
                             },
-                            zet_gpu::renderer::TAB_ACTIVE_BG,
+                            fill,
                         );
+                        if row + 1 < vp.rows {
+                            r.draw_fill(
+                                zet_gpu::renderer::Viewport {
+                                    x: vp.x,
+                                    y: vp.y + row + 1,
+                                    cols: content_cols,
+                                    rows: 1,
+                                },
+                                fill,
+                            );
+                        }
                     }
-                    let session = &snapshot.sessions[index];
-                    let marker = if index == snapshot.active { "▸" } else { " " };
-                    let line = panels::format_session_row(
-                        marker,
-                        session.index,
-                        &session.state,
-                        &session.cwd_tail,
-                        vp.cols,
-                    );
-                    let line_ink = if index == snapshot.active {
-                        Rgba::WHITE
+                    let bar = if is_selected && focused {
+                        Some(RAIL_FOCUS)
+                    } else if is_active {
+                        Some(RAIL_ACCENT)
                     } else {
-                        ink
+                        None
                     };
-                    r.draw_text_row(vp, row, 0, &line, line_ink);
+                    if let Some(bar) = bar {
+                        r.draw_fill(
+                            zet_gpu::renderer::Viewport {
+                                x: vp.x,
+                                y: vp.y + row,
+                                cols: 1,
+                                rows: 1,
+                            },
+                            bar,
+                        );
+                        if row + 1 < vp.rows {
+                            r.draw_fill(
+                                zet_gpu::renderer::Viewport {
+                                    x: vp.x,
+                                    y: vp.y + row + 1,
+                                    cols: 1,
+                                    rows: 1,
+                                },
+                                bar,
+                            );
+                        }
+                    }
+
+                    let marker = if is_active { "▸" } else { " " };
+                    let marker_ink = if is_selected && focused {
+                        RAIL_FOCUS
+                    } else if is_active {
+                        RAIL_ACCENT
+                    } else {
+                        RAIL_DIM_INK
+                    };
+                    r.draw_text_row(content, row, 1, marker, marker_ink);
+
+                    let dot = if session.state == "running" {
+                        "●"
+                    } else if session.state == "exited" {
+                        "×"
+                    } else {
+                        "○"
+                    };
+                    let dot_ink = if session.state == "running" {
+                        RAIL_OK
+                    } else if session.state == "exited" {
+                        RAIL_BAD
+                    } else {
+                        RAIL_DIM_INK
+                    };
+                    r.draw_text_row(content, row, 3, dot, dot_ink);
+
+                    let name = format!("{} {}", session.index, session.cwd_tail);
+                    let name_budget = content_cols.saturating_sub(5);
+                    let name = panels::truncate_to_cells(&name, name_budget as usize);
+                    let name_ink = if is_active || is_selected {
+                        RAIL_HEADER_INK
+                    } else {
+                        RAIL_TEXT_INK
+                    };
+                    r.draw_text_row(content, row, 5, &name, name_ink);
+
+                    // Detail row: state + shortened path, both real.
+                    if row + 1 < vp.rows {
+                        let detail_cols = content_cols.saturating_sub(2);
+                        let state_text = if session.state == "exited" && session.exit != "—" {
+                            format!("exit {}", session.exit)
+                        } else {
+                            session.state.clone()
+                        };
+                        let (state, path) =
+                            panels::format_session_detail(&state_text, &session.cwd, detail_cols);
+                        if !state.is_empty() {
+                            let state_ink = if session.state == "running" {
+                                RAIL_OK
+                            } else if session.state == "exited" {
+                                RAIL_BAD
+                            } else {
+                                RAIL_DIM_INK
+                            };
+                            r.draw_text_row(content, row + 1, 2, &state, state_ink);
+                        }
+                        if !path.is_empty() {
+                            let state_cells = panels::text_cells(&state) as u32;
+                            r.draw_text_row(
+                                content,
+                                row + 1,
+                                2 + state_cells + 1,
+                                &path,
+                                RAIL_DIM_INK,
+                            );
+                        }
+                    }
                 }
+                panels::RailRow::SessionDetail(_) => {}
                 panels::RailRow::CommandsHeader => {
-                    r.draw_text_row(vp, row, 0, "OBSERVED COMMANDS", ink);
+                    r.draw_text_row(content, row, 1, "OBSERVED COMMANDS", RAIL_SECTION_INK);
+                    let count = snapshot.commands.len().to_string();
+                    let count_col = content_cols.saturating_sub(panels::text_cells(&count) as u32);
+                    if count_col > 1 {
+                        r.draw_text_row(content, row, count_col, &count, RAIL_DIM_INK);
+                    }
                 }
                 panels::RailRow::Command(index) => {
                     if let Some(command) = snapshot.commands.get(index) {
+                        let failed = !matches!(command.exit.as_str(), "0" | "—");
+                        let marker = if failed { "×" } else { "›" };
+                        let marker_ink = if failed { RAIL_BAD } else { RAIL_ACCENT };
+                        r.draw_text_row(content, row, 1, marker, marker_ink);
+                        let budget = content_cols.saturating_sub(3);
                         let line = panels::format_command_row(
                             &command.command,
                             &command.exit,
                             &command.duration,
-                            vp.cols,
+                            budget,
                         );
-                        r.draw_text_row(vp, row, 0, &line, ink);
+                        let line_ink = if failed { RAIL_BAD } else { RAIL_TEXT_INK };
+                        r.draw_text_row(content, row, 3, &line, line_ink);
                     }
                 }
                 panels::RailRow::Footer => {
-                    let footer = panels::format_footer(&snapshot.footer, vp.cols);
-                    r.draw_text_row(vp, row, 0, &footer, ink);
+                    r.draw_fill(
+                        zet_gpu::renderer::Viewport {
+                            x: vp.x,
+                            y: vp.y + row,
+                            cols: content_cols,
+                            rows: 1,
+                        },
+                        RAIL_FOOTER_BG,
+                    );
+                    let footer =
+                        panels::format_footer(&snapshot.footer, content_cols.saturating_sub(1));
+                    r.draw_text_row(content, row, 1, &footer, RAIL_FOOTER_INK);
                 }
                 panels::RailRow::Empty => {}
             }
@@ -1241,6 +1417,7 @@ impl App {
         self.tabs
             .push(Tab::spawn(&self.prog, self.hook.clone(), wake));
         self.active = self.tabs.len() - 1;
+        self.rail_sel = self.active;
         // New grid + bar toggle may shrink every tab: refit all.
         self.fit_all();
         self.needs_draw = true;
@@ -1260,6 +1437,7 @@ impl App {
             s.shutdown();
         }
         self.active = self.active.min(self.tabs.len() - 1);
+        self.rail_sel = self.active;
         // Bar may vanish: remaining grids grow back.
         self.fit_all();
         self.needs_draw = true;
@@ -1273,6 +1451,7 @@ impl App {
         }
         let n = self.tabs.len() as isize;
         self.active = (self.active as isize + dir).rem_euclid(n) as usize;
+        self.rail_sel = self.active;
         self.needs_draw = true;
         self.retitle();
     }
@@ -2118,8 +2297,14 @@ impl ApplicationHandler for App {
                                 cols: rail_cols as u32,
                                 rows: (self.rows.saturating_sub(bar)) as u32,
                             };
-                            r.draw_fill(rail_vp, zet_gpu::quad::Rgba::rgb(0.03, 0.04, 0.07));
-                            Self::draw_rail(r, rail_vp, snapshot, self.rail_sel);
+                            r.draw_fill(rail_vp, zet_gpu::renderer::RAIL_BG);
+                            Self::draw_rail(
+                                r,
+                                rail_vp,
+                                snapshot,
+                                self.rail_sel,
+                                self.focus == Focus::Rail,
+                            );
                         }
                     }
                     if bar > 0 {
@@ -2837,8 +3022,8 @@ mod layout_fit_tests {
             crate::window::layout::LayoutMode::Workspace.layout(),
         );
         app.tabs.push(make_test_tab());
-        app.mouse_px = Some((10.0, 100.0));
-        app.handle_mouse_click(10.0, 100.0, 10, 20);
+        app.mouse_px = Some((10.0, 160.0));
+        app.handle_mouse_click(10.0, 160.0, 10, 20);
         assert_eq!(app.focus, super::Focus::Rail);
         assert_eq!(app.rail_sel, 1);
 
@@ -2912,7 +3097,7 @@ mod layout_fit_tests {
         assert_eq!(app.rail_sel, 0);
         assert_eq!(app.active, 0);
 
-        app.handle_mouse_click(10.0, 100.0, 10, 20);
+        app.handle_mouse_click(10.0, 160.0, 10, 20);
         assert_eq!(app.rail_sel, 1);
         assert_eq!(app.active, 0);
 
