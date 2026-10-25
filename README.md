@@ -39,7 +39,7 @@ No Electron, Chromium shell, webview UI, or browser required for operation. No f
 
 **In development; not a production release.** ZET already has a native Rust/wgpu Linux terminal, real PTY, tabs, shell integration, scrollback, observed command recording, a first native collapsible Mission Rail ([PR #28](https://github.com/kryptek2000/zet/pull/28), merged), and Wayland clipboard paste support ([PR #30](https://github.com/kryptek2000/zet/pull/30), merged).
 
-**Still planned:** the fully styled flagship Mission Control workspace and optional Inspector, mission/evidence graph, exact-commit CI verification receipts, ZET-managed SSH transport, and broader agent-aware workstreams. The [approved visual reference](docs/design/ZET-FLAGSHIP-UI-REFERENCE.md) and [P2-B branding plan](https://github.com/kryptek2000/zet/pull/31) are **design/planning targets, not screenshots or claims of shipped features**.
+**Still planned:** the fully styled flagship Mission Control workspace and optional Inspector, mission/evidence graph, exact-commit CI verification receipts, ZET-managed SSH transport, and broader agent-aware workstreams. The [approved visual reference](docs/design/ZET-FLAGSHIP-UI-REFERENCE.md) and [P2-B branding plan](docs/design/P2B-ZET-ASCII-IDENTITY.md) are **design/planning targets, not screenshots or claims of shipped features**.
 
 ## Build and verify
 
@@ -59,7 +59,7 @@ cargo test --workspace
 - [Native Mission Control architecture](docs/design/A5-mission-control-architecture.md) — native layout, render and PTY constraints
 - [UI component design reference](docs/design/A4-ui-component-spec.md) — historical design proposal, to reconcile before implementation
 - [Flagship UI reference](docs/design/ZET-FLAGSHIP-UI-REFERENCE.md) — original approved visual north star
-- [P2-B ASCII wordmark planning — PR #31](https://github.com/kryptek2000/zet/pull/31) — draft planning PR, not merged
+- [P2-B ASCII wordmark planning](docs/design/P2B-ZET-ASCII-IDENTITY.md) — approved design requirements; artwork implementation remains planned
 - [Shortcuts](docs/SHORTCUTS.md) — existing behavior (do not break it to implement mockup shortcuts)
 
 **Decision hierarchy:** product vision and scope: Product Charter → Roadmap. Implementation: code, engineering rules, technical specs. Security, performance and compatibility protections cannot be relaxed by marketing copy.
