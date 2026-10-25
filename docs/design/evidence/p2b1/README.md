@@ -33,6 +33,9 @@ without the outer desktop bar; the active tab bar is at the top of the image.
 | `04-after-workspace-rail.png` | 1920 x 1080 | Matched post-change pair for 01: two-row session cards, gaps, active card, section counts, observed command row, panel rule and footer strip; three real tabs. |
 | `05-after-workspace-rail-1024x768.png` | 1024 x 768 | Same rail at the narrow width; all three session cards, tabs and footer remain readable. |
 | `06-after-terminal-focus-1920x1080.png` | 1920 x 1080 | Post-change Terminal Focus; active-tab accent and separators, terminal dominant. |
+| `07-compat-tmux.png` | 1920 x 1080 | Real `tmux 3.8` in the PTY; rail reports the real running state and recorded `tmux` command. |
+| `08-compat-nvim-after.png` | 1920 x 1080 | Real `NVIM v0.12.6`; pre-existing DSR/background-query failure on the after branch. |
+| `09-compat-nvim-master.png` | 1920 x 1080 | Same Neovim failure on master, proving it is not introduced by P2-B1. |
 
 The after images show only the temporary bash session used for verification:
 the prompt, `pwd` output and the recorded `pwd` command are real. No mission,
@@ -43,7 +46,8 @@ CI, agent, approval, checkpoint or verification data is displayed.
 `SHA256SUMS` records every PNG in this directory. The reference checksum and
 provenance are in [`REFERENCE-PROVENANCE.md`](REFERENCE-PROVENANCE.md); the
 debug-build measurements and their caveats are in
-[`PERFORMANCE.md`](PERFORMANCE.md).
+[`PERFORMANCE.md`](PERFORMANCE.md); the tmux/Neovim smoke test and the
+pre-existing DSR limitation are in [`COMPATIBILITY.md`](COMPATIBILITY.md).
 
 Focused code checks and the full exact-head CI run are recorded in the P2-B1
 draft PR. This evidence directory is committed before the independent audit;

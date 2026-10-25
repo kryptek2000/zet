@@ -258,6 +258,15 @@ not from a decorative condition. A disabled control must never look actionable.
 - The reference image's synthetic mission/CI content is not copied. The only
   data shown in screenshots is the real temporary shell used for verification.
 
+**Known pre-existing limitation:** `tmux 3.8` works in the real PTY, but
+`NVIM v0.12.6` reports `E1568: Terminal did not respond to DSR request for
+'background' color` and renders incompletely on **both** this branch and
+`master`. The cause is a missing DSR/OSC color-query response in `zet-term`,
+not the chrome slice. It is recorded in
+[`evidence/p2b1/COMPATIBILITY.md`](evidence/p2b1/COMPATIBILITY.md) and must be
+fixed in a separate terminal-compatibility change before advertising Neovim
+support. This slice does not claim Neovim compatibility.
+
 ## 13. Verification and acceptance
 
 - Reference asset verified by dimensions, byte count and SHA-256 before commit.
