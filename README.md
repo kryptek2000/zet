@@ -1,5 +1,9 @@
 <div align="center">
 
+<img src="docs/design/assets/zet-readme-hero-primary.png" alt="ZET planetary-horizon brand artwork: a concept terminal over a mountain landscape" width="100%">
+
+<sub>Owner-selected primary brand artwork. Concept illustration, not a screenshot of shipped ZET UI.</sub>
+
 # ZET
 
 ### Old-school roots. Next-generation intelligence.
