@@ -752,6 +752,31 @@ impl App {
         }
     }
 
+    /// Paste the system clipboard into the active terminal (Ctrl+Shift+V,
+    /// Shift+Insert). Failures surface through the ghost notice like copy
+    /// failures do; the notice is content-free — clipboard text is never
+    /// printed, only that a failure occurred and why.
+    fn paste_from_clipboard(&mut self) {
+        let input = self.current_text().unwrap_or_default();
+        let text = match arboard::Clipboard::new().and_then(|mut clip| clip.get_text()) {
+            Ok(text) => text,
+            Err(e) => {
+                self.tabs[self.active]
+                    .ghost
+                    .notify(input, format!("(paste failed: {e})"));
+                return;
+            }
+        };
+        // Empty clipboard: nothing to paste, stay quiet.
+        if text.is_empty() {
+            return;
+        }
+        let bracketed = self.tabs[self.active].term.bracketed_paste();
+        if let Some(s) = &mut self.tabs[self.active].session {
+            let _ = s.write_all(&zet_gpu::input::paste_wrapped(&text, bracketed));
+        }
+    }
+
     /// Highlight the whole buffer (scrollback + grid) for copying.
     /// Follow with Ctrl+Shift+C or right-click to copy it.
     fn select_all(&mut self) {
@@ -1657,14 +1682,7 @@ impl App {
         }
         // Paste first: Ctrl+Shift+V would otherwise type a SYN byte.
         if is_paste(&logical, pressed, &mods) {
-            if let Ok(mut clip) = arboard::Clipboard::new() {
-                if let Ok(text) = clip.get_text() {
-                    let bracketed = self.tabs[self.active].term.bracketed_paste();
-                    if let Some(s) = &mut self.tabs[self.active].session {
-                        let _ = s.write_all(&zet_gpu::input::paste_wrapped(&text, bracketed));
-                    }
-                }
-            }
+            self.paste_from_clipboard();
             return;
         }
         // Copy: Ctrl+Shift+C copies the mouse selection (never ETX).

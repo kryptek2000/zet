@@ -24,7 +24,7 @@ zet-suggest = { path = "../zet-suggest" }
 zet-term = { path = "../zet-term" }
 winit = "0.30"
 pollster = "1"
-arboard = "3"
+arboard = { version = "3", features = ["wayland-data-control"] }
 notify-rust = "4"
 serde_json = "1"
 
