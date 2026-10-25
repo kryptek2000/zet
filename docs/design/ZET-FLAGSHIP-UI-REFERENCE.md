@@ -19,6 +19,19 @@ The approved image mockup is `futuristic_ai_terminal_ci_dashboard.png`, generate
 5. **Distinctive futuristic craft**: graphite/deep-space, subtle glow, disciplined accent color, crisp typography and compelling but restrained motion.
 6. **Safety and verification are real**: render enforcement-backed approval state and exact test/CI evidence, never synthetic data as live results.
 
+## Signature identity
+
+The approved P2-B direction also includes a distinctive, large, monospace
+ASCII-style **ZET** wordmark for the native welcome/startup experience and
+empty or introductory workspace states, with optional secondary uses in About
+or version surfaces. It is a branding layer around the real terminal, never a
+replacement for it: no fake PTY content, no overwriting shell output, no
+obstruction of input/scrollback, and no fabricated system data. Exact artwork
+and typography require separate owner approval.
+
+See [P2-B — ZET Signature ASCII Identity](P2B-ZET-ASCII-IDENTITY.md) and the
+[Roadmap](../ROADMAP.md).
+
 ## Important: iteration is expected
 
 The approved image is a **design north star**, not a pixel-locked engineering specification. Fine-tune proportions, typography, interaction details, density, motion, theme, mode names, navigation and panel layouts through native prototypes and actual user testing.
