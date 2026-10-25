@@ -1,6 +1,6 @@
 # ZET — Delivery Roadmap
 
-**Updated:** 2026-10-22 · **Authority:** [Product Charter](ZET-PRODUCT-CHARTER.md)  
+**Updated:** 2026-10-25 · **Authority:** [Product Charter](ZET-PRODUCT-CHARTER.md)\
 **Product positioning:** ZET — The Outcome-Aware Terminal (provisional descriptor).  
 **No dates promised:** Release when correctness, usability, and measured performance meet gates.
 
@@ -31,6 +31,27 @@
 - Bench frame pacing, startup, idle CPU/RSS, resize, thousands of lines and interaction latency against P0.
 
 **Exit:** playable Linux native prototype with focused tests, screenshot comparison to approved design, a green PR and independent audit.
+
+### P2-B — Flagship native UI fidelity
+
+Planning anchor: [Issue #29](https://github.com/kryptek2000/zet/issues/29) and the
+[Flagship UI Reference](design/ZET-FLAGSHIP-UI-REFERENCE.md). Preserve the approved
+native composition—**Mission Rail | Living Terminal Workstream | Contextual
+Inspector**—and deliver it through small, independently audited slices. Do not
+substitute a competing layout or a generic dashboard.
+
+- **ZET Signature ASCII Identity.** Add a distinctive, large, monospace
+  ASCII-style **ZET** wordmark to the native welcome/startup and empty-workspace
+  experience. It must clearly read ZET, remain legible without color, work with
+  selectable themes and narrow windows, and be optional or dismissible. It must
+  never inject fake PTY content, overwrite shell output, obstruct
+  input/scrollback, or fabricate system data. Exact artwork and typography
+  require separate owner approval before implementation. See the
+  [P2-B ASCII identity note](design/P2B-ZET-ASCII-IDENTITY.md).
+
+Implementation of P2-B requires a separate owner-authorized slice; this
+subsection is a planning and visual-acceptance requirement, not authorization
+to start UI work.
 
 ## P3 — Evidence-linked commands and mission timeline
 
