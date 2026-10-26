@@ -1063,4 +1063,29 @@ mod inspector_cache_tests {
         );
         assert!(cache.cheap_changed(1, 1, None, "/tmp", 1, false));
     }
+
+    #[test]
+    fn inspector_cache_detects_same_index_session_replacement() {
+        let mut cache = InspectorCache::new();
+        let snapshot = InspectorSnapshot {
+            active: 0,
+            session: "session 1".to_string(),
+            cwd: "/tmp".to_string(),
+            state: "prompt".to_string(),
+            exit: "—".to_string(),
+        };
+        cache.commit_refresh(
+            1,
+            0,
+            None,
+            "/tmp".to_string(),
+            1,
+            false,
+            snapshot,
+            Instant::now(),
+        );
+        assert!(!cache.cheap_changed(1, 0, None, "/tmp", 1, false));
+        assert!(cache.cheap_changed(2, 0, None, "/tmp", 1, false));
+        assert_eq!(cache.last_session_id, Some(1));
+    }
 }

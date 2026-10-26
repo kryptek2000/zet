@@ -3596,4 +3596,24 @@ mod layout_fit_tests {
         assert_eq!(app.inspector_sel, None);
         assert_eq!(app.inspector_cache.snapshot().unwrap().active, 1);
     }
+
+    #[test]
+    fn inspector_rebuilds_for_same_index_session_replacement() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.tabs[0].session_id = 10;
+        app.inspector_sel = Some(2);
+        app.refresh_inspector();
+        assert_eq!(app.inspector_cache.last_session_id, Some(10));
+        assert_eq!(app.inspector_sel, None);
+
+        app.tabs[0].session_id = 20;
+        app.refresh_inspector();
+        assert_eq!(app.inspector_cache.last_session_id, Some(20));
+        assert_eq!(app.inspector_sel, None);
+        assert!(app.inspector_cache.snapshot().is_some());
+    }
 }
