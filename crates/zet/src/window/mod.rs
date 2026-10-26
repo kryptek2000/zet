@@ -67,6 +67,7 @@ struct Tab {
     session: Option<Session>,
     term: Terminal,
     shell_state: ShellState,
+    session_id: u64,
     rx: Option<Receiver<Vec<u8>>>,
     dead: bool,
     erase: u8,
@@ -108,6 +109,10 @@ impl Tab {
         let mut session =
             Session::spawn("env", &["TERM=xterm-256color", prog, "-i"], 80, 24).unwrap();
         zet_gpu::perf_mark("shell_spawn");
+        let terminal_session_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
         let session_id = format!(
             "{}-{}",
             std::time::SystemTime::now()
@@ -150,6 +155,7 @@ impl Tab {
             session: Some(session),
             term: Terminal::new(80, 24),
             shell_state: ShellState::new(),
+            session_id: terminal_session_id,
             rx: Some(rx),
             dead: false,
             erase,
@@ -210,7 +216,7 @@ struct App {
     focus: Focus,
     rail_sel: usize,
     chrome: panels::ChromeCache,
-    inspector_sel: usize,
+    inspector_sel: Option<usize>,
     inspector_cache: panels::InspectorCache,
     #[cfg(test)]
     pub chrome_query_count: usize,
@@ -921,8 +927,12 @@ impl App {
         if self.frame_layout().inspector.is_none() {
             if self.focus == Focus::Inspector {
                 self.focus = Focus::Terminal;
+                self.inspector_sel = None;
             }
             return;
+        }
+        if self.inspector_cache.last_active != self.active {
+            self.inspector_sel = None;
         }
         let phase = self
             .tabs
@@ -939,9 +949,19 @@ impl App {
             .get(self.active)
             .map(|tab| tab.dead)
             .unwrap_or(true);
-        let cheap_changed =
-            self.inspector_cache
-                .cheap_changed(self.active, phase, &cwd, tab_count, active_dead);
+        let session_id = self
+            .tabs
+            .get(self.active)
+            .map(|tab| tab.session_id)
+            .unwrap_or(0);
+        let cheap_changed = self.inspector_cache.cheap_changed(
+            session_id,
+            self.active,
+            phase,
+            &cwd,
+            tab_count,
+            active_dead,
+        );
         if !cheap_changed && !self.inspector_cache.poll_due(now) {
             return;
         }
@@ -950,8 +970,14 @@ impl App {
             // Keep test builds quiet; no counters are required for the
             // first Inspector slice.
         }
+        let session_id = self
+            .tabs
+            .get(self.active)
+            .map(|tab| tab.session_id)
+            .unwrap_or(0);
         let snapshot = self.build_inspector_snapshot();
         self.inspector_cache.commit_refresh(
+            session_id,
             self.active,
             phase,
             cwd,
@@ -1173,7 +1199,7 @@ impl App {
         self.layout.inspector = !self.layout.inspector;
         if !self.layout.inspector {
             self.focus = Focus::Terminal;
-            self.inspector_sel = 0;
+            self.inspector_sel = None;
         }
         self.inspector_cache.mark_dirty();
         self.fit_all();
@@ -1199,6 +1225,8 @@ impl App {
                 self.tabs.len(),
             ) {
                 self.active = seg;
+                self.inspector_cache.mark_dirty();
+                self.inspector_sel = None;
                 self.focus = Focus::Terminal;
                 self.needs_draw = true;
                 self.retitle();
@@ -1231,7 +1259,12 @@ impl App {
             let bottom = (insp_vp.y + insp_vp.rows) as f64 * ch as f64;
             if x >= left && x < right && y >= top && y < bottom {
                 self.focus = Focus::Inspector;
-                self.inspector_sel = 0;
+                let row = ((y - top) / ch as f64).floor() as usize;
+                self.inspector_sel = if (1..=4).contains(&row) && (row as u32) < insp_vp.rows {
+                    Some(row - 1)
+                } else {
+                    None
+                };
                 self.needs_draw = true;
                 return;
             }
@@ -1361,6 +1394,8 @@ impl App {
         self.tabs
             .push(Tab::spawn(&self.prog, self.hook.clone(), wake));
         self.active = self.tabs.len() - 1;
+        self.inspector_cache.mark_dirty();
+        self.inspector_sel = None;
         if let Some(renderer) = &self.renderer {
             let (fg, bg) = renderer.default_colors();
             if let Some(tab) = self.tabs.last_mut() {
@@ -1386,7 +1421,9 @@ impl App {
             s.shutdown();
         }
         self.active = self.active.min(self.tabs.len() - 1);
-        // Bar may vanish: remaining grids grow back.
+        self.inspector_cache.mark_dirty();
+        self.inspector_sel = None;
+        // Bar may vanish:: remaining grids grow back.
         self.fit_all();
         self.needs_draw = true;
         self.retitle();
@@ -1399,6 +1436,8 @@ impl App {
         }
         let n = self.tabs.len() as isize;
         self.active = (self.active as isize + dir).rem_euclid(n) as usize;
+        self.inspector_cache.mark_dirty();
+        self.inspector_sel = None;
         self.needs_draw = true;
         self.retitle();
     }
@@ -1754,13 +1793,19 @@ impl App {
                 return;
             }
             match &logical {
-                Key::Named(NamedKey::Escape) => self.focus = Focus::Terminal,
+                Key::Named(NamedKey::Escape) => {
+                    self.focus = Focus::Terminal;
+                    self.inspector_sel = None;
+                }
                 Key::Named(NamedKey::ArrowUp) => {
                     if self.focus == Focus::Rail && !self.tabs.is_empty() {
                         self.rail_sel = self.rail_sel.saturating_sub(1);
                     }
                     if self.focus == Focus::Inspector {
-                        self.inspector_sel = self.inspector_sel.saturating_sub(1);
+                        self.inspector_sel = match self.inspector_sel {
+                            Some(0) | None => Some(3),
+                            Some(n) => Some(n - 1),
+                        };
                     }
                 }
                 Key::Named(NamedKey::ArrowDown) => {
@@ -1768,13 +1813,19 @@ impl App {
                         self.rail_sel = (self.rail_sel + 1).min(self.tabs.len() - 1);
                     }
                     if self.focus == Focus::Inspector {
-                        self.inspector_sel = self.inspector_sel.saturating_add(1);
+                        self.inspector_sel = match self.inspector_sel {
+                            Some(3) => Some(0),
+                            Some(n) => Some(n + 1),
+                            None => Some(0),
+                        };
                     }
                 }
                 Key::Named(NamedKey::Enter)
                     if self.focus == Focus::Rail && self.rail_sel < self.tabs.len() =>
                 {
                     self.active = self.rail_sel;
+                    self.inspector_cache.mark_dirty();
+                    self.inspector_sel = None;
                     self.focus = Focus::Terminal;
                     self.retitle();
                 }
@@ -1787,6 +1838,7 @@ impl App {
                 // then translated and sent normally below, preserving
                 // the emergency-cancellation behavior.
                 self.focus = Focus::Terminal;
+                self.inspector_sel = None;
             } else {
                 self.needs_draw = true;
                 return;
@@ -2282,6 +2334,20 @@ impl ApplicationHandler for App {
                             };
                             r.draw_fill(insp_vp, zet_gpu::quad::Rgba::rgb(0.012, 0.018, 0.032));
                             r.draw_text_row(insp_vp, 0, 0, "Inspector", zet_gpu::quad::Rgba::WHITE);
+                            if let Some(selected) = self.inspector_sel {
+                                let row = selected as u32 + 1;
+                                if row < insp_vp.rows {
+                                    r.draw_fill(
+                                        zet_gpu::renderer::Viewport {
+                                            x: insp_vp.x,
+                                            y: insp_vp.y + row,
+                                            cols: insp_vp.cols,
+                                            rows: 1,
+                                        },
+                                        zet_gpu::quad::Rgba::rgb(0.040, 0.065, 0.125),
+                                    );
+                                }
+                            }
                             if let Some(snapshot) = self.inspector_cache.snapshot_handle() {
                                 r.draw_text_row(
                                     insp_vp,
@@ -2463,7 +2529,7 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         focus: Focus::Terminal,
         rail_sel: 0,
         chrome: panels::ChromeCache::new(),
-        inspector_sel: 0,
+        inspector_sel: None,
         inspector_cache: panels::InspectorCache::new(),
         #[cfg(test)]
         chrome_query_count: 0,
@@ -2606,6 +2672,7 @@ mod layout_fit_tests {
             session: None,
             term: zet_term::Terminal::new(80, 24),
             shell_state: zet_pty::shell::ShellState::new(),
+            session_id: 0,
             rx: None,
             dead: false,
             erase: 127,
@@ -2653,7 +2720,7 @@ mod layout_fit_tests {
             focus: super::Focus::Terminal,
             rail_sel: 0,
             chrome: super::panels::ChromeCache::new(),
-            inspector_sel: 0,
+            inspector_sel: None,
             inspector_cache: super::panels::InspectorCache::new(),
             #[cfg(test)]
             chrome_query_count: 0,
@@ -3415,5 +3482,118 @@ mod layout_fit_tests {
         app.refresh_inspector();
         let snapshot = app.inspector_cache.snapshot().unwrap();
         assert_eq!(snapshot.session, "1");
+    }
+
+    #[test]
+    fn inspector_click_selects_only_real_rows() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.refresh_inspector();
+        app.handle_mouse_click(900.0, 5.0, 10, 20);
+        assert_eq!(app.focus, super::Focus::Inspector);
+        assert_eq!(app.inspector_sel, None);
+        app.handle_mouse_click(900.0, 25.0, 10, 20);
+        assert_eq!(app.inspector_sel, Some(0));
+        app.handle_mouse_click(900.0, 85.0, 10, 20);
+        assert_eq!(app.inspector_sel, Some(3));
+        app.handle_mouse_click(900.0, 200.0, 10, 20);
+        assert_eq!(app.focus, super::Focus::Inspector);
+    }
+
+    #[test]
+    fn inspector_arrow_navigation_stays_bounded() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.focus = super::Focus::Inspector;
+        app.inspector_sel = Some(0);
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.inspector_sel, Some(1));
+        app.inspector_sel = Some(3);
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.inspector_sel, Some(0));
+        app.inspector_sel = Some(0);
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowUp),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.inspector_sel, Some(3));
+    }
+
+    #[test]
+    fn inspector_navigation_does_not_snap_scrollback() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.tabs[0].term.scroll_view_up(5);
+        let before = app.tabs[0].term.view_offset();
+        app.focus = super::Focus::Inspector;
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.tabs[0].term.view_offset(), before);
+    }
+
+    #[test]
+    fn inspector_ctrl_c_returns_to_terminal() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.focus = super::Focus::Inspector;
+        app.inspector_sel = Some(2);
+        app.handle_key_parts(
+            winit::keyboard::Key::Character("c".into()),
+            Some("c"),
+            true,
+            winit::keyboard::ModifiersState::CONTROL,
+            None,
+        );
+        assert_eq!(app.focus, super::Focus::Terminal);
+        assert_eq!(app.inspector_sel, None);
+    }
+
+    #[test]
+    fn inspector_tab_change_resets_selection() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.tabs.push(make_test_tab());
+        app.focus = super::Focus::Inspector;
+        app.inspector_sel = Some(2);
+        app.active = 1;
+        app.refresh_inspector();
+        assert_eq!(app.focus, super::Focus::Inspector);
+        assert_eq!(app.inspector_sel, None);
+        assert_eq!(app.inspector_cache.snapshot().unwrap().active, 1);
     }
 }

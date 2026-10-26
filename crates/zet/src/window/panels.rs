@@ -899,6 +899,7 @@ pub struct InspectorSnapshot {
 pub struct InspectorCache {
     pub snapshot: Option<Arc<InspectorSnapshot>>,
     pub dirty: bool,
+    pub last_session_id: Option<u64>,
     pub last_active: usize,
     pub last_cwd: String,
     pub last_phase: Option<String>,
@@ -913,6 +914,7 @@ impl InspectorCache {
         Self {
             snapshot: None,
             dirty: true,
+            last_session_id: None,
             last_active: usize::MAX,
             last_cwd: String::new(),
             last_phase: None,
@@ -942,6 +944,7 @@ impl InspectorCache {
 
     pub fn cheap_changed(
         &self,
+        session_id: u64,
         active: usize,
         phase: Option<zet_pty::shell::Phase>,
         cwd: &str,
@@ -950,6 +953,7 @@ impl InspectorCache {
     ) -> bool {
         let phase = phase.map(|phase| format!("{phase:?}"));
         self.dirty
+            || self.last_session_id != Some(session_id)
             || self.last_active != active
             || self.last_tab_count != tab_count
             || self.last_active_dead != active_dead
@@ -964,6 +968,7 @@ impl InspectorCache {
     #[allow(clippy::too_many_arguments)]
     pub fn commit_refresh(
         &mut self,
+        session_id: u64,
         active: usize,
         phase: Option<zet_pty::shell::Phase>,
         cwd: String,
@@ -973,6 +978,7 @@ impl InspectorCache {
         now: Instant,
     ) {
         self.snapshot = Some(Arc::new(snapshot));
+        self.last_session_id = Some(session_id);
         self.last_active = active;
         self.last_phase = phase.map(|phase| format!("{phase:?}"));
         self.last_cwd = cwd;
@@ -1022,6 +1028,7 @@ mod inspector_cache_tests {
             exit: "—".to_string(),
         };
         cache.commit_refresh(
+            1,
             0,
             None,
             "/tmp".to_string(),
@@ -1045,6 +1052,7 @@ mod inspector_cache_tests {
             exit: "—".to_string(),
         };
         cache.commit_refresh(
+            1,
             0,
             None,
             "/tmp".to_string(),
@@ -1053,6 +1061,6 @@ mod inspector_cache_tests {
             snapshot,
             Instant::now(),
         );
-        assert!(cache.cheap_changed(1, None, "/tmp", 1, false));
+        assert!(cache.cheap_changed(1, 1, None, "/tmp", 1, false));
     }
 }
