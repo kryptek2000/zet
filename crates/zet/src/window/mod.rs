@@ -954,6 +954,11 @@ impl App {
             .get(self.active)
             .map(|tab| tab.session_id)
             .unwrap_or(0);
+        if self.inspector_cache.last_session_id == Some(session_id) {
+            // Same session: retain the existing selection.
+        } else if self.inspector_cache.last_session_id.is_some() {
+            self.inspector_sel = None;
+        }
         let cheap_changed = self.inspector_cache.cheap_changed(
             session_id,
             self.active,
@@ -3605,10 +3610,9 @@ mod layout_fit_tests {
             crate::window::layout::LayoutMode::MissionControl.layout(),
         );
         app.tabs[0].session_id = 10;
-        app.inspector_sel = Some(2);
         app.refresh_inspector();
+        app.inspector_sel = Some(2);
         assert_eq!(app.inspector_cache.last_session_id, Some(10));
-        assert_eq!(app.inspector_sel, None);
 
         app.tabs[0].session_id = 20;
         app.refresh_inspector();
