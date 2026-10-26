@@ -338,16 +338,20 @@ impl Renderer {
             .await
             .map_err(InitError::Device)?;
         crate::perf_mark("wgpu_device");
+        crate::perf_mark("surface_config_start");
         let config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .ok_or(InitError::NoSurfaceConfig)?;
         surface.configure(&device, &config);
+        crate::perf_mark("surface_config_done");
         eprintln!(
             "zet-gpu: format={:?} present={:?} {}x{}",
             config.format, config.present_mode, config.width, config.height
         );
 
+        crate::perf_mark("shaper_new_start");
         let shaper = Shaper::new(16.0);
+        crate::perf_mark("shaper_new_done");
         crate::perf_mark("font_system");
         let (cw, ch) = shaper.cell_px();
         let (cell_w, cell_h) = (cw as f32, ch as f32);
