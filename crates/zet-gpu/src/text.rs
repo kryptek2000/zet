@@ -23,8 +23,11 @@ pub struct Shaper {
 impl Shaper {
     pub fn new(font_px: f32) -> Self {
         let metrics = Metrics::new(font_px, font_px * 1.25);
+        crate::perf_mark("fontdb_load_start");
+        let font_system = FontSystem::new();
+        crate::perf_mark("fontdb_load_done");
         let mut shaper = Shaper {
-            font_system: FontSystem::new(),
+            font_system,
             cache: SwashCache::new(),
             metrics,
             ascent: font_px * 0.8,
@@ -32,12 +35,14 @@ impl Shaper {
             advance: font_px * 0.6,
             left_pad: 1,
         };
+        crate::perf_mark("probe_start");
         if let Some((ascent, descent, advance, left_pad)) = shaper.probe() {
             shaper.ascent = ascent;
             shaper.descent = descent;
             shaper.advance = advance;
             shaper.left_pad = left_pad;
         }
+        crate::perf_mark("probe_done");
         shaper
     }
 
