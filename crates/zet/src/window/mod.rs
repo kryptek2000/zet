@@ -13,8 +13,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::Window;
 use zet_gpu::input::{
-    is_agent_toggle, is_close_tab, is_copy, is_cycle_tab, is_new_tab, is_paste, is_rail_toggle,
-    is_search, is_select_all, translate,
+    is_agent_toggle, is_close_tab, is_copy, is_cycle_tab, is_inspector_toggle, is_new_tab,
+    is_paste, is_rail_toggle, is_search, is_select_all, translate,
 };
 use zet_gpu::selection::Selection;
 use zet_gpu::Renderer;
@@ -190,6 +190,7 @@ impl Tab {
 pub enum Focus {
     Terminal,
     Rail,
+    Inspector,
 }
 
 struct App {
@@ -209,6 +210,8 @@ struct App {
     focus: Focus,
     rail_sel: usize,
     chrome: panels::ChromeCache,
+    inspector_sel: usize,
+    inspector_cache: panels::InspectorCache,
     #[cfg(test)]
     pub chrome_query_count: usize,
     #[cfg(test)]
@@ -910,6 +913,90 @@ impl App {
         self.refresh_chrome_at(std::time::Instant::now());
     }
 
+    fn refresh_inspector(&mut self) {
+        self.refresh_inspector_at(std::time::Instant::now());
+    }
+
+    pub fn refresh_inspector_at(&mut self, now: std::time::Instant) {
+        if !self.layout.inspector {
+            if self.focus == Focus::Inspector {
+                self.focus = Focus::Terminal;
+            }
+            return;
+        }
+        let phase = self
+            .tabs
+            .get(self.active)
+            .map(|tab| tab.shell_state.phase());
+        let cwd = self
+            .tabs
+            .get(self.active)
+            .map(|tab| shell_cwd(&tab.session))
+            .unwrap_or_default();
+        let tab_count = self.tabs.len();
+        let active_dead = self
+            .tabs
+            .get(self.active)
+            .map(|tab| tab.dead)
+            .unwrap_or(true);
+        let cheap_changed =
+            self.inspector_cache
+                .cheap_changed(self.active, phase, &cwd, tab_count, active_dead);
+        if !cheap_changed && !self.inspector_cache.poll_due(now) {
+            return;
+        }
+        #[cfg(test)]
+        {
+            // Keep test builds quiet; no counters are required for the
+            // first Inspector slice.
+        }
+        let snapshot = self.build_inspector_snapshot();
+        self.inspector_cache.commit_refresh(
+            self.active,
+            phase,
+            cwd,
+            tab_count,
+            active_dead,
+            snapshot,
+            now,
+        );
+    }
+
+    fn build_inspector_snapshot(&self) -> panels::InspectorSnapshot {
+        let tab = self.tabs.get(self.active);
+        let cwd = tab.map(|tab| shell_cwd(&tab.session)).unwrap_or_default();
+        let state = tab
+            .map(|tab| {
+                if tab.dead {
+                    "exited".to_string()
+                } else {
+                    match tab.shell_state.phase() {
+                        zet_pty::shell::Phase::Prompt => "prompt".to_string(),
+                        zet_pty::shell::Phase::Input => "input".to_string(),
+                        zet_pty::shell::Phase::Running => "running".to_string(),
+                    }
+                }
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        let exit = tab
+            .and_then(|tab| tab.shell_state.last_exit())
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "—".to_string());
+        let session = format!("session {}", self.active + 1);
+        let cwd = if cwd.is_empty() {
+            "—".to_string()
+        } else {
+            cwd
+        };
+        panels::InspectorSnapshot {
+            active: self.active,
+            session,
+            cwd,
+            state,
+            exit,
+        }
+    }
+
     pub fn refresh_chrome_at(&mut self, now: std::time::Instant) {
         if !self.layout.rail {
             return;
@@ -1080,6 +1167,17 @@ impl App {
         self.fit_all();
         self.needs_draw = true;
         self.retitle();
+    }
+
+    fn toggle_inspector(&mut self) {
+        self.layout.inspector = !self.layout.inspector;
+        if !self.layout.inspector {
+            self.focus = Focus::Terminal;
+            self.inspector_sel = 0;
+        }
+        self.inspector_cache.mark_dirty();
+        self.fit_all();
+        self.needs_draw = true;
     }
 
     fn handle_mouse_click(&mut self, x: f64, y: f64, cw: u32, ch: u32) {
@@ -1621,7 +1719,7 @@ impl App {
         self.needs_draw = true;
         // Typing returns to live (the cursor is there, not in history).
         // Search mode keeps its revealed view (snap would fight it).
-        if pressed && !self.tabs[self.active].search.on {
+        if pressed && self.focus == Focus::Terminal && !self.tabs[self.active].search.on {
             self.tabs[self.active].term.snap_to_bottom();
         }
         if pressed && self.perf_t0.is_some() {
@@ -1637,16 +1735,26 @@ impl App {
                 self.toggle_rail();
                 return;
             }
+            if is_inspector_toggle(&logical, pressed, &mods) {
+                self.toggle_inspector();
+                return;
+            }
             match &logical {
                 Key::Named(NamedKey::Escape) => self.focus = Focus::Terminal,
                 Key::Named(NamedKey::ArrowUp) => {
                     if self.focus == Focus::Rail && !self.tabs.is_empty() {
                         self.rail_sel = self.rail_sel.saturating_sub(1);
                     }
+                    if self.focus == Focus::Inspector {
+                        self.inspector_sel = self.inspector_sel.saturating_sub(1);
+                    }
                 }
                 Key::Named(NamedKey::ArrowDown) => {
                     if self.focus == Focus::Rail && !self.tabs.is_empty() {
                         self.rail_sel = (self.rail_sel + 1).min(self.tabs.len() - 1);
+                    }
+                    if self.focus == Focus::Inspector {
+                        self.inspector_sel = self.inspector_sel.saturating_add(1);
                     }
                 }
                 Key::Named(NamedKey::Enter)
@@ -1728,6 +1836,11 @@ impl App {
         // Mission Rail toggle (Ctrl+Shift+M).
         if is_rail_toggle(&logical, pressed, &mods) {
             self.toggle_rail();
+            return;
+        }
+        // Contextual Inspector toggle (Ctrl+Shift+I).
+        if is_inspector_toggle(&logical, pressed, &mods) {
+            self.toggle_inspector();
             return;
         }
         // Scrollback find: typing goes to the query, never the PTY.
@@ -2116,6 +2229,7 @@ impl ApplicationHandler for App {
                 };
                 let rail_cols = self.rail_cols();
                 self.refresh_chrome();
+                self.refresh_inspector();
                 let vp = self.frame_layout().term;
                 let gpu_vp = zet_gpu::renderer::Viewport {
                     x: vp.x,
@@ -2128,6 +2242,8 @@ impl ApplicationHandler for App {
                 } else {
                     None
                 };
+                let inspector_vp_layout = self.frame_layout().inspector;
+                let inspector_cols = inspector_vp_layout.map_or(0, |vp| vp.cols as usize);
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
                     r.draw_terminal_in(&self.tabs[self.active].term, gpu_vp, sel);
                     if rail_cols > 0 {
@@ -2140,6 +2256,56 @@ impl ApplicationHandler for App {
                             };
                             r.draw_fill(rail_vp, zet_gpu::quad::Rgba::rgb(0.03, 0.04, 0.07));
                             Self::draw_rail(r, rail_vp, snapshot, self.rail_sel);
+                        }
+                    }
+                    if inspector_cols > 0 {
+                        if let Some(insp_layout_vp) = inspector_vp_layout {
+                            let insp_vp = zet_gpu::renderer::Viewport {
+                                x: insp_layout_vp.x,
+                                y: insp_layout_vp.y,
+                                cols: insp_layout_vp.cols,
+                                rows: insp_layout_vp.rows,
+                            };
+                            r.draw_fill(insp_vp, zet_gpu::quad::Rgba::rgb(0.012, 0.018, 0.032));
+                            r.draw_text_row(insp_vp, 0, 0, "Inspector", zet_gpu::quad::Rgba::WHITE);
+                            if let Some(snapshot) = self.inspector_cache.snapshot_handle() {
+                                r.draw_text_row(
+                                    insp_vp,
+                                    1,
+                                    0,
+                                    &format!("Session {}", snapshot.session),
+                                    zet_gpu::quad::Rgba::rgb(0.72, 0.78, 0.86),
+                                );
+                                r.draw_text_row(
+                                    insp_vp,
+                                    2,
+                                    0,
+                                    &format!("State {}", snapshot.state),
+                                    zet_gpu::quad::Rgba::rgb(0.72, 0.78, 0.86),
+                                );
+                                r.draw_text_row(
+                                    insp_vp,
+                                    3,
+                                    0,
+                                    &format!("Exit {}", snapshot.exit),
+                                    zet_gpu::quad::Rgba::rgb(0.72, 0.78, 0.86),
+                                );
+                                r.draw_text_row(
+                                    insp_vp,
+                                    4,
+                                    0,
+                                    &format!("Cwd {}", snapshot.cwd),
+                                    zet_gpu::quad::Rgba::rgb(0.72, 0.78, 0.86),
+                                );
+                            } else {
+                                r.draw_text_row(
+                                    insp_vp,
+                                    2,
+                                    0,
+                                    "No session",
+                                    zet_gpu::quad::Rgba::rgb(0.72, 0.78, 0.86),
+                                );
+                            }
                         }
                     }
                     if bar > 0 {
@@ -2283,6 +2449,8 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         focus: Focus::Terminal,
         rail_sel: 0,
         chrome: panels::ChromeCache::new(),
+        inspector_sel: 0,
+        inspector_cache: panels::InspectorCache::new(),
         #[cfg(test)]
         chrome_query_count: 0,
         #[cfg(test)]
@@ -2471,6 +2639,8 @@ mod layout_fit_tests {
             focus: super::Focus::Terminal,
             rail_sel: 0,
             chrome: super::panels::ChromeCache::new(),
+            inspector_sel: 0,
+            inspector_cache: super::panels::InspectorCache::new(),
             #[cfg(test)]
             chrome_query_count: 0,
             #[cfg(test)]

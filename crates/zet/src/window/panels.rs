@@ -320,10 +320,6 @@ impl ChromeCache {
         }
     }
 
-    pub fn mark_dirty(&mut self) {
-        self.dirty = true;
-    }
-
     pub fn snapshot(&self) -> Option<&RailSnapshot> {
         self.snapshot.as_deref()
     }
@@ -335,6 +331,10 @@ impl ChromeCache {
     pub fn poll_due(&self, now: Instant) -> bool {
         self.last_refresh
             .is_none_or(|last| now.duration_since(last) >= self.poll_interval)
+    }
+
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
     }
 
     pub fn cheap_changed(
@@ -386,6 +386,7 @@ impl ChromeCache {
         self.last_refresh = Some(now);
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub fn commit_refresh(
         &mut self,
@@ -826,5 +827,167 @@ mod tests {
             }
         });
         assert_eq!(builds, 2);
+    }
+}
+
+/// Read-only snapshot for the first Contextual Inspector slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectorSnapshot {
+    pub active: usize,
+    pub session: String,
+    pub cwd: String,
+    pub state: String,
+    pub exit: String,
+}
+
+/// Dirty-flagged cache for Inspector snapshots.
+#[derive(Debug, Clone)]
+pub struct InspectorCache {
+    pub snapshot: Option<Arc<InspectorSnapshot>>,
+    pub dirty: bool,
+    pub last_active: usize,
+    pub last_cwd: String,
+    pub last_phase: Option<String>,
+    pub last_tab_count: usize,
+    pub last_active_dead: bool,
+    pub last_refresh: Option<Instant>,
+    pub poll_interval: Duration,
+}
+
+impl InspectorCache {
+    pub fn new() -> Self {
+        Self {
+            snapshot: None,
+            dirty: true,
+            last_active: usize::MAX,
+            last_cwd: String::new(),
+            last_phase: None,
+            last_tab_count: usize::MAX,
+            last_active_dead: true,
+            last_refresh: None,
+            poll_interval: Duration::from_millis(250),
+        }
+    }
+
+    pub fn snapshot(&self) -> Option<&InspectorSnapshot> {
+        self.snapshot.as_deref()
+    }
+
+    pub fn snapshot_handle(&self) -> Option<Arc<InspectorSnapshot>> {
+        self.snapshot.clone()
+    }
+
+    pub fn poll_due(&self, now: Instant) -> bool {
+        self.last_refresh
+            .is_none_or(|last| now.duration_since(last) >= self.poll_interval)
+    }
+
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    pub fn cheap_changed(
+        &self,
+        active: usize,
+        phase: Option<zet_pty::shell::Phase>,
+        cwd: &str,
+        tab_count: usize,
+        active_dead: bool,
+    ) -> bool {
+        let phase = phase.map(|phase| format!("{phase:?}"));
+        self.dirty
+            || self.last_active != active
+            || self.last_tab_count != tab_count
+            || self.last_active_dead != active_dead
+            || self.last_phase != phase
+            || self.last_cwd != cwd
+    }
+
+    pub fn mark_refreshed(&mut self, now: Instant) {
+        self.last_refresh = Some(now);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_refresh(
+        &mut self,
+        active: usize,
+        phase: Option<zet_pty::shell::Phase>,
+        cwd: String,
+        tab_count: usize,
+        active_dead: bool,
+        snapshot: InspectorSnapshot,
+        now: Instant,
+    ) {
+        self.snapshot = Some(Arc::new(snapshot));
+        self.last_active = active;
+        self.last_phase = phase.map(|phase| format!("{phase:?}"));
+        self.last_cwd = cwd;
+        self.last_tab_count = tab_count;
+        self.last_active_dead = active_dead;
+        self.last_refresh = Some(now);
+        self.dirty = false;
+    }
+}
+
+impl Default for InspectorCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod inspector_cache_tests {
+    use super::*;
+
+    #[test]
+    fn inspector_cache_starts_dirty() {
+        let cache = InspectorCache::new();
+        assert!(cache.dirty);
+        assert!(cache.snapshot().is_none());
+    }
+
+    #[test]
+    fn inspector_cache_commits_and_clears_dirty() {
+        let mut cache = InspectorCache::new();
+        let snapshot = InspectorSnapshot {
+            active: 0,
+            session: "session 1".to_string(),
+            cwd: "/tmp".to_string(),
+            state: "prompt".to_string(),
+            exit: "—".to_string(),
+        };
+        cache.commit_refresh(
+            0,
+            None,
+            "/tmp".to_string(),
+            1,
+            false,
+            snapshot.clone(),
+            Instant::now(),
+        );
+        assert!(!cache.dirty);
+        assert_eq!(cache.snapshot(), Some(&snapshot));
+    }
+
+    #[test]
+    fn inspector_cache_rebuilds_on_active_change() {
+        let mut cache = InspectorCache::new();
+        let snapshot = InspectorSnapshot {
+            active: 0,
+            session: "session 1".to_string(),
+            cwd: "/tmp".to_string(),
+            state: "prompt".to_string(),
+            exit: "—".to_string(),
+        };
+        cache.commit_refresh(
+            0,
+            None,
+            "/tmp".to_string(),
+            1,
+            false,
+            snapshot,
+            Instant::now(),
+        );
+        assert!(cache.cheap_changed(1, None, "/tmp", 1, false));
     }
 }
