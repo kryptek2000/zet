@@ -830,6 +830,60 @@ mod tests {
     }
 }
 
+/// Remove control and escape sequences, collapse line breaks, and bound
+/// the result to `max_cells`. This keeps untrusted terminal text from
+/// affecting Inspector layout or injecting control sequences.
+pub fn sanitize_inspector_text(text: &str, max_cells: usize) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            } else if chars.peek() == Some(&']') {
+                chars.next();
+                while let Some(next) = chars.next() {
+                    if next == '\x07' {
+                        break;
+                    }
+                    if next == '\x1b' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            } else {
+                chars.next();
+            }
+            continue;
+        }
+        if c == '\n' || c == '\r' || c.is_control() {
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+    // Collapse runs of whitespace left by removed controls.
+    let mut collapsed = String::new();
+    let mut last_space = false;
+    for c in out.chars() {
+        if c.is_whitespace() {
+            if !last_space {
+                collapsed.push(' ');
+            }
+            last_space = true;
+        } else {
+            collapsed.push(c);
+            last_space = false;
+        }
+    }
+    truncate_to_cells(collapsed.trim(), max_cells)
+}
+
 /// Read-only snapshot for the first Contextual Inspector slice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InspectorSnapshot {
@@ -932,6 +986,17 @@ impl InspectorCache {
 impl Default for InspectorCache {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod inspector_sanitize_tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_removes_controls_and_bounds_text() {
+        assert_eq!(sanitize_inspector_text("a\x1b[31mb\n\rc", 8), "ab c");
+        assert_eq!(sanitize_inspector_text("verylongpath", 6), "veryl…");
     }
 }
 

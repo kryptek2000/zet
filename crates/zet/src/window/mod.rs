@@ -918,7 +918,7 @@ impl App {
     }
 
     pub fn refresh_inspector_at(&mut self, now: std::time::Instant) {
-        if !self.layout.inspector {
+        if self.frame_layout().inspector.is_none() {
             if self.focus == Focus::Inspector {
                 self.focus = Focus::Terminal;
             }
@@ -964,7 +964,8 @@ impl App {
 
     fn build_inspector_snapshot(&self) -> panels::InspectorSnapshot {
         let tab = self.tabs.get(self.active);
-        let cwd = tab.map(|tab| shell_cwd(&tab.session)).unwrap_or_default();
+        let raw_cwd = tab.map(|tab| shell_cwd(&tab.session)).unwrap_or_default();
+        let cwd = panels::sanitize_inspector_text(&raw_cwd, 64);
         let state = tab
             .map(|tab| {
                 if tab.dead {
@@ -982,7 +983,7 @@ impl App {
             .and_then(|tab| tab.shell_state.last_exit())
             .map(|code| code.to_string())
             .unwrap_or_else(|| "—".to_string());
-        let session = format!("session {}", self.active + 1);
+        let session = format!("{}", self.active + 1);
         let cwd = if cwd.is_empty() {
             "—".to_string()
         } else {
@@ -1161,7 +1162,6 @@ impl App {
 
     fn toggle_rail(&mut self) {
         self.layout.rail = !self.layout.rail;
-        self.layout.inspector = false;
         self.focus = Focus::Terminal;
         self.chrome.mark_dirty();
         self.fit_all();
@@ -1218,6 +1218,20 @@ impl App {
                     self.rail_sel = session;
                 }
                 self.focus = Focus::Rail;
+                self.needs_draw = true;
+                return;
+            }
+        }
+        // Inspector clicks focus the Inspector instead of selecting
+        // terminal cells.
+        if let Some(insp_vp) = self.frame_layout().inspector {
+            let left = insp_vp.x as f64 * cw as f64;
+            let right = (insp_vp.x + insp_vp.cols) as f64 * cw as f64;
+            let top = insp_vp.y as f64 * ch as f64;
+            let bottom = (insp_vp.y + insp_vp.rows) as f64 * ch as f64;
+            if x >= left && x < right && y >= top && y < bottom {
+                self.focus = Focus::Inspector;
+                self.inspector_sel = 0;
                 self.needs_draw = true;
                 return;
             }
@@ -3317,5 +3331,89 @@ mod layout_fit_tests {
         let snapshot = app.build_rail_snapshot();
         assert_eq!(snapshot.commands.len(), 1);
         assert!(snapshot.commands[0].command.contains("other command"));
+    }
+
+    #[test]
+    fn inspector_click_focuses_inspector_without_terminal_selection() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.handle_mouse_click(1000.0, 100.0, 10, 20);
+        assert_eq!(app.focus, super::Focus::Inspector);
+        assert!(app.tabs[0].selection.is_none());
+        assert!(!app.tabs[0].selecting);
+    }
+
+    #[test]
+    fn terminal_click_restores_terminal_focus() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.focus = super::Focus::Inspector;
+        app.handle_mouse_click(300.0, 100.0, 10, 20);
+        assert_eq!(app.focus, super::Focus::Terminal);
+    }
+
+    #[test]
+    fn inspector_escape_returns_to_terminal() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.focus = super::Focus::Inspector;
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.focus, super::Focus::Terminal);
+    }
+
+    #[test]
+    fn inspector_toggle_is_independent_of_rail() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::TerminalFocus.layout(),
+        );
+        app.layout.rail = true;
+        app.toggle_inspector();
+        assert!(app.layout.inspector);
+        assert!(app.layout.rail);
+        app.toggle_inspector();
+        assert!(!app.layout.inspector);
+        assert!(app.layout.rail);
+    }
+
+    #[test]
+    fn inspector_narrow_layout_does_not_strand_focus() {
+        let mut app = make_test_app(
+            40,
+            24,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.focus = super::Focus::Inspector;
+        app.refresh_inspector();
+        assert_eq!(app.focus, super::Focus::Terminal);
+        assert!(app.frame_layout().inspector.is_none());
+    }
+
+    #[test]
+    fn inspector_session_label_is_not_duplicated() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.refresh_inspector();
+        let snapshot = app.inspector_cache.snapshot().unwrap();
+        assert_eq!(snapshot.session, "1");
     }
 }
