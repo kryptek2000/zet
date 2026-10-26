@@ -429,6 +429,18 @@ impl Renderer {
         (self.cell_w as u32, self.cell_h as u32)
     }
 
+    /// Configured default terminal colors as 8-bit RGB triples.
+    pub fn default_colors(&self) -> ((u8, u8, u8), (u8, u8, u8)) {
+        (
+            (255, 255, 255),
+            (
+                (self.bg.r * 255.0).round() as u8,
+                (self.bg.g * 255.0).round() as u8,
+                (self.bg.b * 255.0).round() as u8,
+            ),
+        )
+    }
+
     fn slot_for(&mut self, c: char) -> Option<Slot> {
         if let Some(&slot) = self.slots.get(&c) {
             return Some(slot);
