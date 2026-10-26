@@ -149,6 +149,12 @@ pub struct Terminal {
     osc_buf: Vec<u8>,
     events: Vec<Event>,
     markers: Vec<Marker>,
+    /// Pending terminal responses to write back to the PTY.
+    responses: Vec<Vec<u8>>,
+    /// Configured default foreground/background colors used for OSC 10/11
+    /// color queries. These are RGB triples, not palette indices.
+    default_fg: (u8, u8, u8),
+    default_bg: (u8, u8, u8),
     utf8_buf: [u8; 4],
     utf8_need: u8,
     utf8_have: u8,
@@ -187,6 +193,9 @@ impl Terminal {
             osc_buf: Vec::new(),
             events: Vec::new(),
             markers: Vec::new(),
+            responses: Vec::new(),
+            default_fg: (255, 255, 255),
+            default_bg: (0, 0, 0),
             utf8_buf: [0; 4],
             utf8_need: 0,
             utf8_have: 0,
@@ -403,6 +412,14 @@ impl Terminal {
             body: body.clone(),
         });
         self.record_marker(code, &body);
+        if (code == 10 || code == 11) && body == "?" {
+            let color = if code == 10 {
+                self.default_fg
+            } else {
+                self.default_bg
+            };
+            self.push_color_response(code, color);
+        }
         self.osc_buf.clear();
     }
 
@@ -451,6 +468,9 @@ impl Terminal {
         }
         match final_byte {
             b'm' => self.pen.sgr(params),
+            b'n' if params.first().copied() == Some(5) => {
+                self.responses.push(b"\x1b[0n".to_vec());
+            }
             b'h' | b'l' if private == Some(b'?') => {
                 let show = final_byte == b'h';
                 for &p in params {
@@ -934,5 +954,122 @@ impl Terminal {
 
     pub fn drain_markers(&mut self) -> Vec<Marker> {
         std::mem::take(&mut self.markers)
+    }
+
+    /// Set the terminal's configured default foreground/background colors.
+    /// OSC 10/11 color queries respond with these values.
+    pub fn set_default_colors(&mut self, fg: (u8, u8, u8), bg: (u8, u8, u8)) {
+        self.default_fg = fg;
+        self.default_bg = bg;
+    }
+
+    /// Responses generated while feeding bytes. The caller must write these
+    /// back to the PTY; they are not fed back into this terminal.
+    pub fn drain_responses(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.responses)
+    }
+
+    /// Generate an OSC color response. `code` is 10 (foreground) or 11
+    /// (background). Channels are reported as 16-bit hexadecimal values.
+    fn push_color_response(&mut self, code: u16, color: (u8, u8, u8)) {
+        let (r, g, b) = color;
+        self.responses.push(
+            format!(
+                "\x1b]{};rgb:{:04x}/{:04x}/{:04x}\x07",
+                code,
+                r as u16 * 0x0101,
+                g as u16 * 0x0101,
+                b as u16 * 0x0101
+            )
+            .into_bytes(),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn osc11_query_responds_with_background_color() {
+        let mut term = Terminal::new(80, 24);
+        term.feed(b"\x1b]11;?\x07");
+        assert_eq!(
+            term.drain_responses(),
+            vec![b"\x1b]11;rgb:0000/0000/0000\x07".to_vec()]
+        );
+        assert_eq!(term.cell(0, 0).unwrap().c, ' ');
+    }
+
+    #[test]
+    fn osc10_query_responds_with_foreground_color() {
+        let mut term = Terminal::new(80, 24);
+        term.feed(b"\x1b]10;?\x07");
+        assert_eq!(
+            term.drain_responses(),
+            vec![b"\x1b]10;rgb:ffff/ffff/ffff\x07".to_vec()]
+        );
+    }
+
+    #[test]
+    fn osc_color_query_accepts_st_terminator() {
+        let mut term = Terminal::new(80, 24);
+        term.feed(b"\x1b]11;?\x1b\\");
+        assert_eq!(
+            term.drain_responses(),
+            vec![b"\x1b]11;rgb:0000/0000/0000\x07".to_vec()]
+        );
+    }
+
+    #[test]
+    fn dsr_status_report_responds_ok() {
+        let mut term = Terminal::new(80, 24);
+        term.feed(b"\x1b[5n");
+        assert_eq!(term.drain_responses(), vec![b"\x1b[0n".to_vec()]);
+        assert_eq!(term.cell(0, 0).unwrap().c, ' ');
+    }
+
+    #[test]
+    fn fragmented_osc11_query_responds_once() {
+        let mut term = Terminal::new(80, 24);
+        term.feed(b"\x1b]11;");
+        assert!(term.drain_responses().is_empty());
+        term.feed(b"?");
+        assert!(term.drain_responses().is_empty());
+        term.feed(b"\x07");
+        assert_eq!(
+            term.drain_responses(),
+            vec![b"\x1b]11;rgb:0000/0000/0000\x07".to_vec()]
+        );
+        assert!(term.drain_responses().is_empty());
+    }
+
+    #[test]
+    fn malformed_color_queries_do_not_respond() {
+        let mut term = Terminal::new(80, 24);
+        term.feed(b"\x1b]11;red\x07");
+        term.feed(b"\x1b]12;?\x07");
+        term.feed(b"plain text");
+        assert!(term.drain_responses().is_empty());
+    }
+
+    #[test]
+    fn terminal_responses_do_not_generate_feedback() {
+        let mut term = Terminal::new(80, 24);
+        term.feed(b"\x1b]11;rgb:0000/0000/0000\x07");
+        term.feed(b"\x1b[0n");
+        assert!(term.drain_responses().is_empty());
+    }
+
+    #[test]
+    fn set_default_colors_changes_osc_responses() {
+        let mut term = Terminal::new(80, 24);
+        term.set_default_colors((255, 128, 0), (10, 20, 30));
+        term.feed(b"\x1b]10;?\x07");
+        term.feed(b"\x1b]11;?\x07");
+        let responses = term.drain_responses();
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0], b"\x1b]10;rgb:ffff/8080/0000\x07");
+        assert_eq!(responses[1], b"\x1b]11;rgb:0a0a/1414/1e1e\x07");
     }
 }

@@ -360,6 +360,14 @@ impl App {
         for chunk in chunks {
             self.tabs[i].term.feed(&chunk);
         }
+        let responses = self.tabs[i].term.drain_responses();
+        if !responses.is_empty() {
+            if let Some(s) = &mut self.tabs[i].session {
+                for response in responses {
+                    let _ = s.write_all(&response);
+                }
+            }
+        }
         if let Some(s) = &mut self.tabs[i].session {
             if let Ok(Some(_)) = s.try_exit() {
                 died = true;
@@ -1241,6 +1249,12 @@ impl App {
         self.tabs
             .push(Tab::spawn(&self.prog, self.hook.clone(), wake));
         self.active = self.tabs.len() - 1;
+        if let Some(renderer) = &self.renderer {
+            let (fg, bg) = renderer.default_colors();
+            if let Some(tab) = self.tabs.last_mut() {
+                tab.term.set_default_colors(fg, bg);
+            }
+        }
         // New grid + bar toggle may shrink every tab: refit all.
         self.fit_all();
         self.needs_draw = true;
@@ -1971,6 +1985,12 @@ impl ApplicationHandler for App {
         self.fit_all();
         self.window = Some(window);
         self.renderer = Some(renderer);
+        if let Some(renderer) = &self.renderer {
+            let (fg, bg) = renderer.default_colors();
+            for tab in &mut self.tabs {
+                tab.term.set_default_colors(fg, bg);
+            }
+        }
         // Heartbeat re-armed every about_to_wait; this initial value only
         // covers the first idle gap (events and the PTY proxy wake sooner).
         event_loop.set_control_flow(ControlFlow::WaitUntil(std::time::Instant::now() + FRAME));
