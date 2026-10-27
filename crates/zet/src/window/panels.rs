@@ -38,6 +38,9 @@ pub enum RowKind {
 pub struct SessionRow {
     pub index: usize,
     pub cwd_tail: String,
+    /// Display path with the user's home directory shortened to `~`.
+    /// Empty when the process cwd is unavailable.
+    pub cwd: String,
     pub shell: String,
     pub state: String,
     pub exit: String,
@@ -240,33 +243,47 @@ fn compact_duration(duration: &str, cols: usize) -> String {
     }
 }
 
-/// A session row in exactly `cols` cells or fewer. The marker, index and
-/// state are fixed; the cwd tail gets the remainder and keeps its most
-/// specific right-hand part.
-pub fn format_session_row(
-    marker: &str,
-    index: usize,
-    state: &str,
-    cwd_tail: &str,
-    cols: u32,
-) -> String {
+/// Shorten the user's home directory to `~` for rail display. Paths
+/// outside home, or a missing home value, pass through unchanged.
+pub fn shorten_home(path: &str, home: &str) -> String {
+    let path = single_line(path);
+    let home = home.trim_end_matches('/');
+    if home.is_empty() {
+        return path;
+    }
+    if path == home {
+        return "~".to_string();
+    }
+    match path.strip_prefix(home) {
+        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+        _ => path,
+    }
+}
+
+/// Split a session detail row into a state label and a `· path` suffix.
+/// The caller draws the state in its semantic ink and the path dim; the
+/// two strings together fit within `cols` when the state starts one cell
+/// in from the rail edge.
+pub fn format_session_detail(state: &str, cwd: &str, cols: u32) -> (String, String) {
     let cols = cols as usize;
-    if cols == 0 {
-        return String::new();
+    let state = truncate_to_cells(&single_line(state), cols);
+    let state_cells = text_cells(&state);
+    if cols == 0 || state_cells + 2 >= cols {
+        return (state, String::new());
     }
-    let marker = single_line(marker);
-    let state = single_line(state);
-    let cwd_tail = single_line(cwd_tail);
-    let prefix = format!("{marker} {index} {state}");
-    let prefix_cells = text_cells(&prefix);
-    if prefix_cells >= cols {
-        return truncate_to_cells(&prefix, cols);
+    let cwd = single_line(cwd);
+    if cwd.is_empty() {
+        return (state, String::new());
     }
-    let budget = cols - prefix_cells - 1;
-    if budget == 0 || cwd_tail.is_empty() {
-        return prefix;
+    let available = cols - state_cells - 2;
+    if available <= 2 {
+        return (state, String::new());
     }
-    format!("{prefix} {}", truncate_left_to_cells(&cwd_tail, budget))
+    let path_budget = available - 2;
+    (
+        state,
+        format!("· {}", truncate_left_to_cells(&cwd, path_budget)),
+    )
 }
 
 /// Footer row in exactly `cols` cells or fewer. The path keeps its tail
@@ -320,10 +337,6 @@ impl ChromeCache {
         }
     }
 
-    pub fn mark_dirty(&mut self) {
-        self.dirty = true;
-    }
-
     pub fn snapshot(&self) -> Option<&RailSnapshot> {
         self.snapshot.as_deref()
     }
@@ -335,6 +348,10 @@ impl ChromeCache {
     pub fn poll_due(&self, now: Instant) -> bool {
         self.last_refresh
             .is_none_or(|last| now.duration_since(last) >= self.poll_interval)
+    }
+
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
     }
 
     pub fn cheap_changed(
@@ -386,6 +403,7 @@ impl ChromeCache {
         self.last_refresh = Some(now);
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub fn commit_refresh(
         &mut self,
@@ -462,13 +480,27 @@ pub enum RailRow {
     Mode,
     SessionsHeader,
     Session(usize),
+    SessionDetail(usize),
     CommandsHeader,
     Command(usize),
     Footer,
     Empty,
 }
 
+/// Rows used by one session card: a title row and a path/state row.
+pub const SESSION_CARD_ROWS: usize = 2;
+/// Expanded rails leave one blank row between cards. Compact rails spend
+/// every row on a real session instead.
+pub const SESSION_GAP_ROWS: usize = 1;
+
 /// Deterministic rail row layout shared by rendering and hit testing.
+///
+/// Expanded rails get a brand row, a mode row, a spacer, the sessions
+/// header and two-row session cards. Short rails drop the optional mode
+/// row and spacer so at least two real sessions remain visible at the
+/// 10-row terminal minimum. Commands are allocated the rows left over
+/// after every visible session; no row is ever invented for a session
+/// that does not exist.
 pub fn rail_rows(viewport_rows: u32, session_count: usize, command_count: usize) -> Vec<RailRow> {
     let mut rows = vec![RailRow::Empty; viewport_rows as usize];
     if viewport_rows == 0 {
@@ -476,22 +508,44 @@ pub fn rail_rows(viewport_rows: u32, session_count: usize, command_count: usize)
     }
     let footer_row = viewport_rows as usize - 1;
     rows[0] = RailRow::Header;
-    if viewport_rows > 1 {
-        rows[1] = RailRow::Mode;
-    }
-    if viewport_rows > 2 && footer_row > 2 {
-        rows[2] = RailRow::SessionsHeader;
+
+    let compact = viewport_rows < 16;
+    let session_start = if compact {
+        if footer_row > 1 {
+            rows[1] = RailRow::SessionsHeader;
+        }
+        2usize
+    } else {
+        if footer_row > 1 {
+            rows[1] = RailRow::Mode;
+        }
+        if footer_row > 2 {
+            rows[2] = RailRow::Empty;
+        }
+        if footer_row > 3 {
+            rows[3] = RailRow::SessionsHeader;
+        }
+        4usize
+    };
+
+    let mut cursor = session_start;
+    let mut shown = 0usize;
+    while shown < session_count && cursor + SESSION_CARD_ROWS <= footer_row {
+        rows[cursor] = RailRow::Session(shown);
+        rows[cursor + 1] = RailRow::SessionDetail(shown);
+        cursor += SESSION_CARD_ROWS;
+        shown += 1;
+        if !compact
+            && shown < session_count
+            && cursor + SESSION_GAP_ROWS + SESSION_CARD_ROWS <= footer_row
+        {
+            cursor += SESSION_GAP_ROWS;
+        }
     }
 
-    let session_start = 3usize;
-    let session_capacity = footer_row.saturating_sub(session_start);
-    let visible_sessions = session_count.min(session_capacity);
-    for i in 0..visible_sessions {
-        rows[session_start + i] = RailRow::Session(i);
-    }
-
-    let mut cursor = session_start + visible_sessions;
-    if command_count > 0 && cursor < footer_row {
+    if command_count > 0 && cursor + 2 < footer_row {
+        rows[cursor] = RailRow::Empty;
+        cursor += 1;
         rows[cursor] = RailRow::CommandsHeader;
         cursor += 1;
         let command_capacity = footer_row.saturating_sub(cursor);
@@ -505,11 +559,12 @@ pub fn rail_rows(viewport_rows: u32, session_count: usize, command_count: usize)
     rows
 }
 
-/// Session index for a clicked rail row, if any.
+/// Session index for a clicked rail row, if any. Both rows of a session
+/// card select the same session.
 pub fn rail_session_at_row(row: u32, session_count: usize, viewport_rows: u32) -> Option<usize> {
     let rows = rail_rows(viewport_rows, session_count, 0);
     match rows.get(row as usize) {
-        Some(RailRow::Session(index)) => Some(*index),
+        Some(RailRow::Session(index)) | Some(RailRow::SessionDetail(index)) => Some(*index),
         _ => None,
     }
 }
@@ -533,11 +588,14 @@ mod rail_row_tests {
     use super::{rail_rows, rail_session_at_row, RailRow};
 
     #[test]
-    fn one_session_has_footer_on_last_row() {
+    fn one_session_has_two_rows_and_footer_last() {
         let rows = rail_rows(8, 1, 1);
         assert_eq!(rows[0], RailRow::Header);
-        assert_eq!(rows[3], RailRow::Session(0));
+        assert_eq!(rows[1], RailRow::SessionsHeader);
+        assert_eq!(rows[2], RailRow::Session(0));
+        assert_eq!(rows[3], RailRow::SessionDetail(0));
         assert_eq!(rows[7], RailRow::Footer);
+        assert_eq!(rail_session_at_row(2, 1, 8), Some(0));
         assert_eq!(rail_session_at_row(3, 1, 8), Some(0));
         assert_eq!(rail_session_at_row(7, 1, 8), None);
     }
@@ -545,21 +603,79 @@ mod rail_row_tests {
     #[test]
     fn two_sessions_do_not_touch_footer() {
         let rows = rail_rows(8, 2, 1);
-        assert_eq!(rows[3], RailRow::Session(0));
+        assert_eq!(rows[2], RailRow::Session(0));
+        assert_eq!(rows[3], RailRow::SessionDetail(0));
         assert_eq!(rows[4], RailRow::Session(1));
+        assert_eq!(rows[5], RailRow::SessionDetail(1));
         assert_eq!(rows[7], RailRow::Footer);
         assert_eq!(rail_session_at_row(4, 2, 8), Some(1));
+        assert_eq!(rail_session_at_row(5, 2, 8), Some(1));
     }
 
     #[test]
-    fn five_or_more_sessions_are_bounded() {
+    fn sessions_are_bounded_by_two_row_cards_and_footer() {
         let rows = rail_rows(12, 7, 2);
         let sessions: Vec<_> = rows
             .iter()
             .filter(|r| matches!(r, RailRow::Session(_)))
             .collect();
-        assert_eq!(sessions.len(), 7); // rows 3..9, footer row 11
+        // Compact rail: header + sessions header, then four two-row cards.
+        assert_eq!(sessions.len(), 4);
+        assert_eq!(rows[2], RailRow::Session(0));
+        assert_eq!(rows[8], RailRow::Session(3));
+        assert_eq!(rows[9], RailRow::SessionDetail(3));
+        assert_eq!(rows[10], RailRow::Empty);
         assert_eq!(rows[11], RailRow::Footer);
+    }
+
+    #[test]
+    fn expanded_rail_shows_mode_and_observed_commands() {
+        let rows = rail_rows(20, 2, 3);
+        assert_eq!(rows[0], RailRow::Header);
+        assert_eq!(rows[1], RailRow::Mode);
+        assert_eq!(rows[2], RailRow::Empty);
+        assert_eq!(rows[3], RailRow::SessionsHeader);
+        assert_eq!(rows[4], RailRow::Session(0));
+        assert_eq!(rows[5], RailRow::SessionDetail(0));
+        assert_eq!(rows[6], RailRow::Empty);
+        assert_eq!(rows[7], RailRow::Session(1));
+        assert_eq!(rows[8], RailRow::SessionDetail(1));
+        assert!(rows.contains(&RailRow::CommandsHeader));
+        assert_eq!(
+            rows.iter()
+                .filter(|r| matches!(r, RailRow::Command(_)))
+                .count(),
+            3
+        );
+        assert_eq!(rows[19], RailRow::Footer);
+    }
+
+    #[test]
+    fn footer_is_never_overwritten_and_cards_stay_paired() {
+        for rows in 0u32..=40 {
+            for sessions in 0usize..=8 {
+                for commands in 0usize..=8 {
+                    let layout = rail_rows(rows, sessions, commands);
+                    if rows == 0 {
+                        assert!(layout.is_empty());
+                        continue;
+                    }
+                    assert_eq!(layout[rows as usize - 1], RailRow::Footer);
+                    for (i, row) in layout.iter().enumerate() {
+                        if i != rows as usize - 1 {
+                            assert_ne!(*row, RailRow::Footer);
+                        }
+                        if let RailRow::Session(index) = row {
+                            assert_eq!(
+                                layout.get(i + 1),
+                                Some(&RailRow::SessionDetail(*index)),
+                                "session {index} at row {i} has no detail row (rows={rows})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -604,6 +720,47 @@ mod tests {
         };
         assert_eq!(snap.footer, "—");
         assert_eq!(snap.footer_provenance, Provenance::Unknown);
+    }
+
+    #[test]
+    fn home_is_shortened_without_touching_other_paths() {
+        assert_eq!(shorten_home("/home/bandit", "/home/bandit"), "~");
+        assert_eq!(
+            shorten_home("/home/bandit/zet/crates/api", "/home/bandit"),
+            "~/zet/crates/api"
+        );
+        assert_eq!(shorten_home("/tmp/zet", "/home/bandit"), "/tmp/zet");
+        assert_eq!(
+            shorten_home("/home/bandit2", "/home/bandit"),
+            "/home/bandit2"
+        );
+        assert_eq!(shorten_home("/home/bandit", ""), "/home/bandit");
+    }
+
+    #[test]
+    fn session_detail_fits_state_and_path_in_the_rail() {
+        for cols in [12u32, 18, 23, 40] {
+            let (state, path) = format_session_detail("running", "~/zet/crates/api", cols);
+            let exclusive = text_cells(&state) + 1 + text_cells(&path);
+            assert!(
+                exclusive <= cols as usize,
+                "{state:?} + {path:?} = {exclusive} > {cols}"
+            );
+        }
+        let (state, path) = format_session_detail("running", "~/zet/crates/api", 23);
+        assert_eq!(state, "running");
+        assert!(path.starts_with("· "), "{path:?}");
+        assert!(path.ends_with("crates/api"), "{path:?}");
+    }
+
+    #[test]
+    fn session_detail_degrades_without_inventing_a_path() {
+        let (state, path) = format_session_detail("exited", "", 23);
+        assert_eq!(state, "exited");
+        assert!(path.is_empty());
+        let (state, path) = format_session_detail("running", "~/zet", 4);
+        assert_eq!(text_cells(&state), 4);
+        assert!(path.is_empty());
     }
 
     fn assert_fits(line: &str, cols: u32) {
@@ -752,24 +909,6 @@ mod tests {
     }
 
     #[test]
-    fn session_rows_keep_state_and_show_long_label_tails() {
-        assert_eq!(
-            format_session_row("▸", 1, "input", "home", 24),
-            "▸ 1 input home"
-        );
-        let label = "0123456789abcdefghijklmnopqrstuvwxyz";
-        let row = format_session_row("▸", 1, "input", label, 24);
-        assert!(row.starts_with("▸ 1 input …"));
-        assert!(row.ends_with("nopqrstuvwxyz"));
-        assert_fits(&row, 24);
-
-        for cols in 0..=24u32 {
-            let row = format_session_row(" ", 12, "running", label, cols);
-            assert_fits(&row, cols);
-        }
-    }
-
-    #[test]
     fn footer_keeps_the_meaningful_path_tail() {
         assert_eq!(format_footer("/home/bandit", 24), "cwd /home/bandit");
         assert_eq!(format_footer("—", 24), "cwd —");
@@ -826,5 +965,265 @@ mod tests {
             }
         });
         assert_eq!(builds, 2);
+    }
+}
+
+/// Remove control and escape sequences, collapse line breaks, and bound
+/// the result to `max_cells`. This keeps untrusted terminal text from
+/// affecting Inspector layout or injecting control sequences.
+pub fn sanitize_inspector_text(text: &str, max_cells: usize) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            } else if chars.peek() == Some(&']') {
+                chars.next();
+                while let Some(next) = chars.next() {
+                    if next == '\x07' {
+                        break;
+                    }
+                    if next == '\x1b' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            } else {
+                chars.next();
+            }
+            continue;
+        }
+        if c == '\n' || c == '\r' || c.is_control() {
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+    // Collapse runs of whitespace left by removed controls.
+    let mut collapsed = String::new();
+    let mut last_space = false;
+    for c in out.chars() {
+        if c.is_whitespace() {
+            if !last_space {
+                collapsed.push(' ');
+            }
+            last_space = true;
+        } else {
+            collapsed.push(c);
+            last_space = false;
+        }
+    }
+    truncate_to_cells(collapsed.trim(), max_cells)
+}
+
+/// Read-only snapshot for the first Contextual Inspector slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectorSnapshot {
+    pub active: usize,
+    pub session: String,
+    pub cwd: String,
+    pub state: String,
+    pub exit: String,
+}
+
+/// Dirty-flagged cache for Inspector snapshots.
+#[derive(Debug, Clone)]
+pub struct InspectorCache {
+    pub snapshot: Option<Arc<InspectorSnapshot>>,
+    pub dirty: bool,
+    pub last_session_id: Option<u64>,
+    pub last_active: usize,
+    pub last_cwd: String,
+    pub last_phase: Option<String>,
+    pub last_tab_count: usize,
+    pub last_active_dead: bool,
+    pub last_refresh: Option<Instant>,
+    pub poll_interval: Duration,
+}
+
+impl InspectorCache {
+    pub fn new() -> Self {
+        Self {
+            snapshot: None,
+            dirty: true,
+            last_session_id: None,
+            last_active: usize::MAX,
+            last_cwd: String::new(),
+            last_phase: None,
+            last_tab_count: usize::MAX,
+            last_active_dead: true,
+            last_refresh: None,
+            poll_interval: Duration::from_millis(250),
+        }
+    }
+
+    pub fn snapshot(&self) -> Option<&InspectorSnapshot> {
+        self.snapshot.as_deref()
+    }
+
+    pub fn snapshot_handle(&self) -> Option<Arc<InspectorSnapshot>> {
+        self.snapshot.clone()
+    }
+
+    pub fn poll_due(&self, now: Instant) -> bool {
+        self.last_refresh
+            .is_none_or(|last| now.duration_since(last) >= self.poll_interval)
+    }
+
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    pub fn cheap_changed(
+        &self,
+        session_id: u64,
+        active: usize,
+        phase: Option<zet_pty::shell::Phase>,
+        cwd: &str,
+        tab_count: usize,
+        active_dead: bool,
+    ) -> bool {
+        let phase = phase.map(|phase| format!("{phase:?}"));
+        self.dirty
+            || self.last_session_id != Some(session_id)
+            || self.last_active != active
+            || self.last_tab_count != tab_count
+            || self.last_active_dead != active_dead
+            || self.last_phase != phase
+            || self.last_cwd != cwd
+    }
+
+    pub fn mark_refreshed(&mut self, now: Instant) {
+        self.last_refresh = Some(now);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_refresh(
+        &mut self,
+        session_id: u64,
+        active: usize,
+        phase: Option<zet_pty::shell::Phase>,
+        cwd: String,
+        tab_count: usize,
+        active_dead: bool,
+        snapshot: InspectorSnapshot,
+        now: Instant,
+    ) {
+        self.snapshot = Some(Arc::new(snapshot));
+        self.last_session_id = Some(session_id);
+        self.last_active = active;
+        self.last_phase = phase.map(|phase| format!("{phase:?}"));
+        self.last_cwd = cwd;
+        self.last_tab_count = tab_count;
+        self.last_active_dead = active_dead;
+        self.last_refresh = Some(now);
+        self.dirty = false;
+    }
+}
+
+impl Default for InspectorCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod inspector_sanitize_tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_removes_controls_and_bounds_text() {
+        assert_eq!(sanitize_inspector_text("a\x1b[31mb\n\rc", 8), "ab c");
+        assert_eq!(sanitize_inspector_text("verylongpath", 6), "veryl…");
+    }
+}
+
+#[cfg(test)]
+mod inspector_cache_tests {
+    use super::*;
+
+    #[test]
+    fn inspector_cache_starts_dirty() {
+        let cache = InspectorCache::new();
+        assert!(cache.dirty);
+        assert!(cache.snapshot().is_none());
+    }
+
+    #[test]
+    fn inspector_cache_commits_and_clears_dirty() {
+        let mut cache = InspectorCache::new();
+        let snapshot = InspectorSnapshot {
+            active: 0,
+            session: "session 1".to_string(),
+            cwd: "/tmp".to_string(),
+            state: "prompt".to_string(),
+            exit: "—".to_string(),
+        };
+        cache.commit_refresh(
+            1,
+            0,
+            None,
+            "/tmp".to_string(),
+            1,
+            false,
+            snapshot.clone(),
+            Instant::now(),
+        );
+        assert!(!cache.dirty);
+        assert_eq!(cache.snapshot(), Some(&snapshot));
+    }
+
+    #[test]
+    fn inspector_cache_rebuilds_on_active_change() {
+        let mut cache = InspectorCache::new();
+        let snapshot = InspectorSnapshot {
+            active: 0,
+            session: "session 1".to_string(),
+            cwd: "/tmp".to_string(),
+            state: "prompt".to_string(),
+            exit: "—".to_string(),
+        };
+        cache.commit_refresh(
+            1,
+            0,
+            None,
+            "/tmp".to_string(),
+            1,
+            false,
+            snapshot,
+            Instant::now(),
+        );
+        assert!(cache.cheap_changed(1, 1, None, "/tmp", 1, false));
+    }
+
+    #[test]
+    fn inspector_cache_detects_same_index_session_replacement() {
+        let mut cache = InspectorCache::new();
+        let snapshot = InspectorSnapshot {
+            active: 0,
+            session: "session 1".to_string(),
+            cwd: "/tmp".to_string(),
+            state: "prompt".to_string(),
+            exit: "—".to_string(),
+        };
+        cache.commit_refresh(
+            1,
+            0,
+            None,
+            "/tmp".to_string(),
+            1,
+            false,
+            snapshot,
+            Instant::now(),
+        );
+        assert!(!cache.cheap_changed(1, 0, None, "/tmp", 1, false));
+        assert!(cache.cheap_changed(2, 0, None, "/tmp", 1, false));
+        assert_eq!(cache.last_session_id, Some(1));
     }
 }

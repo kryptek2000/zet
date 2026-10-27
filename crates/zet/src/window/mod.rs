@@ -13,8 +13,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::Window;
 use zet_gpu::input::{
-    is_agent_toggle, is_close_tab, is_copy, is_cycle_tab, is_new_tab, is_paste, is_rail_toggle,
-    is_search, is_select_all, translate,
+    is_agent_toggle, is_close_tab, is_copy, is_cycle_tab, is_inspector_toggle, is_new_tab,
+    is_paste, is_rail_toggle, is_search, is_select_all, translate,
 };
 use zet_gpu::selection::Selection;
 use zet_gpu::Renderer;
@@ -67,6 +67,7 @@ struct Tab {
     session: Option<Session>,
     term: Terminal,
     shell_state: ShellState,
+    session_id: u64,
     rx: Option<Receiver<Vec<u8>>>,
     dead: bool,
     erase: u8,
@@ -108,6 +109,10 @@ impl Tab {
         let mut session =
             Session::spawn("env", &["TERM=xterm-256color", prog, "-i"], 80, 24).unwrap();
         zet_gpu::perf_mark("shell_spawn");
+        let terminal_session_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
         let session_id = format!(
             "{}-{}",
             std::time::SystemTime::now()
@@ -150,6 +155,7 @@ impl Tab {
             session: Some(session),
             term: Terminal::new(80, 24),
             shell_state: ShellState::new(),
+            session_id: terminal_session_id,
             rx: Some(rx),
             dead: false,
             erase,
@@ -190,6 +196,7 @@ impl Tab {
 pub enum Focus {
     Terminal,
     Rail,
+    Inspector,
 }
 
 struct App {
@@ -209,6 +216,8 @@ struct App {
     focus: Focus,
     rail_sel: usize,
     chrome: panels::ChromeCache,
+    inspector_sel: Option<usize>,
+    inspector_cache: panels::InspectorCache,
     #[cfg(test)]
     pub chrome_query_count: usize,
     #[cfg(test)]
@@ -910,6 +919,116 @@ impl App {
         self.refresh_chrome_at(std::time::Instant::now());
     }
 
+    fn refresh_inspector(&mut self) {
+        self.refresh_inspector_at(std::time::Instant::now());
+    }
+
+    pub fn refresh_inspector_at(&mut self, now: std::time::Instant) {
+        if self.frame_layout().inspector.is_none() {
+            if self.focus == Focus::Inspector {
+                self.focus = Focus::Terminal;
+                self.inspector_sel = None;
+            }
+            return;
+        }
+        if self.inspector_cache.last_active != self.active {
+            self.inspector_sel = None;
+        }
+        let phase = self
+            .tabs
+            .get(self.active)
+            .map(|tab| tab.shell_state.phase());
+        let cwd = self
+            .tabs
+            .get(self.active)
+            .map(|tab| shell_cwd(&tab.session))
+            .unwrap_or_default();
+        let tab_count = self.tabs.len();
+        let active_dead = self
+            .tabs
+            .get(self.active)
+            .map(|tab| tab.dead)
+            .unwrap_or(true);
+        let session_id = self
+            .tabs
+            .get(self.active)
+            .map(|tab| tab.session_id)
+            .unwrap_or(0);
+        if self.inspector_cache.last_session_id == Some(session_id) {
+            // Same session: retain the existing selection.
+        } else if self.inspector_cache.last_session_id.is_some() {
+            self.inspector_sel = None;
+        }
+        let cheap_changed = self.inspector_cache.cheap_changed(
+            session_id,
+            self.active,
+            phase,
+            &cwd,
+            tab_count,
+            active_dead,
+        );
+        if !cheap_changed && !self.inspector_cache.poll_due(now) {
+            return;
+        }
+        #[cfg(test)]
+        {
+            // Keep test builds quiet; no counters are required for the
+            // first Inspector slice.
+        }
+        let session_id = self
+            .tabs
+            .get(self.active)
+            .map(|tab| tab.session_id)
+            .unwrap_or(0);
+        let snapshot = self.build_inspector_snapshot();
+        self.inspector_cache.commit_refresh(
+            session_id,
+            self.active,
+            phase,
+            cwd,
+            tab_count,
+            active_dead,
+            snapshot,
+            now,
+        );
+    }
+
+    fn build_inspector_snapshot(&self) -> panels::InspectorSnapshot {
+        let tab = self.tabs.get(self.active);
+        let raw_cwd = tab.map(|tab| shell_cwd(&tab.session)).unwrap_or_default();
+        let cwd = panels::sanitize_inspector_text(&raw_cwd, 64);
+        let state = tab
+            .map(|tab| {
+                if tab.dead {
+                    "exited".to_string()
+                } else {
+                    match tab.shell_state.phase() {
+                        zet_pty::shell::Phase::Prompt => "prompt".to_string(),
+                        zet_pty::shell::Phase::Input => "input".to_string(),
+                        zet_pty::shell::Phase::Running => "running".to_string(),
+                    }
+                }
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        let exit = tab
+            .and_then(|tab| tab.shell_state.last_exit())
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "—".to_string());
+        let session = format!("{}", self.active + 1);
+        let cwd = if cwd.is_empty() {
+            "—".to_string()
+        } else {
+            cwd
+        };
+        panels::InspectorSnapshot {
+            active: self.active,
+            session,
+            cwd,
+            state,
+            exit,
+        }
+    }
+
     pub fn refresh_chrome_at(&mut self, now: std::time::Instant) {
         if !self.layout.rail {
             return;
@@ -978,6 +1097,7 @@ impl App {
         } else {
             "Terminal Focus"
         };
+        let home = std::env::var("HOME").unwrap_or_default();
         let sessions = self
             .tabs
             .iter()
@@ -988,6 +1108,11 @@ impl App {
                     "—".to_string()
                 } else {
                     cwd.rsplit('/').next().unwrap_or(&cwd).to_string()
+                };
+                let cwd_display = if cwd.is_empty() {
+                    "—".to_string()
+                } else {
+                    panels::shorten_home(&cwd, &home)
                 };
                 let state = if tab.dead {
                     "exited".to_string()
@@ -1006,6 +1131,7 @@ impl App {
                 panels::SessionRow {
                     index: i + 1,
                     cwd_tail,
+                    cwd: cwd_display,
                     shell: self.shell_name.clone(),
                     state,
                     exit,
@@ -1043,7 +1169,10 @@ impl App {
         let (footer, footer_provenance) = if footer.is_empty() {
             ("—".to_string(), panels::Provenance::Unknown)
         } else {
-            (footer, panels::Provenance::Observed)
+            (
+                panels::shorten_home(&footer, &home),
+                panels::Provenance::Observed,
+            )
         };
         panels::RailSnapshot {
             mode: mode.to_string(),
@@ -1074,12 +1203,22 @@ impl App {
 
     fn toggle_rail(&mut self) {
         self.layout.rail = !self.layout.rail;
-        self.layout.inspector = false;
         self.focus = Focus::Terminal;
         self.chrome.mark_dirty();
         self.fit_all();
         self.needs_draw = true;
         self.retitle();
+    }
+
+    fn toggle_inspector(&mut self) {
+        self.layout.inspector = !self.layout.inspector;
+        if !self.layout.inspector {
+            self.focus = Focus::Terminal;
+            self.inspector_sel = None;
+        }
+        self.inspector_cache.mark_dirty();
+        self.fit_all();
+        self.needs_draw = true;
     }
 
     fn handle_mouse_click(&mut self, x: f64, y: f64, cw: u32, ch: u32) {
@@ -1101,6 +1240,9 @@ impl App {
                 self.tabs.len(),
             ) {
                 self.active = seg;
+                self.rail_sel = seg;
+                self.inspector_cache.mark_dirty();
+                self.inspector_sel = None;
                 self.focus = Focus::Terminal;
                 self.needs_draw = true;
                 self.retitle();
@@ -1120,6 +1262,25 @@ impl App {
                     self.rail_sel = session;
                 }
                 self.focus = Focus::Rail;
+                self.needs_draw = true;
+                return;
+            }
+        }
+        // Inspector clicks focus the Inspector instead of selecting
+        // terminal cells.
+        if let Some(insp_vp) = self.frame_layout().inspector {
+            let left = insp_vp.x as f64 * cw as f64;
+            let right = (insp_vp.x + insp_vp.cols) as f64 * cw as f64;
+            let top = insp_vp.y as f64 * ch as f64;
+            let bottom = (insp_vp.y + insp_vp.rows) as f64 * ch as f64;
+            if x >= left && x < right && y >= top && y < bottom {
+                self.focus = Focus::Inspector;
+                let row = ((y - top) / ch as f64).floor() as usize;
+                self.inspector_sel = if (1..=4).contains(&row) && (row as u32) < insp_vp.rows {
+                    Some(row - 1)
+                } else {
+                    None
+                };
                 self.needs_draw = true;
                 return;
             }
@@ -1151,67 +1312,232 @@ impl App {
         vp: zet_gpu::renderer::Viewport,
         snapshot: &panels::RailSnapshot,
         selected: usize,
+        focused: bool,
     ) {
-        use zet_gpu::quad::Rgba;
-        let ink = zet_gpu::renderer::TAB_DIM_INK;
+        use zet_gpu::renderer::{
+            RAIL_ACCENT, RAIL_ACTIVE_BG, RAIL_BAD, RAIL_BORDER, RAIL_DIM_INK, RAIL_FOCUS,
+            RAIL_FOOTER_BG, RAIL_FOOTER_INK, RAIL_HEADER_INK, RAIL_OK, RAIL_SECTION_INK,
+            RAIL_SELECTED_BG, RAIL_TEXT_INK,
+        };
+        // The rightmost rail cell is the panel rule, so content uses the
+        // remaining columns. This keeps text out of the terminal grid.
+        let content_cols = vp.cols.saturating_sub(1).max(1);
+        let content = zet_gpu::renderer::Viewport {
+            x: vp.x,
+            y: vp.y,
+            cols: content_cols,
+            rows: vp.rows,
+        };
+        r.draw_rule(
+            vp.x + vp.cols.saturating_sub(1),
+            vp.y,
+            vp.y + vp.rows,
+            RAIL_BORDER,
+        );
+
         let rows = panels::rail_rows(vp.rows, snapshot.sessions.len(), snapshot.commands.len());
         for (row, kind) in rows.into_iter().enumerate() {
             let row = row as u32;
             match kind {
                 panels::RailRow::Header => {
-                    r.draw_text_row(vp, row, 0, "ZET", Rgba::WHITE);
+                    r.draw_fill(
+                        zet_gpu::renderer::Viewport {
+                            x: vp.x,
+                            y: vp.y + row,
+                            cols: 1,
+                            rows: 1,
+                        },
+                        RAIL_ACCENT,
+                    );
+                    r.draw_text_row(content, row, 2, "ZET", RAIL_HEADER_INK);
                 }
                 panels::RailRow::Mode => {
-                    r.draw_text_row(vp, row, 0, &format!("mode {}", snapshot.mode), ink);
+                    r.draw_text_row(content, row, 1, "WORKSPACE", RAIL_SECTION_INK);
                 }
                 panels::RailRow::SessionsHeader => {
-                    r.draw_text_row(vp, row, 0, "SESSIONS", ink);
+                    r.draw_text_row(content, row, 1, "SESSIONS", RAIL_SECTION_INK);
+                    let count = snapshot.sessions.len().to_string();
+                    let count_col = content_cols.saturating_sub(panels::text_cells(&count) as u32);
+                    if count_col > 1 {
+                        r.draw_text_row(content, row, count_col, &count, RAIL_DIM_INK);
+                    }
                 }
                 panels::RailRow::Session(index) => {
-                    if index == selected && index < snapshot.sessions.len() {
+                    let Some(session) = snapshot.sessions.get(index) else {
+                        continue;
+                    };
+                    let is_active = index == snapshot.active;
+                    let is_selected = index == selected;
+                    // In terminal focus the live tab is the strong card; the
+                    // keyboard selection only gets its own fill once the rail
+                    // actually owns focus. This prevents a stale rail_sel from
+                    // looking like the active session.
+                    let fill = if is_selected && focused {
+                        Some(RAIL_SELECTED_BG)
+                    } else if is_active && !focused {
+                        Some(RAIL_ACTIVE_BG)
+                    } else {
+                        None
+                    };
+                    if let Some(fill) = fill {
                         r.draw_fill(
                             zet_gpu::renderer::Viewport {
-                                x: 0,
+                                x: vp.x,
                                 y: vp.y + row,
-                                cols: vp.cols,
+                                cols: content_cols,
                                 rows: 1,
                             },
-                            zet_gpu::renderer::TAB_ACTIVE_BG,
+                            fill,
                         );
+                        if row + 1 < vp.rows {
+                            r.draw_fill(
+                                zet_gpu::renderer::Viewport {
+                                    x: vp.x,
+                                    y: vp.y + row + 1,
+                                    cols: content_cols,
+                                    rows: 1,
+                                },
+                                fill,
+                            );
+                        }
                     }
-                    let session = &snapshot.sessions[index];
-                    let marker = if index == snapshot.active { "▸" } else { " " };
-                    let line = panels::format_session_row(
-                        marker,
-                        session.index,
-                        &session.state,
-                        &session.cwd_tail,
-                        vp.cols,
-                    );
-                    let line_ink = if index == snapshot.active {
-                        Rgba::WHITE
+                    let bar = if is_selected && focused {
+                        Some(RAIL_FOCUS)
+                    } else if is_active {
+                        Some(RAIL_ACCENT)
                     } else {
-                        ink
+                        None
                     };
-                    r.draw_text_row(vp, row, 0, &line, line_ink);
+                    if let Some(bar) = bar {
+                        r.draw_fill(
+                            zet_gpu::renderer::Viewport {
+                                x: vp.x,
+                                y: vp.y + row,
+                                cols: 1,
+                                rows: 1,
+                            },
+                            bar,
+                        );
+                        if row + 1 < vp.rows {
+                            r.draw_fill(
+                                zet_gpu::renderer::Viewport {
+                                    x: vp.x,
+                                    y: vp.y + row + 1,
+                                    cols: 1,
+                                    rows: 1,
+                                },
+                                bar,
+                            );
+                        }
+                    }
+
+                    let marker = if is_active { "▸" } else { " " };
+                    let marker_ink = if is_selected && focused {
+                        RAIL_FOCUS
+                    } else if is_active {
+                        RAIL_ACCENT
+                    } else {
+                        RAIL_DIM_INK
+                    };
+                    r.draw_text_row(content, row, 1, marker, marker_ink);
+
+                    let dot = if session.state == "running" {
+                        "●"
+                    } else if session.state == "exited" {
+                        "×"
+                    } else {
+                        "○"
+                    };
+                    let dot_ink = if session.state == "running" {
+                        RAIL_OK
+                    } else if session.state == "exited" {
+                        RAIL_BAD
+                    } else {
+                        RAIL_DIM_INK
+                    };
+                    r.draw_text_row(content, row, 3, dot, dot_ink);
+
+                    let name = format!("{} {}", session.index, session.cwd_tail);
+                    let name_budget = content_cols.saturating_sub(5);
+                    let name = panels::truncate_to_cells(&name, name_budget as usize);
+                    let name_ink = if is_active || is_selected {
+                        RAIL_HEADER_INK
+                    } else {
+                        RAIL_TEXT_INK
+                    };
+                    r.draw_text_row(content, row, 5, &name, name_ink);
+
+                    // Detail row: state + shortened path, both real.
+                    if row + 1 < vp.rows {
+                        let detail_cols = content_cols.saturating_sub(2);
+                        let state_text = if session.state == "exited" && session.exit != "—" {
+                            format!("exit {}", session.exit)
+                        } else {
+                            session.state.clone()
+                        };
+                        let (state, path) =
+                            panels::format_session_detail(&state_text, &session.cwd, detail_cols);
+                        if !state.is_empty() {
+                            let state_ink = if session.state == "running" {
+                                RAIL_OK
+                            } else if session.state == "exited" {
+                                RAIL_BAD
+                            } else {
+                                RAIL_DIM_INK
+                            };
+                            r.draw_text_row(content, row + 1, 2, &state, state_ink);
+                        }
+                        if !path.is_empty() {
+                            let state_cells = panels::text_cells(&state) as u32;
+                            r.draw_text_row(
+                                content,
+                                row + 1,
+                                2 + state_cells + 1,
+                                &path,
+                                RAIL_DIM_INK,
+                            );
+                        }
+                    }
                 }
+                panels::RailRow::SessionDetail(_) => {}
                 panels::RailRow::CommandsHeader => {
-                    r.draw_text_row(vp, row, 0, "OBSERVED COMMANDS", ink);
+                    r.draw_text_row(content, row, 1, "OBSERVED COMMANDS", RAIL_SECTION_INK);
+                    let count = snapshot.commands.len().to_string();
+                    let count_col = content_cols.saturating_sub(panels::text_cells(&count) as u32);
+                    if count_col > 1 {
+                        r.draw_text_row(content, row, count_col, &count, RAIL_DIM_INK);
+                    }
                 }
                 panels::RailRow::Command(index) => {
                     if let Some(command) = snapshot.commands.get(index) {
+                        let failed = !matches!(command.exit.as_str(), "0" | "—");
+                        let marker = if failed { "×" } else { "›" };
+                        let marker_ink = if failed { RAIL_BAD } else { RAIL_ACCENT };
+                        r.draw_text_row(content, row, 1, marker, marker_ink);
+                        let budget = content_cols.saturating_sub(3);
                         let line = panels::format_command_row(
                             &command.command,
                             &command.exit,
                             &command.duration,
-                            vp.cols,
+                            budget,
                         );
-                        r.draw_text_row(vp, row, 0, &line, ink);
+                        let line_ink = if failed { RAIL_BAD } else { RAIL_TEXT_INK };
+                        r.draw_text_row(content, row, 3, &line, line_ink);
                     }
                 }
                 panels::RailRow::Footer => {
-                    let footer = panels::format_footer(&snapshot.footer, vp.cols);
-                    r.draw_text_row(vp, row, 0, &footer, ink);
+                    r.draw_fill(
+                        zet_gpu::renderer::Viewport {
+                            x: vp.x,
+                            y: vp.y + row,
+                            cols: content_cols,
+                            rows: 1,
+                        },
+                        RAIL_FOOTER_BG,
+                    );
+                    let footer =
+                        panels::format_footer(&snapshot.footer, content_cols.saturating_sub(1));
+                    r.draw_text_row(content, row, 1, &footer, RAIL_FOOTER_INK);
                 }
                 panels::RailRow::Empty => {}
             }
@@ -1249,6 +1575,9 @@ impl App {
         self.tabs
             .push(Tab::spawn(&self.prog, self.hook.clone(), wake));
         self.active = self.tabs.len() - 1;
+        self.rail_sel = self.active;
+        self.inspector_cache.mark_dirty();
+        self.inspector_sel = None;
         if let Some(renderer) = &self.renderer {
             let (fg, bg) = renderer.default_colors();
             if let Some(tab) = self.tabs.last_mut() {
@@ -1274,6 +1603,9 @@ impl App {
             s.shutdown();
         }
         self.active = self.active.min(self.tabs.len() - 1);
+        self.rail_sel = self.active;
+        self.inspector_cache.mark_dirty();
+        self.inspector_sel = None;
         // Bar may vanish: remaining grids grow back.
         self.fit_all();
         self.needs_draw = true;
@@ -1287,6 +1619,9 @@ impl App {
         }
         let n = self.tabs.len() as isize;
         self.active = (self.active as isize + dir).rem_euclid(n) as usize;
+        self.rail_sel = self.active;
+        self.inspector_cache.mark_dirty();
+        self.inspector_sel = None;
         self.needs_draw = true;
         self.retitle();
     }
@@ -1599,6 +1934,7 @@ impl App {
         };
         self.perf_frames += 1;
         if self.perf_frames == 1 {
+            zet_gpu::perf_mark("first_frame");
             eprintln!("perf: first_frame_ms={}", t0.elapsed().as_millis());
         }
         if let Some(tin) = self.perf_input.take() {
@@ -1621,7 +1957,7 @@ impl App {
         self.needs_draw = true;
         // Typing returns to live (the cursor is there, not in history).
         // Search mode keeps its revealed view (snap would fight it).
-        if pressed && !self.tabs[self.active].search.on {
+        if pressed && self.focus == Focus::Terminal && !self.tabs[self.active].search.on {
             self.tabs[self.active].term.snap_to_bottom();
         }
         if pressed && self.perf_t0.is_some() {
@@ -1637,22 +1973,44 @@ impl App {
                 self.toggle_rail();
                 return;
             }
+            if is_inspector_toggle(&logical, pressed, &mods) {
+                self.toggle_inspector();
+                return;
+            }
             match &logical {
-                Key::Named(NamedKey::Escape) => self.focus = Focus::Terminal,
+                Key::Named(NamedKey::Escape) => {
+                    self.focus = Focus::Terminal;
+                    self.inspector_sel = None;
+                }
                 Key::Named(NamedKey::ArrowUp) => {
                     if self.focus == Focus::Rail && !self.tabs.is_empty() {
                         self.rail_sel = self.rail_sel.saturating_sub(1);
+                    }
+                    if self.focus == Focus::Inspector {
+                        self.inspector_sel = match self.inspector_sel {
+                            Some(0) | None => Some(3),
+                            Some(n) => Some(n - 1),
+                        };
                     }
                 }
                 Key::Named(NamedKey::ArrowDown) => {
                     if self.focus == Focus::Rail && !self.tabs.is_empty() {
                         self.rail_sel = (self.rail_sel + 1).min(self.tabs.len() - 1);
                     }
+                    if self.focus == Focus::Inspector {
+                        self.inspector_sel = match self.inspector_sel {
+                            Some(3) => Some(0),
+                            Some(n) => Some(n + 1),
+                            None => Some(0),
+                        };
+                    }
                 }
                 Key::Named(NamedKey::Enter)
                     if self.focus == Focus::Rail && self.rail_sel < self.tabs.len() =>
                 {
                     self.active = self.rail_sel;
+                    self.inspector_cache.mark_dirty();
+                    self.inspector_sel = None;
                     self.focus = Focus::Terminal;
                     self.retitle();
                 }
@@ -1665,6 +2023,7 @@ impl App {
                 // then translated and sent normally below, preserving
                 // the emergency-cancellation behavior.
                 self.focus = Focus::Terminal;
+                self.inspector_sel = None;
             } else {
                 self.needs_draw = true;
                 return;
@@ -1728,6 +2087,11 @@ impl App {
         // Mission Rail toggle (Ctrl+Shift+M).
         if is_rail_toggle(&logical, pressed, &mods) {
             self.toggle_rail();
+            return;
+        }
+        // Contextual Inspector toggle (Ctrl+Shift+I).
+        if is_inspector_toggle(&logical, pressed, &mods) {
+            self.toggle_inspector();
             return;
         }
         // Scrollback find: typing goes to the query, never the PTY.
@@ -2116,6 +2480,7 @@ impl ApplicationHandler for App {
                 };
                 let rail_cols = self.rail_cols();
                 self.refresh_chrome();
+                self.refresh_inspector();
                 let vp = self.frame_layout().term;
                 let gpu_vp = zet_gpu::renderer::Viewport {
                     x: vp.x,
@@ -2128,6 +2493,8 @@ impl ApplicationHandler for App {
                 } else {
                     None
                 };
+                let inspector_vp_layout = self.frame_layout().inspector;
+                let inspector_cols = inspector_vp_layout.map_or(0, |vp| vp.cols as usize);
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
                     r.draw_terminal_in(&self.tabs[self.active].term, gpu_vp, sel);
                     if rail_cols > 0 {
@@ -2138,8 +2505,78 @@ impl ApplicationHandler for App {
                                 cols: rail_cols as u32,
                                 rows: (self.rows.saturating_sub(bar)) as u32,
                             };
-                            r.draw_fill(rail_vp, zet_gpu::quad::Rgba::rgb(0.03, 0.04, 0.07));
-                            Self::draw_rail(r, rail_vp, snapshot, self.rail_sel);
+                            r.draw_fill(rail_vp, zet_gpu::renderer::RAIL_BG);
+                            Self::draw_rail(
+                                r,
+                                rail_vp,
+                                snapshot,
+                                self.rail_sel,
+                                self.focus == Focus::Rail,
+                            );
+                        }
+                    }
+                    if inspector_cols > 0 {
+                        if let Some(insp_layout_vp) = inspector_vp_layout {
+                            let insp_vp = zet_gpu::renderer::Viewport {
+                                x: insp_layout_vp.x,
+                                y: insp_layout_vp.y,
+                                cols: insp_layout_vp.cols,
+                                rows: insp_layout_vp.rows,
+                            };
+                            r.draw_fill(insp_vp, zet_gpu::quad::Rgba::rgb(0.012, 0.018, 0.032));
+                            r.draw_text_row(insp_vp, 0, 0, "Inspector", zet_gpu::quad::Rgba::WHITE);
+                            if let Some(selected) = self.inspector_sel {
+                                let row = selected as u32 + 1;
+                                if row < insp_vp.rows {
+                                    r.draw_fill(
+                                        zet_gpu::renderer::Viewport {
+                                            x: insp_vp.x,
+                                            y: insp_vp.y + row,
+                                            cols: insp_vp.cols,
+                                            rows: 1,
+                                        },
+                                        zet_gpu::quad::Rgba::rgb(0.040, 0.065, 0.125),
+                                    );
+                                }
+                            }
+                            if let Some(snapshot) = self.inspector_cache.snapshot_handle() {
+                                r.draw_text_row(
+                                    insp_vp,
+                                    1,
+                                    0,
+                                    &format!("Session {}", snapshot.session),
+                                    zet_gpu::quad::Rgba::rgb(0.72, 0.78, 0.86),
+                                );
+                                r.draw_text_row(
+                                    insp_vp,
+                                    2,
+                                    0,
+                                    &format!("State {}", snapshot.state),
+                                    zet_gpu::quad::Rgba::rgb(0.72, 0.78, 0.86),
+                                );
+                                r.draw_text_row(
+                                    insp_vp,
+                                    3,
+                                    0,
+                                    &format!("Exit {}", snapshot.exit),
+                                    zet_gpu::quad::Rgba::rgb(0.72, 0.78, 0.86),
+                                );
+                                r.draw_text_row(
+                                    insp_vp,
+                                    4,
+                                    0,
+                                    &format!("Cwd {}", snapshot.cwd),
+                                    zet_gpu::quad::Rgba::rgb(0.72, 0.78, 0.86),
+                                );
+                            } else {
+                                r.draw_text_row(
+                                    insp_vp,
+                                    2,
+                                    0,
+                                    "No session",
+                                    zet_gpu::quad::Rgba::rgb(0.72, 0.78, 0.86),
+                                );
+                            }
                         }
                     }
                     if bar > 0 {
@@ -2264,9 +2701,10 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
             zet_models::keys::autodetect_local().inspect(|s| eprintln!("zet: inline model {s}"))
         }
     };
-    let perf_t0 = std::env::var("ZET_PERF")
-        .ok()
-        .map(|_| std::time::Instant::now());
+    let perf_t0 = std::env::var("ZET_PERF").ok().map(|_| {
+        zet_gpu::perf_mark("perf_t0_init");
+        std::time::Instant::now()
+    });
     let mut app = App {
         window: None,
         renderer: None,
@@ -2283,6 +2721,8 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         focus: Focus::Terminal,
         rail_sel: 0,
         chrome: panels::ChromeCache::new(),
+        inspector_sel: None,
+        inspector_cache: panels::InspectorCache::new(),
         #[cfg(test)]
         chrome_query_count: 0,
         #[cfg(test)]
@@ -2424,6 +2864,7 @@ mod layout_fit_tests {
             session: None,
             term: zet_term::Terminal::new(80, 24),
             shell_state: zet_pty::shell::ShellState::new(),
+            session_id: 0,
             rx: None,
             dead: false,
             erase: 127,
@@ -2471,6 +2912,8 @@ mod layout_fit_tests {
             focus: super::Focus::Terminal,
             rail_sel: 0,
             chrome: super::panels::ChromeCache::new(),
+            inspector_sel: None,
+            inspector_cache: super::panels::InspectorCache::new(),
             #[cfg(test)]
             chrome_query_count: 0,
             #[cfg(test)]
@@ -2857,8 +3300,8 @@ mod layout_fit_tests {
             crate::window::layout::LayoutMode::Workspace.layout(),
         );
         app.tabs.push(make_test_tab());
-        app.mouse_px = Some((10.0, 100.0));
-        app.handle_mouse_click(10.0, 100.0, 10, 20);
+        app.mouse_px = Some((10.0, 160.0));
+        app.handle_mouse_click(10.0, 160.0, 10, 20);
         assert_eq!(app.focus, super::Focus::Rail);
         assert_eq!(app.rail_sel, 1);
 
@@ -2932,7 +3375,7 @@ mod layout_fit_tests {
         assert_eq!(app.rail_sel, 0);
         assert_eq!(app.active, 0);
 
-        app.handle_mouse_click(10.0, 100.0, 10, 20);
+        app.handle_mouse_click(10.0, 160.0, 10, 20);
         assert_eq!(app.rail_sel, 1);
         assert_eq!(app.active, 0);
 
@@ -3147,5 +3590,221 @@ mod layout_fit_tests {
         let snapshot = app.build_rail_snapshot();
         assert_eq!(snapshot.commands.len(), 1);
         assert!(snapshot.commands[0].command.contains("other command"));
+    }
+
+    #[test]
+    fn inspector_click_focuses_inspector_without_terminal_selection() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.handle_mouse_click(1000.0, 100.0, 10, 20);
+        assert_eq!(app.focus, super::Focus::Inspector);
+        assert!(app.tabs[0].selection.is_none());
+        assert!(!app.tabs[0].selecting);
+    }
+
+    #[test]
+    fn terminal_click_restores_terminal_focus() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.focus = super::Focus::Inspector;
+        app.handle_mouse_click(300.0, 100.0, 10, 20);
+        assert_eq!(app.focus, super::Focus::Terminal);
+    }
+
+    #[test]
+    fn inspector_escape_returns_to_terminal() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.focus = super::Focus::Inspector;
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.focus, super::Focus::Terminal);
+    }
+
+    #[test]
+    fn inspector_toggle_is_independent_of_rail() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::TerminalFocus.layout(),
+        );
+        app.layout.rail = true;
+        app.toggle_inspector();
+        assert!(app.layout.inspector);
+        assert!(app.layout.rail);
+        app.toggle_inspector();
+        assert!(!app.layout.inspector);
+        assert!(app.layout.rail);
+    }
+
+    #[test]
+    fn inspector_narrow_layout_does_not_strand_focus() {
+        let mut app = make_test_app(
+            40,
+            24,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.focus = super::Focus::Inspector;
+        app.refresh_inspector();
+        assert_eq!(app.focus, super::Focus::Terminal);
+        assert!(app.frame_layout().inspector.is_none());
+    }
+
+    #[test]
+    fn inspector_session_label_is_not_duplicated() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.refresh_inspector();
+        let snapshot = app.inspector_cache.snapshot().unwrap();
+        assert_eq!(snapshot.session, "1");
+    }
+
+    #[test]
+    fn inspector_click_selects_only_real_rows() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.refresh_inspector();
+        app.handle_mouse_click(900.0, 5.0, 10, 20);
+        assert_eq!(app.focus, super::Focus::Inspector);
+        assert_eq!(app.inspector_sel, None);
+        app.handle_mouse_click(900.0, 25.0, 10, 20);
+        assert_eq!(app.inspector_sel, Some(0));
+        app.handle_mouse_click(900.0, 85.0, 10, 20);
+        assert_eq!(app.inspector_sel, Some(3));
+        app.handle_mouse_click(900.0, 200.0, 10, 20);
+        assert_eq!(app.focus, super::Focus::Inspector);
+    }
+
+    #[test]
+    fn inspector_arrow_navigation_stays_bounded() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.focus = super::Focus::Inspector;
+        app.inspector_sel = Some(0);
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.inspector_sel, Some(1));
+        app.inspector_sel = Some(3);
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.inspector_sel, Some(0));
+        app.inspector_sel = Some(0);
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowUp),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.inspector_sel, Some(3));
+    }
+
+    #[test]
+    fn inspector_navigation_does_not_snap_scrollback() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.tabs[0].term.scroll_view_up(5);
+        let before = app.tabs[0].term.view_offset();
+        app.focus = super::Focus::Inspector;
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.tabs[0].term.view_offset(), before);
+    }
+
+    #[test]
+    fn inspector_ctrl_c_returns_to_terminal() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.focus = super::Focus::Inspector;
+        app.inspector_sel = Some(2);
+        app.handle_key_parts(
+            winit::keyboard::Key::Character("c".into()),
+            Some("c"),
+            true,
+            winit::keyboard::ModifiersState::CONTROL,
+            None,
+        );
+        assert_eq!(app.focus, super::Focus::Terminal);
+        assert_eq!(app.inspector_sel, None);
+    }
+
+    #[test]
+    fn inspector_tab_change_resets_selection() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.tabs.push(make_test_tab());
+        app.focus = super::Focus::Inspector;
+        app.inspector_sel = Some(2);
+        app.active = 1;
+        app.refresh_inspector();
+        assert_eq!(app.focus, super::Focus::Inspector);
+        assert_eq!(app.inspector_sel, None);
+        assert_eq!(app.inspector_cache.snapshot().unwrap().active, 1);
+    }
+
+    #[test]
+    fn inspector_rebuilds_for_same_index_session_replacement() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.tabs[0].session_id = 10;
+        app.refresh_inspector();
+        app.inspector_sel = Some(2);
+        assert_eq!(app.inspector_cache.last_session_id, Some(10));
+
+        app.tabs[0].session_id = 20;
+        app.refresh_inspector();
+        assert_eq!(app.inspector_cache.last_session_id, Some(20));
+        assert_eq!(app.inspector_sel, None);
+        assert!(app.inspector_cache.snapshot().is_some());
     }
 }
