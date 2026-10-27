@@ -6,7 +6,7 @@ Repo: github.com/kryptek2000/zet (Rust + wgpu). Full spec: `docs/ZET-DESIGN.md`.
 
 ## Workspace layout — implemented versus planned
 
-**Important:** A crate directory or an old architecture design does **not** mean the feature is implemented. The inventory below reflects the code review in `docs/design/A5-mission-control-architecture.md` at the PR #13 head (`166c204`); verify against current code before claiming a feature is shipped.
+**Important:** A crate directory or an old architecture design does **not** mean the feature is implemented. The inventory below is a baseline; verify against current code before claiming a feature is shipped. Master now includes the P2-B1 native rail/tab polish and P2-B2 Contextual Inspector foundation, while several planned capabilities remain unimplemented.
 
 | Crate | Present implementation / limitation |
 |---|---|
@@ -69,7 +69,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-CI (`.github/workflows/ci.yml`) runs exactly these four on every push and PR, plus installs `zsh` for the zet-pty zsh integration test. **All four must pass before a change is considered done.** The zsh test is non-interactive and needs an empty `.zshrc` to skip the newuser wizard — do not "fix" that by changing the test. **Always inspect the latest run; at this documentation update, master still had an outstanding text-rendering test failure pending PR #13.**
+CI (`.github/workflows/ci.yml`) runs exactly these four on every push and PR, plus installs `zsh` for the zet-pty zsh integration test. **All four must pass before a change is considered done.** The zsh test is non-interactive and needs an empty `.zshrc` to skip the newuser wizard — do not "fix" that by changing the test. **Inspect the latest run before claiming CI is green; current master is green after the flagship integration merge.**
 
 ## Working rules for agents
 

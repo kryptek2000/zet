@@ -55,9 +55,10 @@ The mockup is *visual reference only*: no synthetic sessions, tests, agent telem
 ## Roles and authority
 
 - **Product owner:** final creative direction and release/merge approval.
-- **GPT-6:** system architect, product/UX spec and reviewer.
-- **MiniMax:** proposed UI implementer after a small native vertical-slice proof.
-- **Beam:** independent UI auditor; implementation roles may be reversed for other tasks.
+- **GPT-6:** Lead Architect and coordinator.
+- **Beam Free:** Primary Implementor.
+- **GLM-5.3-Flash:** Independent Auditor.
+- **Project Owner:** Final product, design, merge and release authority.
 - **Audit principle:** author never signs off on their own change.
 
 ## Scope boundaries

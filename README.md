@@ -37,9 +37,9 @@ No Electron, Chromium shell, webview UI, or browser required for operation. No f
 
 ## Current status
 
-**In development; not a production release.** ZET already has a native Rust/wgpu Linux terminal, real PTY, tabs, shell integration, scrollback, observed command recording, a first native collapsible Mission Rail ([PR #28](https://github.com/kryptek2000/zet/pull/28), merged), and Wayland clipboard paste support ([PR #30](https://github.com/kryptek2000/zet/pull/30), merged).
+**In development; not a production release.** ZET already has a native Rust/wgpu Linux terminal, real PTY, tabs, shell integration, scrollback, observed command recording, a native collapsible Mission Rail with P2-B1 visual polish ([PR #35](https://github.com/kryptek2000/zet/pull/35)), a first native Contextual Inspector foundation ([PR #43](https://github.com/kryptek2000/zet/pull/43)), additive startup instrumentation, and Wayland clipboard paste support ([PR #30](https://github.com/kryptek2000/zet/pull/30), merged).
 
-**Still planned:** the fully styled flagship Mission Control workspace and optional Inspector, mission/evidence graph, exact-commit CI verification receipts, ZET-managed SSH transport, and broader agent-aware workstreams. The [approved visual reference](docs/design/ZET-FLAGSHIP-UI-REFERENCE.md) and [P2-B branding plan](docs/design/P2B-ZET-ASCII-IDENTITY.md) are **design/planning targets, not screenshots or claims of shipped features**.
+**Still planned:** Inspector recorded-command history and detail, mission/evidence graph, exact-commit CI verification receipts, ZET-managed SSH transport, broader agent-aware workstreams, and full visual harmonization. The [approved visual reference](docs/design/ZET-FLAGSHIP-UI-REFERENCE.md) and [P2-B branding plan](docs/design/P2B-ZET-ASCII-IDENTITY.md) remain design targets; shipped UI must be represented by genuine native captures. See [Current State](docs/CURRENT-STATE.md) for the verified implementation and release status.
 
 ## Build and verify
 

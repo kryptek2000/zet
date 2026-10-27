@@ -32,6 +32,15 @@
 
 **Exit:** playable Linux native prototype with focused tests, screenshot comparison to approved design, a green PR and independent audit.
 
+### Completed in merged master
+
+- P2-B1 native Mission Rail, tab and chrome polish is integrated into master (PR #35, commit `6b76b3de92e9c5d65187bb944e63aa2642065ce3`).
+- P2-B2 Contextual Inspector foundation is integrated into master (PR #43, commit `01a431d120207bca3c6f667e469f61a4e1464e0b`).
+- P2-B2C integration repair and session-identity repair are merged.
+- P37-A/P37-D additive startup instrumentation is available on master.
+- Independent audit, owner visual approval and exact-head CI passed for the integrated candidate.
+- Release performance gates remain open: startup < 300 ms, input < 3 ms, idle RSS < 100 MB, `cat 100k` < 0.9 s.
+
 ### P2-B — Flagship native UI fidelity
 
 Planning anchor: [Issue #29](https://github.com/kryptek2000/zet/issues/29) and the
@@ -52,6 +61,10 @@ substitute a competing layout or a generic dashboard.
 Implementation of P2-B requires a separate owner-authorized slice; this
 subsection is a planning and visual-acceptance requirement, not authorization
 to start UI work.
+
+## Next milestone — P3: Evidence-linked commands and mission timeline
+
+**Current next product milestone.** Begin with an architect-approved bounded contract using existing command recording and provenance. Do not implement P3 in a documentation-only sync.
 
 ## P3 — Evidence-linked commands and mission timeline
 
