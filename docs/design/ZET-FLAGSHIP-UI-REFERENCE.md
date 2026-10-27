@@ -8,7 +8,12 @@
 
 The approved image mockup is `futuristic_ai_terminal_ci_dashboard.png`, generated in the product-design discussion (1586 × 992 PNG). It depicts a native-looking ZET Mission Control window with a mission rail, central terminal, contextual evidence cards, approvals, checkpoints, verification, an inspector and lightweight status bar.
 
-**Asset tracking:** The image currently lives in the conversation's downloadable artifacts; this markdown is committed to GitHub. The PNG must additionally be copied into `docs/design/assets/zet-flagship-mission-control.png` via a Git checkout; **do not claim the image is in the repository before that binary file has been committed.**
+**Asset tracking:** The original 1586 x 992 PNG was recovered from the owner's
+design files on 2026-10-25 and committed at
+`docs/design/assets/zet-flagship-mission-control.png`. Verified properties:
+1,852,773 bytes, RGB PNG, SHA-256
+`7f0c970ff99adbabf770e7efba8719e3e75c6f5e6f9c2f1da784fba5bd60857d`.
+See `docs/design/assets/README.md` for provenance.
 
 ## Vision we are keeping
 

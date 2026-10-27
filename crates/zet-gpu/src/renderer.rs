@@ -92,21 +92,130 @@ const SEL_RGBA: Rgba = Rgba {
 /// Tab bar: near-black strip; the active segment lifts lighter with
 /// white ink, inactive segments dim. Same quad machinery as cells.
 pub const TABBAR_BG: Rgba = Rgba {
-    r: 0.03,
-    g: 0.04,
-    b: 0.07,
+    r: 0.018,
+    g: 0.026,
+    b: 0.045,
     a: 1.0,
 };
 pub const TAB_ACTIVE_BG: Rgba = Rgba {
-    r: 0.10,
-    g: 0.13,
-    b: 0.20,
+    r: 0.045,
+    g: 0.075,
+    b: 0.150,
     a: 1.0,
 };
 pub const TAB_DIM_INK: Rgba = Rgba {
     r: 0.45,
     g: 0.48,
     b: 0.55,
+    a: 1.0,
+};
+/// Inactive tab label ink; aliases the historical dim ink.
+pub const TAB_INACTIVE_INK: Rgba = TAB_DIM_INK;
+/// One-cell active-tab marker at the left edge of the active segment.
+pub const TAB_ACTIVE_ACCENT: Rgba = Rgba {
+    r: 0.16,
+    g: 0.64,
+    b: 0.78,
+    a: 1.0,
+};
+/// One-cell separator between tab segments.
+pub const TAB_SEPARATOR: Rgba = Rgba {
+    r: 0.05,
+    g: 0.07,
+    b: 0.11,
+    a: 1.0,
+};
+
+/// Rail panel surface: one step above the terminal's near-black grid.
+pub const RAIL_BG: Rgba = Rgba {
+    r: 0.012,
+    g: 0.018,
+    b: 0.032,
+    a: 1.0,
+};
+/// Rail right-edge rule separating chrome from the live terminal.
+pub const RAIL_BORDER: Rgba = Rgba {
+    r: 0.07,
+    g: 0.10,
+    b: 0.16,
+    a: 1.0,
+};
+/// Selected session-card fill.
+pub const RAIL_SELECTED_BG: Rgba = Rgba {
+    r: 0.040,
+    g: 0.065,
+    b: 0.125,
+    a: 1.0,
+};
+/// Subtle fill for the active session when it is not the rail selection.
+pub const RAIL_ACTIVE_BG: Rgba = Rgba {
+    r: 0.022,
+    g: 0.035,
+    b: 0.065,
+    a: 1.0,
+};
+/// Brand and active-session name ink.
+pub const RAIL_HEADER_INK: Rgba = Rgba::WHITE;
+/// Section labels (`SESSIONS`, `OBSERVED COMMANDS`).
+pub const RAIL_SECTION_INK: Rgba = Rgba {
+    r: 0.58,
+    g: 0.66,
+    b: 0.80,
+    a: 1.0,
+};
+/// Session names and command text.
+pub const RAIL_TEXT_INK: Rgba = Rgba {
+    r: 0.76,
+    g: 0.82,
+    b: 0.92,
+    a: 1.0,
+};
+/// Paths, counts and secondary detail.
+pub const RAIL_DIM_INK: Rgba = Rgba {
+    r: 0.40,
+    g: 0.47,
+    b: 0.58,
+    a: 1.0,
+};
+/// Restrained cyan marker for the active/focused rail state.
+pub const RAIL_ACCENT: Rgba = Rgba {
+    r: 0.16,
+    g: 0.64,
+    b: 0.78,
+    a: 1.0,
+};
+/// Brighter focus marker used only while the rail owns keyboard focus.
+pub const RAIL_FOCUS: Rgba = Rgba {
+    r: 0.30,
+    g: 0.82,
+    b: 0.92,
+    a: 1.0,
+};
+/// Live/healthy session state.
+pub const RAIL_OK: Rgba = Rgba {
+    r: 0.18,
+    g: 0.72,
+    b: 0.52,
+    a: 1.0,
+};
+/// Exited/failed session state.
+pub const RAIL_BAD: Rgba = Rgba {
+    r: 0.86,
+    g: 0.30,
+    b: 0.30,
+    a: 1.0,
+};
+/// Footer strip surface and ink.
+pub const RAIL_FOOTER_BG: Rgba = Rgba {
+    r: 0.008,
+    g: 0.012,
+    b: 0.022,
+    a: 1.0,
+};
+pub const RAIL_FOOTER_INK: Rgba = Rgba {
+    r: 0.42,
+    g: 0.50,
+    b: 0.62,
     a: 1.0,
 };
 
@@ -631,7 +740,19 @@ impl Renderer {
         for x in 0..cols {
             let seg = crate::selection::tabbar_segment_for_x(x, rail_cols, cols, n);
             let is_active = seg == Some(active);
-            let fill = if is_active { TAB_ACTIVE_BG } else { TABBAR_BG };
+            let seg_start = seg.and_then(|s| segments.get(s)).map(|(start, _)| *start);
+            let is_seg_start = seg_start == Some(x);
+            let fill = if is_seg_start {
+                if is_active {
+                    TAB_ACTIVE_ACCENT
+                } else {
+                    TAB_SEPARATOR
+                }
+            } else if is_active {
+                TAB_ACTIVE_BG
+            } else {
+                TABBAR_BG
+            };
             if let Some(bg_slot) = self.bg_slot {
                 self.quads.extend(cell_quad(
                     x as u32,
@@ -648,6 +769,11 @@ impl Renderer {
             };
             let (start, _) = segments[seg];
             let lx = x - start;
+            // The label carries one leading padding cell. That cell is the
+            // segment's accent/separator block, so text starts at lx == 1.
+            if lx == 0 {
+                continue;
+            }
             let text: Vec<char> = labels
                 .get(seg)
                 .map(|s| s.chars().collect())
@@ -663,7 +789,11 @@ impl Renderer {
                             self.cell_h,
                             (slot.x, slot.y),
                             self.atlas_size,
-                            if is_active { Rgba::WHITE } else { TAB_DIM_INK },
+                            if is_active {
+                                Rgba::WHITE
+                            } else {
+                                TAB_INACTIVE_INK
+                            },
                         ));
                     }
                 }
@@ -1601,5 +1731,42 @@ mod viewport_tests {
         assert_eq!(viewport_cell_origin(vp, 0, 0), Some((24, 1)));
         assert_eq!(viewport_cell_origin(vp, 79, 22), Some((103, 23)));
         assert_eq!(viewport_cell_origin(vp, 80, 0), None);
+    }
+
+    fn contrast(a: Rgba, b: Rgba) -> f32 {
+        // Tokens are stored in linear light, which is also the space WCAG
+        // relative luminance is defined in.
+        fn lum(c: Rgba) -> f32 {
+            0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
+        }
+        let (l1, l2) = (lum(a), lum(b));
+        let (hi, lo) = if l1 >= l2 { (l1, l2) } else { (l2, l1) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    #[test]
+    fn chrome_tokens_meet_text_and_marker_contrast() {
+        // Text: WCAG AA 4.5:1. Markers/focus bars: 3:1.
+        for (name, ink, bg) in [
+            ("header", RAIL_HEADER_INK, RAIL_BG),
+            ("section", RAIL_SECTION_INK, RAIL_BG),
+            ("session", RAIL_TEXT_INK, RAIL_BG),
+            ("detail", RAIL_DIM_INK, RAIL_BG),
+            ("footer", RAIL_FOOTER_INK, RAIL_FOOTER_BG),
+            ("inactive tab", TAB_INACTIVE_INK, TABBAR_BG),
+            ("active tab", Rgba::WHITE, TAB_ACTIVE_BG),
+        ] {
+            let ratio = contrast(ink, bg);
+            assert!(ratio >= 4.5, "{name} contrast {ratio:.2} < 4.5");
+        }
+        for (name, ink, bg) in [
+            ("accent", RAIL_ACCENT, RAIL_BG),
+            ("focus", RAIL_FOCUS, RAIL_SELECTED_BG),
+            ("live", RAIL_OK, RAIL_BG),
+            ("failed", RAIL_BAD, RAIL_BG),
+        ] {
+            let ratio = contrast(ink, bg);
+            assert!(ratio >= 3.0, "{name} marker contrast {ratio:.2} < 3.0");
+        }
     }
 }
