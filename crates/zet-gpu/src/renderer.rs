@@ -312,10 +312,17 @@ impl Renderer {
     pub async fn new(window: Arc<Window>) -> Result<Self, InitError> {
         crate::perf_mark("renderer_new");
         let size = window.inner_size();
+        crate::perf_mark("instance_start");
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        crate::perf_mark("instance_done");
+
+        crate::perf_mark("surface_create_start");
         let surface = instance
             .create_surface(window)
             .map_err(InitError::Surface)?;
+        crate::perf_mark("surface_create_done");
+
+        crate::perf_mark("adapter_request_start");
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -325,6 +332,7 @@ impl Renderer {
             })
             .await
             .map_err(|_| InitError::NoAdapter)?;
+        crate::perf_mark("adapter_request_done");
         crate::perf_mark("wgpu_adapter");
         {
             let info = adapter.get_info();

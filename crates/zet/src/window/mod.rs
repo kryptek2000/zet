@@ -1934,6 +1934,7 @@ impl App {
         };
         self.perf_frames += 1;
         if self.perf_frames == 1 {
+            zet_gpu::perf_mark("first_frame");
             eprintln!("perf: first_frame_ms={}", t0.elapsed().as_millis());
         }
         if let Some(tin) = self.perf_input.take() {
@@ -2700,9 +2701,10 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
             zet_models::keys::autodetect_local().inspect(|s| eprintln!("zet: inline model {s}"))
         }
     };
-    let perf_t0 = std::env::var("ZET_PERF")
-        .ok()
-        .map(|_| std::time::Instant::now());
+    let perf_t0 = std::env::var("ZET_PERF").ok().map(|_| {
+        zet_gpu::perf_mark("perf_t0_init");
+        std::time::Instant::now()
+    });
     let mut app = App {
         window: None,
         renderer: None,
