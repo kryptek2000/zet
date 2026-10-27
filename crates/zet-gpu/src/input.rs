@@ -117,6 +117,17 @@ pub fn is_rail_toggle(logical: &Key, pressed: bool, mods: &ModifiersState) -> bo
     matches!(logical, Key::Character(s) if ctrl && shift && s.eq_ignore_ascii_case("m"))
 }
 
+/// True on Ctrl+Shift+I: toggle the Contextual Inspector. Checked before
+/// [`translate`] so the key never reaches the shell.
+pub fn is_inspector_toggle(logical: &Key, pressed: bool, mods: &ModifiersState) -> bool {
+    if !pressed {
+        return false;
+    }
+    let ctrl = mods.contains(ModifiersState::CONTROL);
+    let shift = mods.contains(ModifiersState::SHIFT);
+    matches!(logical, Key::Character(s) if ctrl && shift && s.eq_ignore_ascii_case("i"))
+}
+
 /// True on Ctrl+PageDown / Ctrl+PageUp: cycle tabs. Checked before
 /// [`translate`] (which would emit scrolling escapes).
 pub fn is_cycle_tab(logical: &Key, pressed: bool, mods: &ModifiersState) -> Option<isize> {

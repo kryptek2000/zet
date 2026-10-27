@@ -337,10 +337,6 @@ impl ChromeCache {
         }
     }
 
-    pub fn mark_dirty(&mut self) {
-        self.dirty = true;
-    }
-
     pub fn snapshot(&self) -> Option<&RailSnapshot> {
         self.snapshot.as_deref()
     }
@@ -352,6 +348,10 @@ impl ChromeCache {
     pub fn poll_due(&self, now: Instant) -> bool {
         self.last_refresh
             .is_none_or(|last| now.duration_since(last) >= self.poll_interval)
+    }
+
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
     }
 
     pub fn cheap_changed(
@@ -403,6 +403,7 @@ impl ChromeCache {
         self.last_refresh = Some(now);
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub fn commit_refresh(
         &mut self,
@@ -964,5 +965,265 @@ mod tests {
             }
         });
         assert_eq!(builds, 2);
+    }
+}
+
+/// Remove control and escape sequences, collapse line breaks, and bound
+/// the result to `max_cells`. This keeps untrusted terminal text from
+/// affecting Inspector layout or injecting control sequences.
+pub fn sanitize_inspector_text(text: &str, max_cells: usize) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            } else if chars.peek() == Some(&']') {
+                chars.next();
+                while let Some(next) = chars.next() {
+                    if next == '\x07' {
+                        break;
+                    }
+                    if next == '\x1b' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            } else {
+                chars.next();
+            }
+            continue;
+        }
+        if c == '\n' || c == '\r' || c.is_control() {
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+    // Collapse runs of whitespace left by removed controls.
+    let mut collapsed = String::new();
+    let mut last_space = false;
+    for c in out.chars() {
+        if c.is_whitespace() {
+            if !last_space {
+                collapsed.push(' ');
+            }
+            last_space = true;
+        } else {
+            collapsed.push(c);
+            last_space = false;
+        }
+    }
+    truncate_to_cells(collapsed.trim(), max_cells)
+}
+
+/// Read-only snapshot for the first Contextual Inspector slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectorSnapshot {
+    pub active: usize,
+    pub session: String,
+    pub cwd: String,
+    pub state: String,
+    pub exit: String,
+}
+
+/// Dirty-flagged cache for Inspector snapshots.
+#[derive(Debug, Clone)]
+pub struct InspectorCache {
+    pub snapshot: Option<Arc<InspectorSnapshot>>,
+    pub dirty: bool,
+    pub last_session_id: Option<u64>,
+    pub last_active: usize,
+    pub last_cwd: String,
+    pub last_phase: Option<String>,
+    pub last_tab_count: usize,
+    pub last_active_dead: bool,
+    pub last_refresh: Option<Instant>,
+    pub poll_interval: Duration,
+}
+
+impl InspectorCache {
+    pub fn new() -> Self {
+        Self {
+            snapshot: None,
+            dirty: true,
+            last_session_id: None,
+            last_active: usize::MAX,
+            last_cwd: String::new(),
+            last_phase: None,
+            last_tab_count: usize::MAX,
+            last_active_dead: true,
+            last_refresh: None,
+            poll_interval: Duration::from_millis(250),
+        }
+    }
+
+    pub fn snapshot(&self) -> Option<&InspectorSnapshot> {
+        self.snapshot.as_deref()
+    }
+
+    pub fn snapshot_handle(&self) -> Option<Arc<InspectorSnapshot>> {
+        self.snapshot.clone()
+    }
+
+    pub fn poll_due(&self, now: Instant) -> bool {
+        self.last_refresh
+            .is_none_or(|last| now.duration_since(last) >= self.poll_interval)
+    }
+
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    pub fn cheap_changed(
+        &self,
+        session_id: u64,
+        active: usize,
+        phase: Option<zet_pty::shell::Phase>,
+        cwd: &str,
+        tab_count: usize,
+        active_dead: bool,
+    ) -> bool {
+        let phase = phase.map(|phase| format!("{phase:?}"));
+        self.dirty
+            || self.last_session_id != Some(session_id)
+            || self.last_active != active
+            || self.last_tab_count != tab_count
+            || self.last_active_dead != active_dead
+            || self.last_phase != phase
+            || self.last_cwd != cwd
+    }
+
+    pub fn mark_refreshed(&mut self, now: Instant) {
+        self.last_refresh = Some(now);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_refresh(
+        &mut self,
+        session_id: u64,
+        active: usize,
+        phase: Option<zet_pty::shell::Phase>,
+        cwd: String,
+        tab_count: usize,
+        active_dead: bool,
+        snapshot: InspectorSnapshot,
+        now: Instant,
+    ) {
+        self.snapshot = Some(Arc::new(snapshot));
+        self.last_session_id = Some(session_id);
+        self.last_active = active;
+        self.last_phase = phase.map(|phase| format!("{phase:?}"));
+        self.last_cwd = cwd;
+        self.last_tab_count = tab_count;
+        self.last_active_dead = active_dead;
+        self.last_refresh = Some(now);
+        self.dirty = false;
+    }
+}
+
+impl Default for InspectorCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod inspector_sanitize_tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_removes_controls_and_bounds_text() {
+        assert_eq!(sanitize_inspector_text("a\x1b[31mb\n\rc", 8), "ab c");
+        assert_eq!(sanitize_inspector_text("verylongpath", 6), "veryl…");
+    }
+}
+
+#[cfg(test)]
+mod inspector_cache_tests {
+    use super::*;
+
+    #[test]
+    fn inspector_cache_starts_dirty() {
+        let cache = InspectorCache::new();
+        assert!(cache.dirty);
+        assert!(cache.snapshot().is_none());
+    }
+
+    #[test]
+    fn inspector_cache_commits_and_clears_dirty() {
+        let mut cache = InspectorCache::new();
+        let snapshot = InspectorSnapshot {
+            active: 0,
+            session: "session 1".to_string(),
+            cwd: "/tmp".to_string(),
+            state: "prompt".to_string(),
+            exit: "—".to_string(),
+        };
+        cache.commit_refresh(
+            1,
+            0,
+            None,
+            "/tmp".to_string(),
+            1,
+            false,
+            snapshot.clone(),
+            Instant::now(),
+        );
+        assert!(!cache.dirty);
+        assert_eq!(cache.snapshot(), Some(&snapshot));
+    }
+
+    #[test]
+    fn inspector_cache_rebuilds_on_active_change() {
+        let mut cache = InspectorCache::new();
+        let snapshot = InspectorSnapshot {
+            active: 0,
+            session: "session 1".to_string(),
+            cwd: "/tmp".to_string(),
+            state: "prompt".to_string(),
+            exit: "—".to_string(),
+        };
+        cache.commit_refresh(
+            1,
+            0,
+            None,
+            "/tmp".to_string(),
+            1,
+            false,
+            snapshot,
+            Instant::now(),
+        );
+        assert!(cache.cheap_changed(1, 1, None, "/tmp", 1, false));
+    }
+
+    #[test]
+    fn inspector_cache_detects_same_index_session_replacement() {
+        let mut cache = InspectorCache::new();
+        let snapshot = InspectorSnapshot {
+            active: 0,
+            session: "session 1".to_string(),
+            cwd: "/tmp".to_string(),
+            state: "prompt".to_string(),
+            exit: "—".to_string(),
+        };
+        cache.commit_refresh(
+            1,
+            0,
+            None,
+            "/tmp".to_string(),
+            1,
+            false,
+            snapshot,
+            Instant::now(),
+        );
+        assert!(!cache.cheap_changed(1, 0, None, "/tmp", 1, false));
+        assert!(cache.cheap_changed(2, 0, None, "/tmp", 1, false));
+        assert_eq!(cache.last_session_id, Some(1));
     }
 }
