@@ -6,6 +6,7 @@ pub mod quad;
 pub mod renderer;
 pub mod selection;
 pub mod text;
+pub mod theme;
 
 pub use renderer::Renderer;
 

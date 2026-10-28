@@ -8,8 +8,9 @@ use std::sync::Arc;
 use winit::window::Window;
 
 use crate::atlas::{Atlas, Slot};
-use crate::quad::{cell_quad, Rgba, Vertex};
+use crate::quad::{cell_quad, solid_rect_px, solid_triangle_px, Rgba, Vertex};
 use crate::text::Shaper;
+use crate::theme::NEON_GENESIS;
 
 const ATLAS_COLS: u32 = 16;
 const ATLAS_ROWS: u32 = 16;
@@ -65,159 +66,74 @@ impl fmt::Display for InitError {
 impl std::error::Error for InitError {}
 
 /// Renderer clear color as a quad tint (for inverted cursor glyphs).
-const BG_RGBA: Rgba = Rgba {
-    r: 0.008,
-    g: 0.012,
-    b: 0.027,
-    a: 1.0,
-};
+const BG_RGBA: Rgba = NEON_GENESIS.terminal;
 
 /// Ghost-text ink: dimmed so suggestions read as preview, not content.
-const GHOST_RGBA: Rgba = Rgba {
-    r: 0.42,
-    g: 0.44,
-    b: 0.50,
-    a: 1.0,
-};
+const GHOST_RGBA: Rgba = NEON_GENESIS.muted;
 
 /// Mouse-selection fill: dark mint-teal, solid (no blending) with white
 /// ink — distinct from the white-block cursor.
-const SEL_RGBA: Rgba = Rgba {
-    r: 0.10,
-    g: 0.30,
-    b: 0.27,
-    a: 1.0,
-};
+const SEL_RGBA: Rgba = NEON_GENESIS.selected;
 
 /// Tab bar: near-black strip; the active segment lifts lighter with
 /// white ink, inactive segments dim. Same quad machinery as cells.
-pub const TABBAR_BG: Rgba = Rgba {
-    r: 0.018,
-    g: 0.026,
-    b: 0.045,
-    a: 1.0,
-};
-pub const TAB_ACTIVE_BG: Rgba = Rgba {
-    r: 0.045,
-    g: 0.075,
-    b: 0.150,
-    a: 1.0,
-};
-pub const TAB_DIM_INK: Rgba = Rgba {
-    r: 0.45,
-    g: 0.48,
-    b: 0.55,
-    a: 1.0,
-};
+pub const TABBAR_BG: Rgba = NEON_GENESIS.top_bar;
+pub const TAB_ACTIVE_BG: Rgba = NEON_GENESIS.active;
+pub const TAB_HOVER_BG: Rgba = NEON_GENESIS.surface_raised;
+pub const TAB_DIM_INK: Rgba = NEON_GENESIS.secondary;
 /// Inactive tab label ink; aliases the historical dim ink.
 pub const TAB_INACTIVE_INK: Rgba = TAB_DIM_INK;
 /// One-cell active-tab marker at the left edge of the active segment.
-pub const TAB_ACTIVE_ACCENT: Rgba = Rgba {
-    r: 0.16,
-    g: 0.64,
-    b: 0.78,
-    a: 1.0,
-};
+pub const TAB_ACTIVE_ACCENT: Rgba = NEON_GENESIS.cyan;
 /// One-cell separator between tab segments.
-pub const TAB_SEPARATOR: Rgba = Rgba {
-    r: 0.05,
-    g: 0.07,
-    b: 0.11,
-    a: 1.0,
-};
+pub const TAB_SEPARATOR: Rgba = NEON_GENESIS.border;
 
 /// Rail panel surface: one step above the terminal's near-black grid.
-pub const RAIL_BG: Rgba = Rgba {
-    r: 0.012,
-    g: 0.018,
-    b: 0.032,
-    a: 1.0,
-};
+pub const RAIL_BG: Rgba = NEON_GENESIS.surface;
 /// Rail right-edge rule separating chrome from the live terminal.
-pub const RAIL_BORDER: Rgba = Rgba {
-    r: 0.07,
-    g: 0.10,
-    b: 0.16,
-    a: 1.0,
-};
+pub const RAIL_BORDER: Rgba = NEON_GENESIS.border;
 /// Selected session-card fill.
-pub const RAIL_SELECTED_BG: Rgba = Rgba {
-    r: 0.040,
-    g: 0.065,
-    b: 0.125,
-    a: 1.0,
-};
+pub const RAIL_SELECTED_BG: Rgba = NEON_GENESIS.selected;
 /// Subtle fill for the active session when it is not the rail selection.
-pub const RAIL_ACTIVE_BG: Rgba = Rgba {
-    r: 0.022,
-    g: 0.035,
-    b: 0.065,
-    a: 1.0,
-};
+pub const RAIL_ACTIVE_BG: Rgba = NEON_GENESIS.active;
+/// Card hover surface, reserved for pointer-state wiring.
+pub const RAIL_HOVER_BG: Rgba = NEON_GENESIS.surface_raised;
 /// Brand and active-session name ink.
-pub const RAIL_HEADER_INK: Rgba = Rgba::WHITE;
+pub const RAIL_HEADER_INK: Rgba = NEON_GENESIS.text;
 /// Section labels (`SESSIONS`, `OBSERVED COMMANDS`).
-pub const RAIL_SECTION_INK: Rgba = Rgba {
-    r: 0.58,
-    g: 0.66,
-    b: 0.80,
-    a: 1.0,
-};
+pub const RAIL_SECTION_INK: Rgba = NEON_GENESIS.secondary;
 /// Session names and command text.
-pub const RAIL_TEXT_INK: Rgba = Rgba {
-    r: 0.76,
-    g: 0.82,
-    b: 0.92,
-    a: 1.0,
-};
+pub const RAIL_TEXT_INK: Rgba = NEON_GENESIS.text;
 /// Paths, counts and secondary detail.
-pub const RAIL_DIM_INK: Rgba = Rgba {
-    r: 0.40,
-    g: 0.47,
-    b: 0.58,
-    a: 1.0,
-};
+pub const RAIL_DIM_INK: Rgba = NEON_GENESIS.muted;
 /// Restrained cyan marker for the active/focused rail state.
-pub const RAIL_ACCENT: Rgba = Rgba {
-    r: 0.16,
-    g: 0.64,
-    b: 0.78,
-    a: 1.0,
-};
+pub const RAIL_ACCENT: Rgba = NEON_GENESIS.cyan;
 /// Brighter focus marker used only while the rail owns keyboard focus.
-pub const RAIL_FOCUS: Rgba = Rgba {
-    r: 0.30,
-    g: 0.82,
-    b: 0.92,
-    a: 1.0,
-};
+pub const RAIL_FOCUS: Rgba = NEON_GENESIS.cyan;
 /// Live/healthy session state.
-pub const RAIL_OK: Rgba = Rgba {
-    r: 0.18,
-    g: 0.72,
-    b: 0.52,
-    a: 1.0,
-};
+pub const RAIL_OK: Rgba = NEON_GENESIS.teal;
 /// Exited/failed session state.
-pub const RAIL_BAD: Rgba = Rgba {
-    r: 0.86,
-    g: 0.30,
-    b: 0.30,
-    a: 1.0,
-};
+pub const RAIL_BAD: Rgba = NEON_GENESIS.red;
 /// Footer strip surface and ink.
-pub const RAIL_FOOTER_BG: Rgba = Rgba {
-    r: 0.008,
-    g: 0.012,
-    b: 0.022,
-    a: 1.0,
-};
-pub const RAIL_FOOTER_INK: Rgba = Rgba {
-    r: 0.42,
-    g: 0.50,
-    b: 0.62,
-    a: 1.0,
-};
+pub const RAIL_FOOTER_BG: Rgba = NEON_GENESIS.footer;
+pub const RAIL_FOOTER_INK: Rgba = NEON_GENESIS.secondary;
+
+/// Shared contextual-panel tokens. These are public so the composition
+/// layer can use the same semantic surfaces as the rail and tab bar.
+pub const PANEL_BG: Rgba = NEON_GENESIS.surface;
+pub const PANEL_RAISED: Rgba = NEON_GENESIS.surface_raised;
+pub const PANEL_INSET: Rgba = NEON_GENESIS.surface_inset;
+pub const PANEL_BORDER: Rgba = NEON_GENESIS.border;
+pub const PANEL_BORDER_STRONG: Rgba = NEON_GENESIS.border_strong;
+pub const PANEL_TEXT: Rgba = NEON_GENESIS.text;
+pub const PANEL_SECONDARY: Rgba = NEON_GENESIS.secondary;
+pub const PANEL_MUTED: Rgba = NEON_GENESIS.muted;
+pub const PANEL_CYAN: Rgba = NEON_GENESIS.cyan;
+pub const PANEL_VIOLET: Rgba = NEON_GENESIS.violet;
+pub const PANEL_TEAL: Rgba = NEON_GENESIS.teal;
+pub const PANEL_RED: Rgba = NEON_GENESIS.red;
+pub const PANEL_AMBER: Rgba = NEON_GENESIS.amber;
+pub const PANEL_DANGER: Rgba = NEON_GENESIS.danger;
 
 /// Search hits: amber wash for matches, orange for the current one
 /// (white ink, selection precedent — fill + re-inked glyphs).
@@ -499,9 +415,9 @@ impl Renderer {
             queue,
             config,
             bg: wgpu::Color {
-                r: 0.008,
-                g: 0.012,
-                b: 0.027,
+                r: NEON_GENESIS.terminal.r as f64,
+                g: NEON_GENESIS.terminal.g as f64,
+                b: NEON_GENESIS.terminal.b as f64,
                 a: 1.0,
             },
             pipeline,
@@ -980,6 +896,106 @@ impl Renderer {
                 color,
             ));
         }
+    }
+
+    /// Stage a bounded pixel-aligned rectangle for native chrome. Pixel
+    /// geometry is deliberately separate from terminal-cell geometry so
+    /// rounded panels never alter PTY sizing or hit testing.
+    pub fn draw_rect_px(&mut self, x: u32, y: u32, width: u32, height: u32, color: Rgba) {
+        if width == 0 || height == 0 || x >= self.config.width || y >= self.config.height {
+            return;
+        }
+        let Some(atlas_uv) = self.solid_uv() else {
+            return;
+        };
+        let x1 = x.saturating_add(width).min(self.config.width);
+        let y1 = y.saturating_add(height).min(self.config.height);
+        if x1 <= x || y1 <= y {
+            return;
+        }
+        self.quads.extend(solid_rect_px(
+            x as f32, y as f32, x1 as f32, y1 as f32, atlas_uv, color,
+        ));
+    }
+
+    /// Stage a rounded pixel-aligned rectangle as a small triangle fan. Four
+    /// segments per corner keep the silhouette smooth at normal display
+    /// scales without introducing a second shader or a full-screen effect.
+    pub fn draw_rounded_rect_px(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        radius: u32,
+        color: Rgba,
+    ) {
+        if width == 0 || height == 0 || x >= self.config.width || y >= self.config.height {
+            return;
+        }
+        let Some(atlas_uv) = self.solid_uv() else {
+            return;
+        };
+        let x1 = x.saturating_add(width).min(self.config.width);
+        let y1 = y.saturating_add(height).min(self.config.height);
+        if x1 <= x || y1 <= y {
+            return;
+        }
+        let radius = radius.min((x1 - x) / 2).min((y1 - y) / 2) as f32;
+        if radius < 0.5 {
+            self.quads.extend(solid_rect_px(
+                x as f32, y as f32, x1 as f32, y1 as f32, atlas_uv, color,
+            ));
+            return;
+        }
+        let x0 = x as f32;
+        let y0 = y as f32;
+        let x1 = x1 as f32;
+        let y1 = y1 as f32;
+        let corners = [
+            (x0 + radius, y0 + radius, std::f32::consts::PI),
+            (x1 - radius, y0 + radius, std::f32::consts::FRAC_PI_2 * 3.0),
+            (x1 - radius, y1 - radius, 0.0),
+            (x0 + radius, y1 - radius, std::f32::consts::FRAC_PI_2),
+        ];
+        let mut points = Vec::with_capacity(16);
+        for (cx, cy, start) in corners {
+            for segment in 0..4 {
+                let angle = start + std::f32::consts::FRAC_PI_2 * segment as f32 / 4.0;
+                points.push([cx + radius * angle.cos(), cy + radius * angle.sin()]);
+            }
+        }
+        let center = [(x0 + x1) * 0.5, (y0 + y1) * 0.5];
+        for i in 0..points.len() {
+            let next = points[(i + 1) % points.len()];
+            self.quads
+                .extend(solid_triangle_px(center, points[i], next, atlas_uv, color));
+        }
+    }
+
+    /// Stage a small geometric diamond for the ZET identity mark.
+    pub fn draw_diamond_px(&mut self, center: (u32, u32), radius: u32, color: Rgba) {
+        let Some(atlas_uv) = self.solid_uv() else {
+            return;
+        };
+        let (cx, cy) = (center.0 as f32, center.1 as f32);
+        let r = radius as f32;
+        let top = [cx, cy - r];
+        let right = [cx + r, cy];
+        let bottom = [cx, cy + r];
+        let left = [cx - r, cy];
+        self.quads
+            .extend(solid_triangle_px(top, right, bottom, atlas_uv, color));
+        self.quads
+            .extend(solid_triangle_px(top, bottom, left, atlas_uv, color));
+    }
+
+    fn solid_uv(&self) -> Option<[f32; 2]> {
+        let slot = self.bg_slot?;
+        Some([
+            (slot.x as f32 + self.cell_w * 0.5) / self.atlas_size.0 as f32,
+            (slot.y as f32 + self.cell_h * 0.5) / self.atlas_size.1 as f32,
+        ])
     }
 }
 

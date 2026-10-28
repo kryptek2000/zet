@@ -23,6 +23,22 @@ impl Rgba {
         Rgba { r, g, b, a: 1.0 }
     }
 
+    /// A compact semantic-token helper for the native chrome palette.
+    ///
+    /// Native chrome is presented through the existing `Rgba8Unorm` surface,
+    /// so these values keep the design system's familiar six-digit display
+    /// colors readable at the token definition site. Terminal ANSI colors
+    /// continue to use `srgb` where their separate color semantics require
+    /// linear-light conversion.
+    pub const fn from_hex(hex: u32) -> Self {
+        Self {
+            r: ((hex >> 16) & 0xff) as f32 / 255.0,
+            g: ((hex >> 8) & 0xff) as f32 / 255.0,
+            b: (hex & 0xff) as f32 / 255.0,
+            a: 1.0,
+        }
+    }
+
     /// sRGB display colors (as picked on a color wheel) converted to linear
     /// light for the shader. The swapchain is an sRGB format, so writing
     /// these raw would wash everything out (hardware encodes linear->sRGB).
@@ -100,4 +116,69 @@ pub fn cell_quad(
         color: c,
     };
     [tl, bl, br, tl, br, tr]
+}
+
+/// A pixel-aligned solid rectangle using one stable atlas sample for all
+/// vertices. Unlike `cell_quad`, this primitive is used only for native
+/// chrome surfaces and never changes terminal cell geometry.
+pub fn solid_rect_px(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    atlas_uv: [f32; 2],
+    color: Rgba,
+) -> [Vertex; 6] {
+    let c = [color.r, color.g, color.b, color.a];
+    let tl = Vertex {
+        pos: [x0, y0],
+        uv: atlas_uv,
+        color: c,
+    };
+    let tr = Vertex {
+        pos: [x1, y0],
+        uv: atlas_uv,
+        color: c,
+    };
+    let bl = Vertex {
+        pos: [x0, y1],
+        uv: atlas_uv,
+        color: c,
+    };
+    let br = Vertex {
+        pos: [x1, y1],
+        uv: atlas_uv,
+        color: c,
+    };
+    [tl, bl, br, tl, br, tr]
+}
+
+/// One solid triangle for small pixel geometry such as the ZET identity
+/// mark. The atlas UV is constant so the existing textured pipeline remains
+/// the only render pipeline in the application.
+pub fn solid_triangle_px(
+    a: [f32; 2],
+    b: [f32; 2],
+    c_pos: [f32; 2],
+    atlas_uv: [f32; 2],
+    color: Rgba,
+) -> [Vertex; 3] {
+    let color = [color.r, color.g, color.b, color.a];
+    [
+        Vertex {
+            pos: a,
+            uv: atlas_uv,
+            color,
+        },
+        Vertex {
+            pos: b,
+            uv: atlas_uv,
+            color,
+        },
+        Vertex {
+            pos: c_pos,
+            uv: atlas_uv,
+            color,
+        },
+    ]
 }

@@ -577,6 +577,21 @@ pub fn rail_row_target(row: u32, session_count: usize, viewport_rows: u32) -> Op
     rail_session_at_row(row, session_count, viewport_rows)
 }
 
+/// Command index for a clicked activity row, if the row is real. Keeping
+/// this beside `rail_rows` makes the visual stream and hit testing share one
+/// bounded layout contract.
+pub fn rail_command_at_row(
+    row: u32,
+    session_count: usize,
+    command_count: usize,
+    viewport_rows: u32,
+) -> Option<usize> {
+    match rail_rows(viewport_rows, session_count, command_count).get(row as usize) {
+        Some(RailRow::Command(index)) => Some(*index),
+        _ => None,
+    }
+}
+
 /// Backwards-compatible alias.
 pub fn rail_row_layout(
     viewport_rows: u32,
@@ -588,7 +603,7 @@ pub fn rail_row_layout(
 
 #[cfg(test)]
 mod rail_row_tests {
-    use super::{rail_rows, rail_session_at_row, RailRow};
+    use super::{rail_command_at_row, rail_rows, rail_session_at_row, RailRow};
 
     #[test]
     fn one_session_has_two_rows_and_footer_last() {
@@ -654,6 +669,15 @@ mod rail_row_tests {
     }
 
     #[test]
+    fn rail_command_hit_testing_matches_observed_rows() {
+        assert_eq!(rail_command_at_row(11, 2, 3, 20), Some(0));
+        assert_eq!(rail_command_at_row(12, 2, 3, 20), Some(1));
+        assert_eq!(rail_command_at_row(13, 2, 3, 20), Some(2));
+        assert_eq!(rail_command_at_row(10, 2, 3, 20), None);
+        assert_eq!(rail_command_at_row(19, 2, 3, 20), None);
+    }
+
+    #[test]
     fn footer_is_never_overwritten_and_cards_stay_paired() {
         for rows in 0u32..=40 {
             for sessions in 0usize..=8 {
@@ -704,6 +728,39 @@ mod rail_row_tests {
         for rows in 0u32..=20 {
             assert_eq!(rail_session_at_row(rows.saturating_sub(1), 3, rows), None);
         }
+    }
+}
+
+#[cfg(test)]
+mod inspector_layout_tests {
+    use super::{
+        inspector_command_row, inspector_detail_start, inspector_selection_at_row,
+        INSPECTOR_CONTEXT_ROWS,
+    };
+
+    #[test]
+    fn inspector_context_and_activity_rows_are_stable() {
+        assert_eq!(inspector_command_row(0), 7);
+        assert_eq!(inspector_command_row(3), 10);
+        assert_eq!(inspector_selection_at_row(1, 2, 30), Some(0));
+        assert_eq!(inspector_selection_at_row(4, 2, 30), Some(3));
+        assert_eq!(
+            inspector_selection_at_row(7, 2, 30),
+            Some(INSPECTOR_CONTEXT_ROWS)
+        );
+        assert_eq!(
+            inspector_selection_at_row(8, 2, 30),
+            Some(INSPECTOR_CONTEXT_ROWS + 1)
+        );
+    }
+
+    #[test]
+    fn inspector_sections_and_detail_surface_are_not_click_targets() {
+        assert_eq!(inspector_selection_at_row(0, 2, 30), None);
+        assert_eq!(inspector_selection_at_row(6, 2, 30), None);
+        assert_eq!(inspector_selection_at_row(9, 2, 30), None);
+        assert_eq!(inspector_selection_at_row(20, 2, 12), None);
+        assert_eq!(inspector_detail_start(2), 10);
     }
 }
 
@@ -1046,6 +1103,39 @@ pub fn sanitize_inspector_output(text: &str, max_chars: usize) -> String {
         }
     }
     out
+}
+
+/// Four context rows remain keyboard-selectable for compatibility with the
+/// P3-A1 focus contract. Activity rows start below a dedicated section label.
+pub const INSPECTOR_CONTEXT_ROWS: usize = 4;
+pub const INSPECTOR_ACTIVITY_START: u32 = 7;
+
+pub fn inspector_command_row(index: usize) -> u32 {
+    INSPECTOR_ACTIVITY_START + index as u32
+}
+
+/// Translate an Inspector click into the stable selection index used by App.
+/// Section labels, empty space, and the detail surface are not selectable.
+pub fn inspector_selection_at_row(
+    row: u32,
+    command_count: usize,
+    viewport_rows: u32,
+) -> Option<usize> {
+    if (1..=INSPECTOR_CONTEXT_ROWS as u32).contains(&row) {
+        return Some(row as usize - 1);
+    }
+    let start = INSPECTOR_ACTIVITY_START;
+    let end = start.saturating_add(command_count as u32);
+    if row >= start && row < end && row < viewport_rows {
+        return Some(INSPECTOR_CONTEXT_ROWS + (row - start) as usize);
+    }
+    None
+}
+
+pub fn inspector_detail_start(command_count: usize) -> u32 {
+    INSPECTOR_ACTIVITY_START
+        .saturating_add(command_count as u32)
+        .saturating_add(1)
 }
 
 /// Read-only snapshot for the first Contextual Inspector slice.
