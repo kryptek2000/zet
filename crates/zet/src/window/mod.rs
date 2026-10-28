@@ -221,6 +221,10 @@ struct App {
     /// the active session/store. Visual row indices remain in
     /// `inspector_sel`.
     inspector_sel_id: Option<i64>,
+    /// Bounded, sanitized output for the currently selected recorded
+    /// command, if available.
+    inspector_output: Option<String>,
+    inspector_output_id: Option<i64>,
     inspector_cache: panels::InspectorCache,
     #[cfg(test)]
     pub chrome_query_count: usize,
@@ -933,12 +937,16 @@ impl App {
                 self.focus = Focus::Terminal;
                 self.inspector_sel = None;
                 self.inspector_sel_id = None;
+                self.inspector_output = None;
+                self.inspector_output_id = None;
             }
             return;
         }
         if self.inspector_cache.last_active != self.active {
             self.inspector_sel = None;
             self.inspector_sel_id = None;
+            self.inspector_output = None;
+            self.inspector_output_id = None;
         }
         let phase = self
             .tabs
@@ -965,6 +973,10 @@ impl App {
         } else if self.inspector_cache.last_session_id.is_some() {
             self.inspector_sel = None;
             self.inspector_sel_id = None;
+            self.inspector_output = None;
+            self.inspector_output_id = None;
+            self.inspector_output = None;
+            self.inspector_output_id = None;
         }
         let cheap_changed = self.inspector_cache.cheap_changed(
             session_id,
@@ -998,8 +1010,11 @@ impl App {
                 {
                     self.inspector_sel = None;
                     self.inspector_sel_id = None;
+                    self.inspector_output = None;
+                    self.inspector_output_id = None;
                 }
             }
+            self.sync_inspector_output();
             self.inspector_cache.mark_refreshed(now);
             return;
         }
@@ -1014,6 +1029,8 @@ impl App {
             } else {
                 self.inspector_sel = None;
                 self.inspector_sel_id = None;
+                self.inspector_output = None;
+                self.inspector_output_id = None;
             }
         }
         self.inspector_cache.commit_refresh(
@@ -1027,6 +1044,30 @@ impl App {
             now,
         );
         self.inspector_cache.last_blocks = block_count;
+        self.sync_inspector_output();
+    }
+
+    fn sync_inspector_output(&mut self) {
+        let selected_id = self.inspector_sel_id;
+        if selected_id == self.inspector_output_id {
+            if selected_id.is_none() {
+                self.inspector_output = None;
+            }
+            return;
+        }
+        self.inspector_output_id = selected_id;
+        self.inspector_output = selected_id.and_then(|id| {
+            let tab = self.tabs.get(self.active)?;
+            let recorder = tab.recorder.as_ref()?;
+            let block = recorder.store().get(id).ok()?;
+            if block.session != recorder.session() {
+                return None;
+            }
+            Some(panels::sanitize_inspector_output(
+                &zet_blocks::scrub_secrets(&block.output),
+                4096,
+            ))
+        });
     }
 
     fn build_inspector_snapshot(&self) -> panels::InspectorSnapshot {
@@ -1287,6 +1328,8 @@ impl App {
             self.focus = Focus::Terminal;
             self.inspector_sel = None;
             self.inspector_sel_id = None;
+            self.inspector_output = None;
+            self.inspector_output_id = None;
         }
         self.inspector_cache.mark_dirty();
         self.fit_all();
@@ -1316,6 +1359,8 @@ impl App {
                 self.inspector_cache.mark_dirty();
                 self.inspector_sel = None;
                 self.inspector_sel_id = None;
+                self.inspector_output = None;
+                self.inspector_output_id = None;
                 self.focus = Focus::Terminal;
                 self.needs_draw = true;
                 self.retitle();
@@ -1669,6 +1714,8 @@ impl App {
         self.inspector_cache.mark_dirty();
         self.inspector_sel = None;
         self.inspector_sel_id = None;
+        self.inspector_output = None;
+        self.inspector_output_id = None;
         if let Some(renderer) = &self.renderer {
             let (fg, bg) = renderer.default_colors();
             if let Some(tab) = self.tabs.last_mut() {
@@ -1698,6 +1745,8 @@ impl App {
         self.inspector_cache.mark_dirty();
         self.inspector_sel = None;
         self.inspector_sel_id = None;
+        self.inspector_output = None;
+        self.inspector_output_id = None;
         // Bar may vanish: remaining grids grow back.
         self.fit_all();
         self.needs_draw = true;
@@ -1715,6 +1764,8 @@ impl App {
         self.inspector_cache.mark_dirty();
         self.inspector_sel = None;
         self.inspector_sel_id = None;
+        self.inspector_output = None;
+        self.inspector_output_id = None;
         self.needs_draw = true;
         self.retitle();
     }
@@ -2075,6 +2126,8 @@ impl App {
                     self.focus = Focus::Terminal;
                     self.inspector_sel = None;
                     self.inspector_sel_id = None;
+                    self.inspector_output = None;
+                    self.inspector_output_id = None;
                 }
                 Key::Named(NamedKey::ArrowUp) => {
                     if self.focus == Focus::Rail && !self.tabs.is_empty() {
@@ -2140,6 +2193,8 @@ impl App {
                     self.inspector_cache.mark_dirty();
                     self.inspector_sel = None;
                     self.inspector_sel_id = None;
+                    self.inspector_output = None;
+                    self.inspector_output_id = None;
                     self.focus = Focus::Terminal;
                     self.retitle();
                 }
@@ -2154,6 +2209,8 @@ impl App {
                 self.focus = Focus::Terminal;
                 self.inspector_sel = None;
                 self.inspector_sel_id = None;
+                self.inspector_output = None;
+                self.inspector_output_id = None;
             } else {
                 self.needs_draw = true;
                 return;
@@ -2738,6 +2795,49 @@ impl ApplicationHandler for App {
                                         r.draw_text_row(insp_vp, row as u32, 2, &line, line_ink);
                                     }
                                 }
+                                // Bounded view of the selected command's recorded output.
+                                if let Some(output) = &self.inspector_output {
+                                    let start = 5 + snapshot.commands.len();
+                                    if start < insp_vp.rows as usize {
+                                        r.draw_text_row(
+                                            insp_vp,
+                                            start as u32,
+                                            0,
+                                            "Output",
+                                            zet_gpu::quad::Rgba::rgb(0.580, 0.659, 0.749),
+                                        );
+                                        let mut rendered = 0;
+                                        for line in output
+                                            .lines()
+                                            .take((insp_vp.rows as usize).saturating_sub(start + 1))
+                                        {
+                                            let row = start + 1 + rendered;
+                                            if row >= insp_vp.rows as usize {
+                                                break;
+                                            }
+                                            r.draw_text_row(
+                                                insp_vp,
+                                                row as u32,
+                                                0,
+                                                &panels::truncate_to_cells(
+                                                    line,
+                                                    insp_vp.cols as usize,
+                                                ),
+                                                zet_gpu::quad::Rgba::rgb(0.918, 0.953, 1.0),
+                                            );
+                                            rendered += 1;
+                                        }
+                                        if rendered == 0 {
+                                            r.draw_text_row(
+                                                insp_vp,
+                                                (start + 1) as u32,
+                                                0,
+                                                "No output recorded",
+                                                zet_gpu::quad::Rgba::rgb(0.580, 0.659, 0.749),
+                                            );
+                                        }
+                                    }
+                                }
                             } else {
                                 r.draw_text_row(
                                     insp_vp,
@@ -2893,6 +2993,8 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         chrome: panels::ChromeCache::new(),
         inspector_sel: None,
         inspector_sel_id: None,
+        inspector_output: None,
+        inspector_output_id: None,
         inspector_cache: panels::InspectorCache::new(),
         #[cfg(test)]
         chrome_query_count: 0,
@@ -3085,6 +3187,8 @@ mod layout_fit_tests {
             chrome: super::panels::ChromeCache::new(),
             inspector_sel: None,
             inspector_sel_id: None,
+            inspector_output: None,
+            inspector_output_id: None,
             inspector_cache: super::panels::InspectorCache::new(),
             #[cfg(test)]
             chrome_query_count: 0,
@@ -4074,6 +4178,73 @@ mod layout_fit_tests {
         app.refresh_inspector_at(later);
         assert_eq!(app.inspector_sel, None);
         assert_eq!(app.inspector_sel_id, None);
+    }
+
+    #[test]
+    fn inspector_selected_command_exposes_recorded_output() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let id = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo hi".to_string(),
+                output: "hi\n".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        app.refresh_inspector();
+        app.focus = super::Focus::Inspector;
+        app.inspector_sel = Some(4);
+        app.inspector_sel_id = Some(id);
+        let later = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        app.refresh_inspector_at(later);
+        assert_eq!(app.inspector_output_id, Some(id));
+        assert_eq!(app.inspector_output.as_deref(), Some("hi\n"));
+    }
+
+    #[test]
+    fn inspector_output_clears_on_session_replacement() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let id = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo hi".to_string(),
+                output: "hi".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        app.tabs[0].session_id = 10;
+        app.refresh_inspector();
+        app.inspector_sel = Some(4);
+        app.inspector_sel_id = Some(id);
+        app.inspector_output = Some("hi".to_string());
+        app.inspector_output_id = Some(id);
+
+        app.tabs[0].session_id = 20;
+        app.refresh_inspector();
+        assert_eq!(app.inspector_output, None);
+        assert_eq!(app.inspector_output_id, None);
     }
 
     #[test]

@@ -91,6 +91,11 @@ impl Recorder {
         &self.store
     }
 
+    /// The session key this recorder is bound to.
+    pub fn session(&self) -> &str {
+        &self.session
+    }
+
     /// Text being typed at the current prompt: (text, prompt column,
     /// absolute prompt row). Some only while typing (after B, before C);
     /// None while executing or idle. Ghost-text source for autocomplete.

@@ -91,6 +91,7 @@ P3-A1 displays recent recorded commands for the active session in the Contextual
 - Empty and unavailable states.
 - Bounded retrieval and cache refresh.
 - Keyboard selection within the Inspector.
+- Bounded view of a selected command's recorded output.
 - No terminal input leakage.
 
 ### Explicitly deferred
@@ -101,7 +102,6 @@ P3-A1 displays recent recorded commands for the active session in the Contextual
 - Agent telemetry.
 - Mission success claims.
 - Timeline navigation.
-- Command output viewer.
 - New schema migration.
 - New crate.
 
