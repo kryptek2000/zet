@@ -5,8 +5,8 @@
 
 ## Verified Git state
 
-- Remote master: `6ed65954b08053f37999459d8f48f3b495b46b67`
-- Local master: `6ed65954b08053f37999459d8f48f3b495b46b67`
+- Remote master: `91d409bd521a5127c2c14d22bd9ecc1513d2ba7b`
+- Local master: `91d409bd521a5127c2c14d22bd9ecc1513d2ba7b`
 - Canonical installed ZET source: `79a46069607f7b04bca0f8fb7d7d5f9ef98e6248`
 - Installed binary: `/home/bandit/.local/bin/zet`
 - Installed binary SHA-256: `812bb118a5bd050bb3370482b2cda950640913fbc1c2cb0dce587e0561be65a5`
@@ -30,16 +30,18 @@
 - Warm input-to-pixel latency < 3 ms: UNVERIFIED.
 - Idle RSS < 100 MB: PASS in reported comparison, but final release acceptance remains open.
 - `cat 100k lines` < 0.9 s: UNVERIFIED.
-- PR #35 performance hold remains open.
-- Owner visual approval remains required for final merge/release.
+- P2-B1 release-performance acceptance remains open; PR #35 has been merged into master.
+- Initial owner visual approval of the integrated candidate has been received; final merge/release approval remains with the owner.
 
 ## Current next milestone
 
-P3 — Evidence-linked commands and mission timeline.
+P3-A0 — Evidence-linked commands contract complete.
 
-Begin with an architect-approved bounded contract using existing command recording and provenance. No implementation is authorized by this documentation sync.
+The bounded P3-A1 contract is now documented in `docs/design/P3-A1-EVIDENCE-LINKED-COMMANDS-CONTRACT.md`. No P3 implementation is authorized yet.
 
 ## Open work
+
+- P3-A0 documentation and architecture checkpoint prepared; awaiting architect review.
 
 - Independent audit of the integrated flagship candidate.
 - Owner visual acceptance.

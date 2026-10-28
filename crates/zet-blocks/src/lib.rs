@@ -111,6 +111,12 @@ impl Store {
         let command = scrub_secrets(&block.command);
         let output = scrub_secrets(&block.output);
         let git_branch = scrub_secrets(&block.git_branch);
+        // Working-directory metadata is arbitrary user text and may carry
+        // token-shaped secrets (e.g. a directory whose name embeds a key).
+        // Scrub it at the same single write path as the other fields. This
+        // is best-effort: a path containing a secret becomes unusable as a
+        // path, which is the intended tradeoff.
+        let cwd = scrub_secrets(&block.cwd);
         self.conn.execute(
             "INSERT INTO blocks (session, command, output, exit_code, cwd, git_branch, duration_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -119,7 +125,7 @@ impl Store {
                 command,
                 output,
                 block.exit_code,
-                block.cwd,
+                cwd,
                 git_branch,
                 duration_ms,
             ],

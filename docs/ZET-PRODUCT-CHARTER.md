@@ -58,7 +58,6 @@ The mockup is *visual reference only*: no synthetic sessions, tests, agent telem
 - **GPT-6:** Lead Architect and coordinator.
 - **Beam Free:** Primary Implementor.
 - **GLM-5.3-Flash:** Independent Auditor.
-- **Project Owner:** Final product, design, merge and release authority.
 - **Audit principle:** author never signs off on their own change.
 
 ## Scope boundaries

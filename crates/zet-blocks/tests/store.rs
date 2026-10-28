@@ -250,3 +250,58 @@ fn recent_commands_empty_history_and_zero_limit() {
     assert!(store.recent_commands("s", 0).unwrap().is_empty());
     assert_eq!(store.count("s").unwrap(), 0);
 }
+
+#[test]
+fn append_scrubs_secret_shaped_cwd() {
+    let store = Store::open_in_memory().unwrap();
+    let mut b = sample("s1");
+    b.cwd = "/tmp/sk-abcdefghijklmnopqrstuvwxyz012345".to_string();
+    let id = store.append(&b).unwrap();
+    let got = store.get(id).unwrap();
+    assert_eq!(got.cwd, "/tmp/[REDACTED]");
+    assert!(!got.cwd.contains("abcdefghijklmnopqrstuvwxyz"));
+}
+
+#[test]
+fn legacy_raw_cwd_survives_read() {
+    let path =
+        std::env::temp_dir().join(format!("zet-blocks-legacy-{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "CREATE TABLE blocks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session TEXT NOT NULL,
+                command TEXT NOT NULL,
+                output TEXT NOT NULL DEFAULT '',
+                exit_code INTEGER NOT NULL DEFAULT 0,
+                cwd TEXT NOT NULL DEFAULT '',
+                git_branch TEXT NOT NULL DEFAULT '',
+                duration_ms INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO blocks (session, command, output, exit_code, cwd, git_branch, duration_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            rusqlite::params![
+                "s1",
+                "echo hi",
+                "hi",
+                0,
+                "/tmp/sk-abcdefghijklmnopqrstuvwxyz012345",
+                "",
+                3
+            ],
+        )
+        .unwrap();
+    }
+    let store = Store::open(path.to_str().unwrap()).unwrap();
+    let got = store.list("s1").unwrap();
+    assert_eq!(got.len(), 1);
+    // Legacy rows are returned as-is; UI layer is responsible for scrubbing.
+    assert!(got[0].cwd.contains("sk-"));
+    let _ = std::fs::remove_file(&path);
+}

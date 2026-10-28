@@ -217,6 +217,10 @@ struct App {
     rail_sel: usize,
     chrome: panels::ChromeCache,
     inspector_sel: Option<usize>,
+    /// Recorded block id backing the current command selection, scoped to
+    /// the active session/store. Visual row indices remain in
+    /// `inspector_sel`.
+    inspector_sel_id: Option<i64>,
     inspector_cache: panels::InspectorCache,
     #[cfg(test)]
     pub chrome_query_count: usize,
@@ -928,11 +932,13 @@ impl App {
             if self.focus == Focus::Inspector {
                 self.focus = Focus::Terminal;
                 self.inspector_sel = None;
+                self.inspector_sel_id = None;
             }
             return;
         }
         if self.inspector_cache.last_active != self.active {
             self.inspector_sel = None;
+            self.inspector_sel_id = None;
         }
         let phase = self
             .tabs
@@ -958,6 +964,7 @@ impl App {
             // Same session: retain the existing selection.
         } else if self.inspector_cache.last_session_id.is_some() {
             self.inspector_sel = None;
+            self.inspector_sel_id = None;
         }
         let cheap_changed = self.inspector_cache.cheap_changed(
             session_id,
@@ -970,33 +977,62 @@ impl App {
         if !cheap_changed && !self.inspector_cache.poll_due(now) {
             return;
         }
-        #[cfg(test)]
-        {
-            // Keep test builds quiet; no counters are required for the
-            // first Inspector slice.
-        }
         let session_id = self
             .tabs
             .get(self.active)
             .map(|tab| tab.session_id)
             .unwrap_or(0);
+        let block_count = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.recorder.as_ref())
+            .map(|recorder| recorder.block_count())
+            .unwrap_or(0);
+        if !cheap_changed && block_count == self.inspector_cache.last_blocks {
+            if let Some(id) = self.inspector_sel_id {
+                if !self
+                    .inspector_cache
+                    .snapshot()
+                    .map(|snapshot| snapshot.commands.iter().any(|command| command.id == id))
+                    .unwrap_or(false)
+                {
+                    self.inspector_sel = None;
+                    self.inspector_sel_id = None;
+                }
+            }
+            self.inspector_cache.mark_refreshed(now);
+            return;
+        }
         let snapshot = self.build_inspector_snapshot();
+        if let Some(id) = self.inspector_sel_id {
+            if let Some(pos) = snapshot
+                .commands
+                .iter()
+                .position(|command| command.id == id)
+            {
+                self.inspector_sel = Some(4 + pos);
+            } else {
+                self.inspector_sel = None;
+                self.inspector_sel_id = None;
+            }
+        }
         self.inspector_cache.commit_refresh(
             session_id,
             self.active,
             phase,
-            cwd,
+            cwd.clone(),
             tab_count,
             active_dead,
             snapshot,
             now,
         );
+        self.inspector_cache.last_blocks = block_count;
     }
 
     fn build_inspector_snapshot(&self) -> panels::InspectorSnapshot {
         let tab = self.tabs.get(self.active);
         let raw_cwd = tab.map(|tab| shell_cwd(&tab.session)).unwrap_or_default();
-        let cwd = panels::sanitize_inspector_text(&raw_cwd, 64);
+        let cwd = panels::sanitize_inspector_text(&zet_blocks::scrub_secrets(&raw_cwd), 64);
         let state = tab
             .map(|tab| {
                 if tab.dead {
@@ -1020,12 +1056,48 @@ impl App {
         } else {
             cwd
         };
+        // Real recorded commands for the active session. Bounded to 8 and
+        // without output blobs (recent_commands). Scrub secrets at display
+        // time too, so legacy unsanitized rows cannot leak.
+        let commands: Vec<panels::CommandRow> = tab
+            .and_then(|tab| tab.recorder.as_ref())
+            .map(|recorder| {
+                recorder
+                    .recent_commands(8)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|block| panels::CommandRow {
+                        id: block.id,
+                        command: zet_blocks::scrub_secrets(&block.command),
+                        exit: block.exit_code.to_string(),
+                        duration: format!("{}ms", block.duration_ms),
+                        cwd: panels::sanitize_inspector_text(
+                            &zet_blocks::scrub_secrets(&block.cwd),
+                            64,
+                        ),
+                        git_branch: zet_blocks::scrub_secrets(&block.git_branch),
+                        provenance: panels::Provenance::Observed,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Normalise empty cwd to "—".
+        let commands = commands
+            .into_iter()
+            .map(|mut row| {
+                if row.cwd.is_empty() {
+                    row.cwd = "—".to_string();
+                }
+                row
+            })
+            .collect();
         panels::InspectorSnapshot {
             active: self.active,
             session,
             cwd,
             state,
             exit,
+            commands,
         }
     }
 
@@ -1149,13 +1221,12 @@ impl App {
                     .unwrap_or_default()
                     .into_iter()
                     .map(|block| panels::CommandRow {
+                        id: block.id,
                         command: block.command,
                         exit: block.exit_code.to_string(),
-                        duration: if block.duration_ms == 0 {
-                            "—".to_string()
-                        } else {
-                            format!("{}ms", block.duration_ms)
-                        },
+                        duration: format!("{}ms", block.duration_ms),
+                        cwd: block.cwd,
+                        git_branch: block.git_branch,
                         provenance: panels::Provenance::Observed,
                     })
                     .collect()
@@ -1215,6 +1286,7 @@ impl App {
         if !self.layout.inspector {
             self.focus = Focus::Terminal;
             self.inspector_sel = None;
+            self.inspector_sel_id = None;
         }
         self.inspector_cache.mark_dirty();
         self.fit_all();
@@ -1243,6 +1315,7 @@ impl App {
                 self.rail_sel = seg;
                 self.inspector_cache.mark_dirty();
                 self.inspector_sel = None;
+                self.inspector_sel_id = None;
                 self.focus = Focus::Terminal;
                 self.needs_draw = true;
                 self.retitle();
@@ -1276,11 +1349,28 @@ impl App {
             if x >= left && x < right && y >= top && y < bottom {
                 self.focus = Focus::Inspector;
                 let row = ((y - top) / ch as f64).floor() as usize;
-                self.inspector_sel = if (1..=4).contains(&row) && (row as u32) < insp_vp.rows {
+                let cmd_count = self
+                    .inspector_cache
+                    .snapshot()
+                    .map(|s| s.commands.len())
+                    .unwrap_or(0);
+                let max_row = 4 + cmd_count;
+                let new_sel = if (1..=max_row).contains(&row) && (row as u32) < insp_vp.rows {
                     Some(row - 1)
                 } else {
                     None
                 };
+                self.inspector_sel = new_sel;
+                self.inspector_sel_id = new_sel.and_then(|index| {
+                    if index >= 4 {
+                        self.inspector_cache
+                            .snapshot()
+                            .and_then(|s| s.commands.get(index - 4))
+                            .map(|command| command.id)
+                    } else {
+                        None
+                    }
+                });
                 self.needs_draw = true;
                 return;
             }
@@ -1578,6 +1668,7 @@ impl App {
         self.rail_sel = self.active;
         self.inspector_cache.mark_dirty();
         self.inspector_sel = None;
+        self.inspector_sel_id = None;
         if let Some(renderer) = &self.renderer {
             let (fg, bg) = renderer.default_colors();
             if let Some(tab) = self.tabs.last_mut() {
@@ -1606,6 +1697,7 @@ impl App {
         self.rail_sel = self.active;
         self.inspector_cache.mark_dirty();
         self.inspector_sel = None;
+        self.inspector_sel_id = None;
         // Bar may vanish: remaining grids grow back.
         self.fit_all();
         self.needs_draw = true;
@@ -1622,6 +1714,7 @@ impl App {
         self.rail_sel = self.active;
         self.inspector_cache.mark_dirty();
         self.inspector_sel = None;
+        self.inspector_sel_id = None;
         self.needs_draw = true;
         self.retitle();
     }
@@ -1981,16 +2074,34 @@ impl App {
                 Key::Named(NamedKey::Escape) => {
                     self.focus = Focus::Terminal;
                     self.inspector_sel = None;
+                    self.inspector_sel_id = None;
                 }
                 Key::Named(NamedKey::ArrowUp) => {
                     if self.focus == Focus::Rail && !self.tabs.is_empty() {
                         self.rail_sel = self.rail_sel.saturating_sub(1);
                     }
                     if self.focus == Focus::Inspector {
-                        self.inspector_sel = match self.inspector_sel {
-                            Some(0) | None => Some(3),
-                            Some(n) => Some(n - 1),
-                        };
+                        let n = 4 + self
+                            .inspector_cache
+                            .snapshot()
+                            .map(|s| s.commands.len())
+                            .unwrap_or(0);
+                        if n > 0 {
+                            self.inspector_sel = match self.inspector_sel {
+                                Some(0) | None => Some(n - 1),
+                                Some(x) => Some(x - 1),
+                            };
+                            self.inspector_sel_id = self.inspector_sel.and_then(|index| {
+                                if index >= 4 {
+                                    self.inspector_cache
+                                        .snapshot()
+                                        .and_then(|s| s.commands.get(index - 4))
+                                        .map(|command| command.id)
+                                } else {
+                                    None
+                                }
+                            });
+                        }
                     }
                 }
                 Key::Named(NamedKey::ArrowDown) => {
@@ -1998,11 +2109,28 @@ impl App {
                         self.rail_sel = (self.rail_sel + 1).min(self.tabs.len() - 1);
                     }
                     if self.focus == Focus::Inspector {
-                        self.inspector_sel = match self.inspector_sel {
-                            Some(3) => Some(0),
-                            Some(n) => Some(n + 1),
-                            None => Some(0),
-                        };
+                        let n = 4 + self
+                            .inspector_cache
+                            .snapshot()
+                            .map(|s| s.commands.len())
+                            .unwrap_or(0);
+                        if n > 0 {
+                            self.inspector_sel = match self.inspector_sel {
+                                Some(x) if x + 1 >= n => Some(0),
+                                Some(x) => Some(x + 1),
+                                None => Some(0),
+                            };
+                            self.inspector_sel_id = self.inspector_sel.and_then(|index| {
+                                if index >= 4 {
+                                    self.inspector_cache
+                                        .snapshot()
+                                        .and_then(|s| s.commands.get(index - 4))
+                                        .map(|command| command.id)
+                                } else {
+                                    None
+                                }
+                            });
+                        }
                     }
                 }
                 Key::Named(NamedKey::Enter)
@@ -2011,6 +2139,7 @@ impl App {
                     self.active = self.rail_sel;
                     self.inspector_cache.mark_dirty();
                     self.inspector_sel = None;
+                    self.inspector_sel_id = None;
                     self.focus = Focus::Terminal;
                     self.retitle();
                 }
@@ -2024,6 +2153,7 @@ impl App {
                 // the emergency-cancellation behavior.
                 self.focus = Focus::Terminal;
                 self.inspector_sel = None;
+                self.inspector_sel_id = None;
             } else {
                 self.needs_draw = true;
                 return;
@@ -2568,6 +2698,46 @@ impl ApplicationHandler for App {
                                     &format!("Cwd {}", snapshot.cwd),
                                     zet_gpu::quad::Rgba::rgb(0.72, 0.78, 0.86),
                                 );
+                                // Recent recorded commands.
+                                if snapshot.commands.is_empty() {
+                                    if 5 < insp_vp.rows as usize {
+                                        r.draw_text_row(
+                                            insp_vp,
+                                            5,
+                                            0,
+                                            "No recorded commands",
+                                            zet_gpu::quad::Rgba::rgb(0.55, 0.62, 0.72),
+                                        );
+                                    }
+                                } else {
+                                    for (i, cmd) in snapshot.commands.iter().enumerate() {
+                                        let row = 5 + i;
+                                        if row >= insp_vp.rows as usize {
+                                            break;
+                                        }
+                                        let failed = !matches!(cmd.exit.as_str(), "0" | "—");
+                                        let marker = if failed { "×" } else { "›" };
+                                        let marker_ink = if failed {
+                                            zet_gpu::quad::Rgba::rgb(0.95, 0.35, 0.35)
+                                        } else {
+                                            zet_gpu::quad::Rgba::rgb(0.30, 0.85, 0.75)
+                                        };
+                                        r.draw_text_row(insp_vp, row as u32, 0, marker, marker_ink);
+                                        let budget = insp_vp.cols.saturating_sub(2);
+                                        let line = panels::format_command_row(
+                                            &cmd.command,
+                                            &cmd.exit,
+                                            &cmd.duration,
+                                            budget,
+                                        );
+                                        let line_ink = if failed {
+                                            zet_gpu::quad::Rgba::rgb(0.95, 0.35, 0.35)
+                                        } else {
+                                            zet_gpu::quad::Rgba::rgb(0.72, 0.78, 0.86)
+                                        };
+                                        r.draw_text_row(insp_vp, row as u32, 2, &line, line_ink);
+                                    }
+                                }
                             } else {
                                 r.draw_text_row(
                                     insp_vp,
@@ -2722,6 +2892,7 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         rail_sel: 0,
         chrome: panels::ChromeCache::new(),
         inspector_sel: None,
+        inspector_sel_id: None,
         inspector_cache: panels::InspectorCache::new(),
         #[cfg(test)]
         chrome_query_count: 0,
@@ -2913,6 +3084,7 @@ mod layout_fit_tests {
             rail_sel: 0,
             chrome: super::panels::ChromeCache::new(),
             inspector_sel: None,
+            inspector_sel_id: None,
             inspector_cache: super::panels::InspectorCache::new(),
             #[cfg(test)]
             chrome_query_count: 0,
@@ -3787,6 +3959,121 @@ mod layout_fit_tests {
         assert_eq!(app.focus, super::Focus::Inspector);
         assert_eq!(app.inspector_sel, None);
         assert_eq!(app.inspector_cache.snapshot().unwrap().active, 1);
+    }
+
+    #[test]
+    fn inspector_selection_follows_recorded_command_identity() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let mut ids = Vec::new();
+        for i in 0..9 {
+            let id = store
+                .append(&zet_blocks::Block {
+                    id: 0,
+                    session: "session-a".to_string(),
+                    command: format!("echo {i}"),
+                    output: String::new(),
+                    exit_code: 0,
+                    cwd: "/tmp".to_string(),
+                    git_branch: String::new(),
+                    duration_ms: 1,
+                })
+                .unwrap();
+            ids.push(id);
+        }
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        app.refresh_inspector();
+        assert_eq!(app.inspector_cache.snapshot().unwrap().commands.len(), 8);
+
+        // Select the command whose identity should survive a bounded-list shift.
+        let selected_id = ids[5];
+        let initial_index = app
+            .inspector_cache
+            .snapshot()
+            .unwrap()
+            .commands
+            .iter()
+            .position(|command| command.id == selected_id)
+            .unwrap()
+            + 4;
+        app.focus = super::Focus::Inspector;
+        app.inspector_sel = Some(initial_index);
+        app.inspector_sel_id = Some(selected_id);
+
+        // Append a ninth... actually tenth command, evicting the oldest.
+        app.tabs[0]
+            .recorder
+            .as_ref()
+            .unwrap()
+            .store()
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo 9".to_string(),
+                output: String::new(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+
+        let later = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        app.refresh_inspector_at(later);
+        let snapshot = app.inspector_cache.snapshot().unwrap();
+        let new_index = snapshot
+            .commands
+            .iter()
+            .position(|command| command.id == selected_id)
+            .map(|pos| pos + 4);
+        assert_eq!(app.inspector_sel, new_index);
+        assert_eq!(app.inspector_sel_id, Some(selected_id));
+    }
+
+    #[test]
+    fn inspector_selection_clears_when_selected_command_evicted() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let mut ids = Vec::new();
+        for i in 0..9 {
+            let id = store
+                .append(&zet_blocks::Block {
+                    id: 0,
+                    session: "session-a".to_string(),
+                    command: format!("echo {i}"),
+                    output: String::new(),
+                    exit_code: 0,
+                    cwd: "/tmp".to_string(),
+                    git_branch: String::new(),
+                    duration_ms: 1,
+                })
+                .unwrap();
+            ids.push(id);
+        }
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        app.refresh_inspector();
+
+        let evicted_id = ids[0];
+        // echo 0 is already evicted from the bounded list; force selection to
+        // an identity that cannot be present.
+        app.focus = super::Focus::Inspector;
+        app.inspector_sel = Some(4);
+        app.inspector_sel_id = Some(evicted_id);
+
+        let later = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        app.refresh_inspector_at(later);
+        assert_eq!(app.inspector_sel, None);
+        assert_eq!(app.inspector_sel_id, None);
     }
 
     #[test]
