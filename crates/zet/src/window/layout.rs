@@ -9,15 +9,20 @@
 //! resolver into `App` is deliberately deferred to a later slice so that
 //! Slice 1 changes no rendering or PTY behaviour.
 
-/// Default width of the mission rail, in terminal columns.
-pub const RAIL_COLS: u32 = 24;
-/// Default width of the inspector, in terminal columns.
+/// Minimum width of the mission rail, in terminal columns. The resolver grows
+/// the rail toward the Aperture target proportion on wider windows.
+pub const RAIL_COLS: u32 = 22;
+/// Minimum width of the inspector, in terminal columns. The resolver grows
+/// the Inspector toward the Aperture target proportion on wider windows.
 pub const INSPECTOR_COLS: u32 = 32;
 /// The terminal never gets narrower than this, even if a panel has to be
 /// refused.
 pub const MIN_TERM_COLS: u32 = 40;
 /// The terminal never gets shorter than this.
 pub const MIN_TERM_ROWS: u32 = 10;
+
+const RAIL_PERCENT: u32 = 18;
+const INSPECTOR_PERCENT: u32 = 26;
 
 /// Which chrome regions are visible. Both flags are independent; the named
 /// layouts are just presets over the same two flags.
@@ -206,9 +211,13 @@ fn resolve_with_mode(
     mode: Option<LayoutMode>,
     bar_rows: usize,
 ) -> FrameLayout {
-    let mut rail_cols = if requested.rail { RAIL_COLS } else { 0 };
+    let mut rail_cols = if requested.rail {
+        proportional_panel_cols(cols, RAIL_PERCENT, RAIL_COLS)
+    } else {
+        0
+    };
     let mut inspector_cols = if requested.inspector {
-        INSPECTOR_COLS
+        proportional_panel_cols(cols, INSPECTOR_PERCENT, INSPECTOR_COLS)
     } else {
         0
     };
@@ -217,7 +226,7 @@ fn resolve_with_mode(
     if requested.inspector
         && cols
             .saturating_sub(rail_cols)
-            .saturating_sub(INSPECTOR_COLS)
+            .saturating_sub(inspector_cols)
             < MIN_TERM_COLS
     {
         inspector_cols = 0;
@@ -281,6 +290,14 @@ fn resolve_with_mode(
         inspector,
         degraded,
     }
+}
+
+/// Resolve a panel width from the approved Aperture proportions while keeping
+/// the small-window minimums used by the native text layout. Ceiling avoids a
+/// visible one-column shortfall at common desktop widths.
+fn proportional_panel_cols(cols: u32, percent: u32, minimum: u32) -> u32 {
+    let target = ((cols as u64 * percent as u64).saturating_add(99) / 100) as u32;
+    target.max(minimum).min(cols)
 }
 
 #[cfg(test)]
@@ -364,6 +381,19 @@ mod tests {
                 + frame.inspector.map_or(0, |v| v.cols);
             assert_eq!(used, cols);
         }
+    }
+
+    #[test]
+    fn desktop_workspace_tracks_aperture_proportions() {
+        let frame = resolve(160, 50, LayoutMode::MissionControl.layout(), 1);
+        let rail = frame.rail.expect("rail at desktop width");
+        let inspector = frame.inspector.expect("inspector at desktop width");
+        assert_eq!(rail.cols, 29);
+        assert_eq!(inspector.cols, 42);
+        assert_eq!(frame.term.cols, 89);
+        assert!(rail.cols * 100 / 160 >= 17);
+        assert!(inspector.cols * 100 / 160 >= 25);
+        assert!(frame.term.cols * 100 / 160 >= 55);
     }
 
     #[test]
@@ -451,7 +481,7 @@ mod tests {
     #[test]
     fn inspector_refused_keeps_rail() {
         let layout = LayoutMode::MissionControl.layout();
-        let frame = resolve(95, 40, layout, 0);
+        let frame = resolve(93, 40, layout, 0);
         assert!(frame.rail.is_some());
         assert!(frame.inspector.is_none());
         assert_eq!(frame.degraded, Some(Degraded::InspectorRefused));
@@ -511,15 +541,15 @@ mod tests {
             rail: true,
             inspector: false,
         };
-        let refused = resolve(63, 24, layout, 0);
+        let refused = resolve(61, 24, layout, 0);
         assert!(refused.rail.is_none());
         assert_eq!(refused.degraded, Some(Degraded::RailRefused));
-        assert_eq!(refused.term.cols, 63);
+        assert_eq!(refused.term.cols, 61);
 
-        let shown = resolve(64, 24, layout, 0);
+        let shown = resolve(62, 24, layout, 0);
         assert!(shown.rail.is_some());
         assert_eq!(shown.degraded, None);
-        assert_eq!(shown.term.cols, 64 - RAIL_COLS);
+        assert_eq!(shown.term.cols, 62 - RAIL_COLS);
     }
 
     #[test]
@@ -546,16 +576,13 @@ mod tests {
         let cases = [
             (39u32, Degraded::BothRefused, true, true, 39u32),
             (40, Degraded::BothRefused, true, true, 40),
-            (63, Degraded::BothRefused, true, true, 63),
-            (64, Degraded::InspectorRefused, false, true, 40),
-            (95, Degraded::InspectorRefused, false, true, 71),
-            (96, Degraded::InspectorRefused, false, false, 40),
+            (61, Degraded::BothRefused, true, true, 61),
+            (62, Degraded::InspectorRefused, false, true, 40),
+            (93, Degraded::InspectorRefused, false, true, 71),
         ];
-        // 96 is both visible, handled separately below.
+        // 94 is the first width where both minimum panel widths and the
+        // minimum terminal width coexist, handled separately below.
         for (cols, degraded, rail_refused, inspector_refused, term_cols) in cases {
-            if cols == 96 {
-                continue;
-            }
             let frame = resolve(cols, 24, layout, 0);
             assert_eq!(frame.degraded, Some(degraded));
             assert_eq!(frame.rail.is_none(), rail_refused);
@@ -563,7 +590,7 @@ mod tests {
             assert_eq!(frame.term.cols, term_cols);
         }
 
-        let shown = resolve(96, 24, layout, 0);
+        let shown = resolve(94, 24, layout, 0);
         assert!(shown.rail.is_some());
         assert!(shown.inspector.is_some());
         assert_eq!(shown.degraded, None);

@@ -10,7 +10,7 @@ use winit::window::Window;
 use crate::atlas::{Atlas, Slot};
 use crate::quad::{cell_quad, solid_rect_px, solid_triangle_px, Rgba, Vertex};
 use crate::text::Shaper;
-use crate::theme::NEON_GENESIS;
+use crate::theme::APERTURE_INSTRUMENT;
 
 const ATLAS_COLS: u32 = 16;
 const ATLAS_ROWS: u32 = 16;
@@ -66,74 +66,74 @@ impl fmt::Display for InitError {
 impl std::error::Error for InitError {}
 
 /// Renderer clear color as a quad tint (for inverted cursor glyphs).
-const BG_RGBA: Rgba = NEON_GENESIS.terminal;
+const BG_RGBA: Rgba = APERTURE_INSTRUMENT.terminal;
 
 /// Ghost-text ink: dimmed so suggestions read as preview, not content.
-const GHOST_RGBA: Rgba = NEON_GENESIS.muted;
+const GHOST_RGBA: Rgba = APERTURE_INSTRUMENT.muted;
 
 /// Mouse-selection fill: dark mint-teal, solid (no blending) with white
 /// ink — distinct from the white-block cursor.
-const SEL_RGBA: Rgba = NEON_GENESIS.selected;
+const SEL_RGBA: Rgba = APERTURE_INSTRUMENT.selected;
 
 /// Tab bar: near-black strip; the active segment lifts lighter with
 /// white ink, inactive segments dim. Same quad machinery as cells.
-pub const TABBAR_BG: Rgba = NEON_GENESIS.top_bar;
-pub const TAB_ACTIVE_BG: Rgba = NEON_GENESIS.active;
-pub const TAB_HOVER_BG: Rgba = NEON_GENESIS.surface_raised;
-pub const TAB_DIM_INK: Rgba = NEON_GENESIS.secondary;
+pub const TABBAR_BG: Rgba = APERTURE_INSTRUMENT.top_bar;
+pub const TAB_ACTIVE_BG: Rgba = APERTURE_INSTRUMENT.active;
+pub const TAB_HOVER_BG: Rgba = APERTURE_INSTRUMENT.surface_raised;
+pub const TAB_DIM_INK: Rgba = APERTURE_INSTRUMENT.secondary;
 /// Inactive tab label ink; aliases the historical dim ink.
 pub const TAB_INACTIVE_INK: Rgba = TAB_DIM_INK;
 /// One-cell active-tab marker at the left edge of the active segment.
-pub const TAB_ACTIVE_ACCENT: Rgba = NEON_GENESIS.cyan;
+pub const TAB_ACTIVE_ACCENT: Rgba = APERTURE_INSTRUMENT.cyan;
 /// One-cell separator between tab segments.
-pub const TAB_SEPARATOR: Rgba = NEON_GENESIS.border;
+pub const TAB_SEPARATOR: Rgba = APERTURE_INSTRUMENT.border;
 
 /// Rail panel surface: one step above the terminal's near-black grid.
-pub const RAIL_BG: Rgba = NEON_GENESIS.surface;
+pub const RAIL_BG: Rgba = APERTURE_INSTRUMENT.surface;
 /// Rail right-edge rule separating chrome from the live terminal.
-pub const RAIL_BORDER: Rgba = NEON_GENESIS.border;
+pub const RAIL_BORDER: Rgba = APERTURE_INSTRUMENT.border;
 /// Selected session-card fill.
-pub const RAIL_SELECTED_BG: Rgba = NEON_GENESIS.selected;
+pub const RAIL_SELECTED_BG: Rgba = APERTURE_INSTRUMENT.selected;
 /// Subtle fill for the active session when it is not the rail selection.
-pub const RAIL_ACTIVE_BG: Rgba = NEON_GENESIS.active;
+pub const RAIL_ACTIVE_BG: Rgba = APERTURE_INSTRUMENT.active;
 /// Card hover surface, reserved for pointer-state wiring.
-pub const RAIL_HOVER_BG: Rgba = NEON_GENESIS.surface_raised;
+pub const RAIL_HOVER_BG: Rgba = APERTURE_INSTRUMENT.surface_raised;
 /// Brand and active-session name ink.
-pub const RAIL_HEADER_INK: Rgba = NEON_GENESIS.text;
+pub const RAIL_HEADER_INK: Rgba = APERTURE_INSTRUMENT.text;
 /// Section labels (`SESSIONS`, `OBSERVED COMMANDS`).
-pub const RAIL_SECTION_INK: Rgba = NEON_GENESIS.secondary;
+pub const RAIL_SECTION_INK: Rgba = APERTURE_INSTRUMENT.secondary;
 /// Session names and command text.
-pub const RAIL_TEXT_INK: Rgba = NEON_GENESIS.text;
+pub const RAIL_TEXT_INK: Rgba = APERTURE_INSTRUMENT.text;
 /// Paths, counts and secondary detail.
-pub const RAIL_DIM_INK: Rgba = NEON_GENESIS.muted;
+pub const RAIL_DIM_INK: Rgba = APERTURE_INSTRUMENT.muted;
 /// Restrained cyan marker for the active/focused rail state.
-pub const RAIL_ACCENT: Rgba = NEON_GENESIS.cyan;
+pub const RAIL_ACCENT: Rgba = APERTURE_INSTRUMENT.cyan;
 /// Brighter focus marker used only while the rail owns keyboard focus.
-pub const RAIL_FOCUS: Rgba = NEON_GENESIS.cyan;
+pub const RAIL_FOCUS: Rgba = APERTURE_INSTRUMENT.cyan;
 /// Live/healthy session state.
-pub const RAIL_OK: Rgba = NEON_GENESIS.teal;
+pub const RAIL_OK: Rgba = APERTURE_INSTRUMENT.teal;
 /// Exited/failed session state.
-pub const RAIL_BAD: Rgba = NEON_GENESIS.red;
+pub const RAIL_BAD: Rgba = APERTURE_INSTRUMENT.red;
 /// Footer strip surface and ink.
-pub const RAIL_FOOTER_BG: Rgba = NEON_GENESIS.footer;
-pub const RAIL_FOOTER_INK: Rgba = NEON_GENESIS.secondary;
+pub const RAIL_FOOTER_BG: Rgba = APERTURE_INSTRUMENT.footer;
+pub const RAIL_FOOTER_INK: Rgba = APERTURE_INSTRUMENT.secondary;
 
 /// Shared contextual-panel tokens. These are public so the composition
 /// layer can use the same semantic surfaces as the rail and tab bar.
-pub const PANEL_BG: Rgba = NEON_GENESIS.surface;
-pub const PANEL_RAISED: Rgba = NEON_GENESIS.surface_raised;
-pub const PANEL_INSET: Rgba = NEON_GENESIS.surface_inset;
-pub const PANEL_BORDER: Rgba = NEON_GENESIS.border;
-pub const PANEL_BORDER_STRONG: Rgba = NEON_GENESIS.border_strong;
-pub const PANEL_TEXT: Rgba = NEON_GENESIS.text;
-pub const PANEL_SECONDARY: Rgba = NEON_GENESIS.secondary;
-pub const PANEL_MUTED: Rgba = NEON_GENESIS.muted;
-pub const PANEL_CYAN: Rgba = NEON_GENESIS.cyan;
-pub const PANEL_VIOLET: Rgba = NEON_GENESIS.violet;
-pub const PANEL_TEAL: Rgba = NEON_GENESIS.teal;
-pub const PANEL_RED: Rgba = NEON_GENESIS.red;
-pub const PANEL_AMBER: Rgba = NEON_GENESIS.amber;
-pub const PANEL_DANGER: Rgba = NEON_GENESIS.danger;
+pub const PANEL_BG: Rgba = APERTURE_INSTRUMENT.surface;
+pub const PANEL_RAISED: Rgba = APERTURE_INSTRUMENT.surface_raised;
+pub const PANEL_INSET: Rgba = APERTURE_INSTRUMENT.surface_inset;
+pub const PANEL_BORDER: Rgba = APERTURE_INSTRUMENT.border;
+pub const PANEL_BORDER_STRONG: Rgba = APERTURE_INSTRUMENT.border_strong;
+pub const PANEL_TEXT: Rgba = APERTURE_INSTRUMENT.text;
+pub const PANEL_SECONDARY: Rgba = APERTURE_INSTRUMENT.secondary;
+pub const PANEL_MUTED: Rgba = APERTURE_INSTRUMENT.muted;
+pub const PANEL_CYAN: Rgba = APERTURE_INSTRUMENT.cyan;
+pub const PANEL_VIOLET: Rgba = APERTURE_INSTRUMENT.violet;
+pub const PANEL_TEAL: Rgba = APERTURE_INSTRUMENT.teal;
+pub const PANEL_RED: Rgba = APERTURE_INSTRUMENT.red;
+pub const PANEL_AMBER: Rgba = APERTURE_INSTRUMENT.amber;
+pub const PANEL_DANGER: Rgba = APERTURE_INSTRUMENT.danger;
 
 /// Search hits: amber wash for matches, orange for the current one
 /// (white ink, selection precedent — fill + re-inked glyphs).
@@ -415,9 +415,9 @@ impl Renderer {
             queue,
             config,
             bg: wgpu::Color {
-                r: NEON_GENESIS.terminal.r as f64,
-                g: NEON_GENESIS.terminal.g as f64,
-                b: NEON_GENESIS.terminal.b as f64,
+                r: APERTURE_INSTRUMENT.terminal.r as f64,
+                g: APERTURE_INSTRUMENT.terminal.g as f64,
+                b: APERTURE_INSTRUMENT.terminal.b as f64,
                 a: 1.0,
             },
             pipeline,
@@ -970,6 +970,127 @@ impl Renderer {
             let next = points[(i + 1) % points.len()];
             self.quads
                 .extend(solid_triangle_px(center, points[i], next, atlas_uv, color));
+        }
+    }
+
+    /// Stage an architectural panel with clipped corners. Aperture uses this
+    /// for the global frame and selected evidence surfaces; ordinary rows can
+    /// continue to use the cheaper rectangular/rounded primitives.
+    pub fn draw_chamfered_rect_px(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        cut: u32,
+        color: Rgba,
+    ) {
+        if width == 0 || height == 0 || x >= self.config.width || y >= self.config.height {
+            return;
+        }
+        let Some(atlas_uv) = self.solid_uv() else {
+            return;
+        };
+        let x1 = x.saturating_add(width).min(self.config.width);
+        let y1 = y.saturating_add(height).min(self.config.height);
+        if x1 <= x || y1 <= y {
+            return;
+        }
+        let cut = cut.min((x1 - x) / 2).min((y1 - y) / 2) as f32;
+        if cut < 0.5 {
+            self.quads.extend(solid_rect_px(
+                x as f32, y as f32, x1 as f32, y1 as f32, atlas_uv, color,
+            ));
+            return;
+        }
+        let x0 = x as f32;
+        let y0 = y as f32;
+        let x1 = x1 as f32;
+        let y1 = y1 as f32;
+        let points = [
+            [x0 + cut, y0],
+            [x1 - cut, y0],
+            [x1, y0 + cut],
+            [x1, y1 - cut],
+            [x1 - cut, y1],
+            [x0 + cut, y1],
+            [x0, y1 - cut],
+            [x0, y0 + cut],
+        ];
+        let center = [(x0 + x1) * 0.5, (y0 + y1) * 0.5];
+        for index in 0..points.len() {
+            self.quads.extend(solid_triangle_px(
+                center,
+                points[index],
+                points[(index + 1) % points.len()],
+                atlas_uv,
+                color,
+            ));
+        }
+    }
+
+    /// A one-pixel precision border plus a chamfered inset surface.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_chamfered_panel_px(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        cut: u32,
+        fill: Rgba,
+        border: Rgba,
+    ) {
+        self.draw_chamfered_rect_px(x, y, width, height, cut, border);
+        if width > 2 && height > 2 {
+            self.draw_chamfered_rect_px(
+                x.saturating_add(1),
+                y.saturating_add(1),
+                width.saturating_sub(2),
+                height.saturating_sub(2),
+                cut.saturating_sub(1),
+                fill,
+            );
+        }
+    }
+
+    /// Draw the compact geometric Aperture identity mark. It is a stylized Z
+    /// built from three precise bars, so it remains legible at small DPI and
+    /// does not depend on a bundled logo font or an external image asset.
+    pub fn draw_aperture_mark_px(&mut self, x: u32, y: u32, size: u32, color: Rgba) {
+        let Some(atlas_uv) = self.solid_uv() else {
+            return;
+        };
+        if size < 4 {
+            return;
+        }
+        let x = x as f32;
+        let y = y as f32;
+        let s = size as f32;
+        let t = (s * 0.22).max(2.0);
+        let polygon = |a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2]| {
+            [
+                solid_triangle_px(a, b, c, atlas_uv, color),
+                solid_triangle_px(a, c, d, atlas_uv, color),
+            ]
+        };
+        let bars = [
+            polygon([x, y], [x + s, y], [x + s - t, y + t], [x + t, y + t]),
+            polygon(
+                [x + s - t, y + t],
+                [x + s, y + t],
+                [x + t, y + s - t],
+                [x, y + s - t],
+            ),
+            polygon(
+                [x + t, y + s - t],
+                [x + s, y + s - t],
+                [x + s - t, y + s],
+                [x, y + s],
+            ),
+        ];
+        for bar in bars {
+            self.quads.extend(bar.into_iter().flatten());
         }
     }
 

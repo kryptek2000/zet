@@ -30,32 +30,37 @@ pub struct Theme {
     pub footer: Rgba,
 }
 
-/// Default ZET visual language: deep-space graphite with restrained cyan,
-/// violet, teal, red and amber semantic accents.
-pub const NEON_GENESIS: Theme = Theme {
+/// Owner-approved Aperture Instrument visual language: near-black graphite
+/// with restrained cyan, violet, teal, red and amber semantic accents.
+pub const APERTURE_INSTRUMENT: Theme = Theme {
     space: Rgba::from_hex(0x080B13),
     terminal: Rgba::from_hex(0x101522),
-    surface: Rgba::from_hex(0x0D1422),
+    surface: Rgba::from_hex(0x0B111D),
     surface_raised: Rgba::from_hex(0x141C2B),
-    surface_inset: Rgba::from_hex(0x0A101C),
+    surface_inset: Rgba::from_hex(0x080B13),
     border: Rgba::from_hex(0x27354B),
     border_strong: Rgba::from_hex(0x34506C),
     text: Rgba::from_hex(0xE8F1FF),
     secondary: Rgba::from_hex(0x9AAFC6),
-    // Lifted slightly from the initial reference value so compact metadata
-    // remains readable against the deep-space surfaces at normal DPI.
+    // Lifted from the reference's muted anchor so compact metadata meets
+    // the existing native chrome contrast gate on dark graphite surfaces.
     muted: Rgba::from_hex(0x7188A1),
     cyan: Rgba::from_hex(0x49DFFF),
     violet: Rgba::from_hex(0xAA8AFF),
     teal: Rgba::from_hex(0x46D4BD),
     red: Rgba::from_hex(0xFF667B),
     amber: Rgba::from_hex(0xF0B96A),
-    selected: Rgba::from_hex(0x1B2941),
-    active: Rgba::from_hex(0x17263B),
-    danger: Rgba::from_hex(0x261B2A),
-    top_bar: Rgba::from_hex(0x0B111D),
+    selected: Rgba::from_hex(0x132936),
+    active: Rgba::from_hex(0x10222D),
+    danger: Rgba::from_hex(0x26151F),
+    top_bar: Rgba::from_hex(0x080B13),
     footer: Rgba::from_hex(0x0A101B),
 };
+
+/// Compatibility name for code and downstream theme experiments that still
+/// refer to the earlier Neon Genesis token set. The values are now the
+/// owner-approved Aperture Instrument palette.
+pub const NEON_GENESIS: Theme = APERTURE_INSTRUMENT;
 
 #[cfg(test)]
 mod tests {
@@ -73,16 +78,28 @@ mod tests {
 
     #[test]
     fn primary_roles_have_readable_contrast() {
-        assert!(contrast(NEON_GENESIS.text, NEON_GENESIS.surface) >= 4.5);
-        assert!(contrast(NEON_GENESIS.secondary, NEON_GENESIS.surface) >= 4.5);
-        assert!(contrast(NEON_GENESIS.cyan, NEON_GENESIS.surface) >= 3.0);
-        assert!(contrast(NEON_GENESIS.red, NEON_GENESIS.surface) >= 3.0);
+        assert!(contrast(APERTURE_INSTRUMENT.text, APERTURE_INSTRUMENT.surface) >= 4.5);
+        assert!(contrast(APERTURE_INSTRUMENT.secondary, APERTURE_INSTRUMENT.surface) >= 4.5);
+        assert!(contrast(APERTURE_INSTRUMENT.cyan, APERTURE_INSTRUMENT.surface) >= 3.0);
+        assert!(contrast(APERTURE_INSTRUMENT.red, APERTURE_INSTRUMENT.surface) >= 3.0);
     }
 
     #[test]
     fn semantic_roles_are_distinct() {
-        assert_ne!(NEON_GENESIS.surface, NEON_GENESIS.surface_raised);
-        assert_ne!(NEON_GENESIS.cyan, NEON_GENESIS.violet);
-        assert_ne!(NEON_GENESIS.teal, NEON_GENESIS.red);
+        assert_ne!(
+            APERTURE_INSTRUMENT.surface,
+            APERTURE_INSTRUMENT.surface_raised
+        );
+        assert_ne!(APERTURE_INSTRUMENT.cyan, APERTURE_INSTRUMENT.violet);
+        assert_ne!(APERTURE_INSTRUMENT.teal, APERTURE_INSTRUMENT.red);
+    }
+
+    #[test]
+    fn aperture_stays_predominantly_near_black() {
+        let theme = APERTURE_INSTRUMENT;
+        assert!(theme.space.r < 0.1);
+        assert!(theme.surface.r < 0.1);
+        assert!(theme.surface_inset.r < 0.1);
+        assert_eq!(NEON_GENESIS, theme);
     }
 }

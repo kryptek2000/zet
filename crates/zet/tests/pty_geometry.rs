@@ -15,7 +15,7 @@ fn workspace_viewport_matches_real_pty_and_grid() {
     for bar_rows in [0usize, 1] {
         let (cols, rows) =
             layout::terminal_viewport(layout::LayoutMode::Workspace.layout(), 104, 24, bar_rows);
-        assert_eq!((cols, rows), (80, if bar_rows == 0 { 24 } else { 23 }));
+        assert_eq!((cols, rows), (82, if bar_rows == 0 { 24 } else { 23 }));
 
         let mut session = Session::spawn("stty", &["size"], cols as u16, rows as u16).unwrap();
         let mut output = Vec::new();
