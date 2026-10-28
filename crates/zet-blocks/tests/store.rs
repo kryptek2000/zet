@@ -377,3 +377,135 @@ fn output_preview_preserves_unicode_and_scrubs_legacy_rows() {
         ""
     );
 }
+
+#[test]
+fn output_preview_handles_multimegabyte_output() {
+    let store = Store::open_in_memory().unwrap();
+    let big = "x".repeat(2_000_000);
+    let id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "cat big".to_string(),
+            output: big,
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    let preview = store.output_preview("session-a", id, 100).unwrap().unwrap();
+    assert_eq!(preview.text.chars().count(), 100);
+    assert!(preview.truncated);
+}
+
+#[test]
+fn output_preview_handles_oversized_budget() {
+    let store = Store::open_in_memory().unwrap();
+    let id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "echo hi".to_string(),
+            output: "hi".to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    let preview = store
+        .output_preview("session-a", id, usize::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(preview.text, "hi");
+    assert!(!preview.truncated);
+}
+
+#[test]
+fn output_preview_scrubs_secret_crossing_boundary() {
+    let store = Store::open_in_memory().unwrap();
+    let mut output = "a".repeat(5);
+    output.push_str("sk-abcdefghijklmnopqrstuvwxyz012345");
+    output.push_str(&"b".repeat(100));
+    let id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "echo secret".to_string(),
+            output,
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    let preview = store.output_preview("session-a", id, 20).unwrap().unwrap();
+    assert!(!preview.text.contains("abcdefghijklmnopqrstuvwxyz"));
+    assert!(preview.text.contains("[REDACTED]"));
+}
+
+#[test]
+fn output_preview_handles_legacy_raw_row() {
+    let path = std::env::temp_dir().join(format!(
+        "zet-blocks-legacy-preview-{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "CREATE TABLE blocks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session TEXT NOT NULL,
+                command TEXT NOT NULL,
+                output TEXT NOT NULL DEFAULT '',
+                exit_code INTEGER NOT NULL DEFAULT 0,
+                cwd TEXT NOT NULL DEFAULT '',
+                git_branch TEXT NOT NULL DEFAULT '',
+                duration_ms INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO blocks (session, command, output, exit_code, cwd, git_branch, duration_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            rusqlite::params![
+                "session-a",
+                "echo legacy",
+                "prefix sk-abcdefghijklmnopqrstuvwxyz012345 suffix",
+                0,
+                "/tmp",
+                "",
+                1
+            ],
+        )
+        .unwrap();
+    }
+    let store = Store::open(path.to_str().unwrap()).unwrap();
+    let id = store.list("session-a").unwrap()[0].id;
+    let preview = store.output_preview("session-a", id, 20).unwrap().unwrap();
+    assert!(!preview.text.contains("abcdefghijklmnopqrstuvwxyz"));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn output_preview_handles_embedded_nul() {
+    let store = Store::open_in_memory().unwrap();
+    let id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "echo nul".to_string(),
+            output: "a\0b\nc".to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    let preview = store.output_preview("session-a", id, 10).unwrap().unwrap();
+    assert!(!preview.text.contains('\0'));
+    assert!(preview.text.contains('a'));
+}

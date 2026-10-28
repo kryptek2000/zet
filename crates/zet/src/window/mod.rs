@@ -979,9 +979,6 @@ impl App {
             self.inspector_output = None;
             self.inspector_output_id = None;
             self.inspector_output_truncated = false;
-            self.inspector_output = None;
-            self.inspector_output_id = None;
-            self.inspector_output_truncated = false;
         }
         let cheap_changed = self.inspector_cache.cheap_changed(
             session_id,

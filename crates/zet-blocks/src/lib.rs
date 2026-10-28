@@ -214,18 +214,23 @@ impl Store {
         id: i64,
         max_chars: usize,
     ) -> Result<Option<OutputPreview>> {
-        let fetch = max_chars.saturating_add(64);
-        let mut stmt = self.conn.prepare(
-            "SELECT substr(output, 1, ?2), length(output) FROM blocks WHERE id = ?1 AND session = ?3",
-        )?;
-        let row = stmt
+        const MAX_PREVIEW_CHARS: usize = 4096;
+        const SCRUB_MARGIN: usize = 64;
+        let max_chars = max_chars.min(MAX_PREVIEW_CHARS);
+        let fetch = max_chars.saturating_add(SCRUB_MARGIN);
+        // substr() is bounded by `fetch`; length() is intentionally not used,
+        // so SQLite does not scan the complete stored TEXT. A returned prefix
+        // of exactly `fetch` chars proves there may be more data, while a
+        // shorter prefix proves the stored value fit in the bounded fetch.
+        let mut stmt = self
+            .conn
+            .prepare("SELECT substr(output, 1, ?2) FROM blocks WHERE id = ?1 AND session = ?3")?;
+        let preview: Option<String> = stmt
             .query_row(rusqlite::params![id, fetch as i64, session], |row| {
-                let preview: String = row.get(0)?;
-                let total: i64 = row.get(1)?;
-                Ok((preview, total))
+                row.get(0)
             })
-            .optional();
-        let (preview, total) = match row? {
+            .optional()?;
+        let preview = match preview {
             Some(value) => value,
             None => return Ok(None),
         };
@@ -237,8 +242,11 @@ impl Store {
             }
             text.push(c);
         }
-        let total_chars = usize::try_from(total).unwrap_or(usize::MAX);
-        let truncated = total_chars > max_chars || scrubbed.chars().count() > max_chars;
+        // `preview` is capped at fetch chars. If it reached that cap, more
+        // stored data may exist. Scrubbing only shortens or equalizes token
+        // text, so a scrubbed result longer than max_chars also indicates
+        // truncation.
+        let truncated = preview.chars().count() >= fetch || scrubbed.chars().count() > max_chars;
         Ok(Some(OutputPreview { text, truncated }))
     }
 
