@@ -24,12 +24,20 @@ This document separates four conditions that must not be treated as equivalent:
 |---|---|---|
 | Cold startup < 300 ms | UNVERIFIED | Only debug first-frame proxy measurements (245–332 ms) are recorded; they are noisy and are not exec-to-visible-prompt release evidence. |
 | Warm input-to-pixel < 3 ms | UNVERIFIED | One debug sample of 3.058 ms exists; no release measurement or input-to-pixel instrumentation result is available. |
-| Idle RSS < 100 MB | UNVERIFIED (debug observation below gate) | Debug P2-B1 comparison observed 92,784 KB idle RSS, but release-build idle RSS is not recorded. |
-| `cat 100k lines` < 0.9 s | UNVERIFIED | Throughput was not measured in the recorded evidence. |
+| Idle RSS < 100 MB | UNVERIFIED (debug observation below gate) | Debug P2-B1 comparison observed 92,784 KB idle RSS. This is a reported debug comparison, not final release acceptance. |
+| `cat 100k lines` < 0.9 s | UNVERIFIED | Throughput was not measured in the recorded evidence. Command elapsed time alone cannot certify that 100,000 lines were rendered and settled. |
 
 ## Performance evidence limits
 
 Existing P37 instrumentation reports internal CPU/GPU stage timings. Those markers do not establish true exec-to-visible-prompt startup latency or input-to-pixel latency. Debug-build observations are useful for regression spotting only.
+
+Reported startup proxy evidence from PR #43:
+
+- Baseline internal proxy: approximately 179 ms.
+- Integrated internal proxy: approximately 204 ms.
+- Difference: approximately +25 ms.
+
+These are internal measurements with observed run-to-run variability. They are not true exec-to-visible-prompt cold-start acceptance results.
 
 ## Safe A/B acceptance procedure
 

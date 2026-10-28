@@ -5,12 +5,12 @@
 
 ## Verified Git state
 
-- Remote master: `6ed65954b08053f37999459d8f48f3b495b46b67`
-- Local master: `6ed65954b08053f37999459d8f48f3b495b46b67`
+- Remote master: `91d409bd521a5127c2c14d22bd9ecc1513d2ba7b`
+- Local master: `91d409bd521a5127c2c14d22bd9ecc1513d2ba7b`
 - Canonical installed ZET source: `79a46069607f7b04bca0f8fb7d7d5f9ef98e6248`
 - Installed binary: `/home/bandit/.local/bin/zet`
 - Installed binary SHA-256: `812bb118a5bd050bb3370482b2cda950640913fbc1c2cb0dce587e0561be65a5`
-- The installed binary is a separately built integrated candidate. It was not rebuilt from the merge commit.
+- The installed binary is a separately built integrated candidate from source `79a46069607f7b04bca0f8fb7d7d5f9ef98e6248` (SHA-256 `812bb118a5bd050bb3370482b2cda950640913fbc1c2cb0dce587e0561be65a5`). It is last-reported installation provenance, not proof that it matches current GitHub master.
 
 ## Completed flagship work
 
@@ -28,10 +28,10 @@
 
 - Cold startup < 300 ms: UNVERIFIED.
 - Warm input-to-pixel latency < 3 ms: UNVERIFIED.
-- Idle RSS < 100 MB: PASS in reported comparison, but final release acceptance remains open.
+- Idle RSS < 100 MB: PASS in a reported debug comparison, but final release acceptance remains UNVERIFIED.
 - `cat 100k lines` < 0.9 s: UNVERIFIED.
-- PR #35 performance hold remains open.
-- Owner visual approval remains required for final merge/release.
+- PRs #35, #39, #40, #42 and #43 are merged into master.
+- Owner visual approval of the integrated candidate was received; final release approval remains open.
 
 ## Release acceptance
 
@@ -45,8 +45,7 @@ Begin with an architect-approved bounded contract using existing command recordi
 
 ## Open work
 
-- Independent audit of the integrated flagship candidate.
 - Owner visual acceptance.
 - Release-mode performance acceptance.
-- Neovim E1568 compatibility claim resolution (Issue #36).
+- Issue #36 is closed; full editor compatibility claims remain bounded by tested cases.
 - P2-B ASCII identity remains planned, not implemented.
