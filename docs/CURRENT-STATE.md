@@ -1,6 +1,6 @@
 # ZET — Current Development State
 
-**Updated:** 2026-10-27  
+**Updated:** 2026-10-28  
 **Authority:** [Product Charter](ZET-PRODUCT-CHARTER.md), [Roadmap](ROADMAP.md)
 
 ## Verified Git state
@@ -32,6 +32,10 @@
 - `cat 100k lines` < 0.9 s: UNVERIFIED.
 - PR #35 performance hold remains open.
 - Owner visual approval remains required for final merge/release.
+
+## Release acceptance
+
+See [RELEASE-ACCEPTANCE.md](RELEASE-ACCEPTANCE.md) for the separated source/audit/preview/release status and the performance acceptance matrix.
 
 ## Current next milestone
 
