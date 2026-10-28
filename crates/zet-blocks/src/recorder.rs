@@ -91,6 +91,30 @@ impl Recorder {
         &self.store
     }
 
+    pub fn output_preview(
+        &self,
+        id: i64,
+        max_chars: usize,
+    ) -> rusqlite::Result<Option<crate::OutputPreview>> {
+        self.store.output_preview(&self.session, id, max_chars)
+    }
+
+    pub fn preview_output(
+        &self,
+        id: i64,
+        max_chars: usize,
+    ) -> rusqlite::Result<Option<crate::OutputPreview>> {
+        self.store.preview_output(&self.session, id, max_chars)
+    }
+
+    pub fn get_output_preview(
+        &self,
+        id: i64,
+        max_chars: usize,
+    ) -> rusqlite::Result<Option<crate::OutputPreview>> {
+        self.store.get_output_preview(&self.session, id, max_chars)
+    }
+
     /// The session key this recorder is bound to.
     pub fn session(&self) -> &str {
         &self.session

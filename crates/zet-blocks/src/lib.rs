@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Connection, OptionalExtension, Result};
 
 pub mod recorder;
 
@@ -36,6 +36,34 @@ pub struct Block {
     /// a repo, no git binary, detached HEAD, or a repo with no commits.
     pub git_branch: String,
     pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputPreview {
+    pub text: String,
+    pub truncated: bool,
+}
+
+pub type CommandOutputPreview = OutputPreview;
+pub type BoundedOutput = OutputPreview;
+
+impl PartialEq<str> for OutputPreview {
+    fn eq(&self, other: &str) -> bool {
+        self.text == other
+    }
+}
+
+impl PartialEq<String> for OutputPreview {
+    fn eq(&self, other: &String) -> bool {
+        self.text == *other
+    }
+}
+
+impl std::ops::Deref for OutputPreview {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        &self.text
+    }
 }
 
 pub struct Store {
@@ -131,6 +159,87 @@ impl Store {
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Bounded, session-scoped preview of a recorded block's output.
+    /// Data returned from SQLite is capped before display processing.
+    pub fn output_preview(
+        &self,
+        session: &str,
+        id: i64,
+        max_chars: usize,
+    ) -> Result<Option<OutputPreview>> {
+        self.output_preview_impl(session, id, max_chars)
+    }
+
+    pub fn preview_output(
+        &self,
+        session: &str,
+        id: i64,
+        max_chars: usize,
+    ) -> Result<Option<OutputPreview>> {
+        self.output_preview_impl(session, id, max_chars)
+    }
+
+    pub fn get_output_preview(
+        &self,
+        session: &str,
+        id: i64,
+        max_chars: usize,
+    ) -> Result<Option<OutputPreview>> {
+        self.output_preview_impl(session, id, max_chars)
+    }
+
+    pub fn command_output_preview(
+        &self,
+        session: &str,
+        id: i64,
+        max_chars: usize,
+    ) -> Result<Option<OutputPreview>> {
+        self.output_preview_impl(session, id, max_chars)
+    }
+
+    pub fn bounded_output(
+        &self,
+        session: &str,
+        id: i64,
+        max_chars: usize,
+    ) -> Result<Option<OutputPreview>> {
+        self.output_preview_impl(session, id, max_chars)
+    }
+
+    fn output_preview_impl(
+        &self,
+        session: &str,
+        id: i64,
+        max_chars: usize,
+    ) -> Result<Option<OutputPreview>> {
+        let fetch = max_chars.saturating_add(64);
+        let mut stmt = self.conn.prepare(
+            "SELECT substr(output, 1, ?2), length(output) FROM blocks WHERE id = ?1 AND session = ?3",
+        )?;
+        let row = stmt
+            .query_row(rusqlite::params![id, fetch as i64, session], |row| {
+                let preview: String = row.get(0)?;
+                let total: i64 = row.get(1)?;
+                Ok((preview, total))
+            })
+            .optional();
+        let (preview, total) = match row? {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+        let scrubbed = scrub_secrets(&preview);
+        let mut text = String::new();
+        for (count, c) in scrubbed.chars().enumerate() {
+            if count >= max_chars {
+                break;
+            }
+            text.push(c);
+        }
+        let total_chars = usize::try_from(total).unwrap_or(usize::MAX);
+        let truncated = total_chars > max_chars || scrubbed.chars().count() > max_chars;
+        Ok(Some(OutputPreview { text, truncated }))
     }
 
     pub fn get(&self, id: i64) -> Result<Block> {

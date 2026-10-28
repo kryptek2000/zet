@@ -305,3 +305,75 @@ fn legacy_raw_cwd_survives_read() {
     assert!(got[0].cwd.contains("sk-"));
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn output_preview_is_session_scoped_and_bounded() {
+    let store = Store::open_in_memory().unwrap();
+    let long = "a".repeat(100);
+    let id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "echo long".to_string(),
+            output: long.clone(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+
+    // Same numeric ID in another session must not retrieve this output.
+    let other = Store::open_in_memory().unwrap();
+    let other_id = other
+        .append(&Block {
+            id: 0,
+            session: "session-b".to_string(),
+            command: "echo other".to_string(),
+            output: "other output".to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    assert_eq!(other_id, id);
+    assert!(store.output_preview("session-b", id, 10).unwrap().is_none());
+
+    let preview = store.output_preview("session-a", id, 10).unwrap().unwrap();
+    assert_eq!(preview.text, "aaaaaaaaaa");
+    assert!(preview.truncated);
+    assert_eq!(preview.text.chars().count(), 10);
+
+    let full = store.output_preview("session-a", id, 200).unwrap().unwrap();
+    assert_eq!(full.text, long);
+    assert!(!full.truncated);
+}
+
+#[test]
+fn output_preview_preserves_unicode_and_scrubs_legacy_rows() {
+    let store = Store::open_in_memory().unwrap();
+    let id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "echo unicode".to_string(),
+            output: "a😀b\nc\0d".to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    let preview = store.output_preview("session-a", id, 10).unwrap().unwrap();
+    assert!(preview.text.contains('😀'));
+    assert!(!preview.text.contains('\0'));
+    assert_eq!(
+        store
+            .output_preview("session-a", id, 0)
+            .unwrap()
+            .unwrap()
+            .text,
+        ""
+    );
+}

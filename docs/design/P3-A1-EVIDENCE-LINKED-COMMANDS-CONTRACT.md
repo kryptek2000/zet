@@ -1,6 +1,6 @@
 # P3-A1 — Evidence-Linked Commands Contract
 
-**Status:** Docs-only architecture contract. No P3 implementation is authorized by this document.  
+**Status:** Implementation contract and record for the P3-A1 Observed Command Trail. The bounded slice implements command history and sanitized output inspection; broader P3 scope remains deferred.  
 **Tracking:** GitHub Issue #41 / next milestone after P2-B2  
 **Base:** master at `91d409bd521a5127c2c14d22bd9ecc1513d2ba7b`
 
@@ -238,4 +238,4 @@ The auditor should verify:
 
 Do not implement command detail, file attribution, CI linkage, approvals or verification claims in this slice.
 
-STOP. This is a docs-only contract. No implementation, build, launch, commit, push or merge is authorized by this document.
+Implementation and validation are authorized for this bounded slice. Command-to-file attribution, CI receipts, approvals, timelines and full output replay remain deferred.

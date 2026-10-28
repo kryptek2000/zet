@@ -1029,17 +1029,20 @@ pub fn sanitize_inspector_text(text: &str, max_cells: usize) -> String {
 /// line breaks while removing other control characters and bounding the
 /// result.
 pub fn sanitize_inspector_output(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
     let mut out = String::new();
-    for c in text.chars() {
+    for (count, c) in text.chars().enumerate() {
+        if count >= max_chars {
+            break;
+        }
         if c == '\n' {
             out.push('\n');
         } else if c == '\r' || c.is_control() {
             out.push(' ');
         } else {
             out.push(c);
-        }
-        if out.chars().count() >= max_chars {
-            break;
         }
     }
     out

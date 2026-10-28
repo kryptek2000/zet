@@ -225,6 +225,7 @@ struct App {
     /// command, if available.
     inspector_output: Option<String>,
     inspector_output_id: Option<i64>,
+    inspector_output_truncated: bool,
     inspector_cache: panels::InspectorCache,
     #[cfg(test)]
     pub chrome_query_count: usize,
@@ -939,6 +940,7 @@ impl App {
                 self.inspector_sel_id = None;
                 self.inspector_output = None;
                 self.inspector_output_id = None;
+                self.inspector_output_truncated = false;
             }
             return;
         }
@@ -947,6 +949,7 @@ impl App {
             self.inspector_sel_id = None;
             self.inspector_output = None;
             self.inspector_output_id = None;
+            self.inspector_output_truncated = false;
         }
         let phase = self
             .tabs
@@ -975,8 +978,10 @@ impl App {
             self.inspector_sel_id = None;
             self.inspector_output = None;
             self.inspector_output_id = None;
+            self.inspector_output_truncated = false;
             self.inspector_output = None;
             self.inspector_output_id = None;
+            self.inspector_output_truncated = false;
         }
         let cheap_changed = self.inspector_cache.cheap_changed(
             session_id,
@@ -1012,6 +1017,7 @@ impl App {
                     self.inspector_sel_id = None;
                     self.inspector_output = None;
                     self.inspector_output_id = None;
+                    self.inspector_output_truncated = false;
                 }
             }
             self.sync_inspector_output();
@@ -1031,6 +1037,7 @@ impl App {
                 self.inspector_sel_id = None;
                 self.inspector_output = None;
                 self.inspector_output_id = None;
+                self.inspector_output_truncated = false;
             }
         }
         self.inspector_cache.commit_refresh(
@@ -1056,17 +1063,17 @@ impl App {
             return;
         }
         self.inspector_output_id = selected_id;
-        self.inspector_output = selected_id.and_then(|id| {
+        let preview = selected_id.and_then(|id| {
             let tab = self.tabs.get(self.active)?;
             let recorder = tab.recorder.as_ref()?;
-            let block = recorder.store().get(id).ok()?;
-            if block.session != recorder.session() {
-                return None;
-            }
-            Some(panels::sanitize_inspector_output(
-                &zet_blocks::scrub_secrets(&block.output),
-                4096,
-            ))
+            recorder.output_preview(id, 4096).ok().flatten()
+        });
+        self.inspector_output_truncated = preview
+            .as_ref()
+            .map(|preview| preview.truncated)
+            .unwrap_or(false);
+        self.inspector_output = preview.map(|preview| {
+            panels::sanitize_inspector_output(&zet_blocks::scrub_secrets(&preview.text), 4096)
         });
     }
 
@@ -1330,6 +1337,7 @@ impl App {
             self.inspector_sel_id = None;
             self.inspector_output = None;
             self.inspector_output_id = None;
+            self.inspector_output_truncated = false;
         }
         self.inspector_cache.mark_dirty();
         self.fit_all();
@@ -1361,6 +1369,7 @@ impl App {
                 self.inspector_sel_id = None;
                 self.inspector_output = None;
                 self.inspector_output_id = None;
+                self.inspector_output_truncated = false;
                 self.focus = Focus::Terminal;
                 self.needs_draw = true;
                 self.retitle();
@@ -1406,6 +1415,9 @@ impl App {
                     None
                 };
                 self.inspector_sel = new_sel;
+                self.inspector_output = None;
+                self.inspector_output_id = None;
+                self.inspector_output_truncated = false;
                 self.inspector_sel_id = new_sel.and_then(|index| {
                     if index >= 4 {
                         self.inspector_cache
@@ -1416,6 +1428,7 @@ impl App {
                         None
                     }
                 });
+                self.sync_inspector_output();
                 self.needs_draw = true;
                 return;
             }
@@ -1716,6 +1729,7 @@ impl App {
         self.inspector_sel_id = None;
         self.inspector_output = None;
         self.inspector_output_id = None;
+        self.inspector_output_truncated = false;
         if let Some(renderer) = &self.renderer {
             let (fg, bg) = renderer.default_colors();
             if let Some(tab) = self.tabs.last_mut() {
@@ -1747,6 +1761,7 @@ impl App {
         self.inspector_sel_id = None;
         self.inspector_output = None;
         self.inspector_output_id = None;
+        self.inspector_output_truncated = false;
         // Bar may vanish: remaining grids grow back.
         self.fit_all();
         self.needs_draw = true;
@@ -1766,6 +1781,7 @@ impl App {
         self.inspector_sel_id = None;
         self.inspector_output = None;
         self.inspector_output_id = None;
+        self.inspector_output_truncated = false;
         self.needs_draw = true;
         self.retitle();
     }
@@ -2128,6 +2144,7 @@ impl App {
                     self.inspector_sel_id = None;
                     self.inspector_output = None;
                     self.inspector_output_id = None;
+                    self.inspector_output_truncated = false;
                 }
                 Key::Named(NamedKey::ArrowUp) => {
                     if self.focus == Focus::Rail && !self.tabs.is_empty() {
@@ -2154,6 +2171,10 @@ impl App {
                                     None
                                 }
                             });
+                            self.inspector_output = None;
+                            self.inspector_output_id = None;
+                            self.inspector_output_truncated = false;
+                            self.sync_inspector_output();
                         }
                     }
                 }
@@ -2183,6 +2204,10 @@ impl App {
                                     None
                                 }
                             });
+                            self.inspector_output = None;
+                            self.inspector_output_id = None;
+                            self.inspector_output_truncated = false;
+                            self.sync_inspector_output();
                         }
                     }
                 }
@@ -2195,6 +2220,7 @@ impl App {
                     self.inspector_sel_id = None;
                     self.inspector_output = None;
                     self.inspector_output_id = None;
+                    self.inspector_output_truncated = false;
                     self.focus = Focus::Terminal;
                     self.retitle();
                 }
@@ -2211,6 +2237,7 @@ impl App {
                 self.inspector_sel_id = None;
                 self.inspector_output = None;
                 self.inspector_output_id = None;
+                self.inspector_output_truncated = false;
             } else {
                 self.needs_draw = true;
                 return;
@@ -2796,7 +2823,8 @@ impl ApplicationHandler for App {
                                     }
                                 }
                                 // Bounded view of the selected command's recorded output.
-                                if let Some(output) = &self.inspector_output {
+                                if self.inspector_output_id.is_some() {
+                                    let output = self.inspector_output.as_ref();
                                     let start = 5 + snapshot.commands.len();
                                     if start < insp_vp.rows as usize {
                                         r.draw_text_row(
@@ -2807,32 +2835,75 @@ impl ApplicationHandler for App {
                                             zet_gpu::quad::Rgba::rgb(0.580, 0.659, 0.749),
                                         );
                                         let mut rendered = 0;
-                                        for line in output
-                                            .lines()
-                                            .take((insp_vp.rows as usize).saturating_sub(start + 1))
-                                        {
-                                            let row = start + 1 + rendered;
-                                            if row >= insp_vp.rows as usize {
-                                                break;
+                                        if let Some(output) = output {
+                                            if output.is_empty() {
+                                                if start + 1 < insp_vp.rows as usize {
+                                                    r.draw_text_row(
+                                                        insp_vp,
+                                                        (start + 1) as u32,
+                                                        0,
+                                                        "Empty output",
+                                                        zet_gpu::quad::Rgba::rgb(
+                                                            0.580, 0.659, 0.749,
+                                                        ),
+                                                    );
+                                                }
+                                            } else {
+                                                for line in output.lines().take(
+                                                    (insp_vp.rows as usize)
+                                                        .saturating_sub(start + 1),
+                                                ) {
+                                                    let row = start + 1 + rendered;
+                                                    if row >= insp_vp.rows as usize {
+                                                        break;
+                                                    }
+                                                    r.draw_text_row(
+                                                        insp_vp,
+                                                        row as u32,
+                                                        0,
+                                                        &panels::truncate_to_cells(
+                                                            line,
+                                                            insp_vp.cols as usize,
+                                                        ),
+                                                        zet_gpu::quad::Rgba::rgb(0.918, 0.953, 1.0),
+                                                    );
+                                                    rendered += 1;
+                                                }
+                                                if rendered == 0
+                                                    && start + 1 < insp_vp.rows as usize
+                                                {
+                                                    r.draw_text_row(
+                                                        insp_vp,
+                                                        (start + 1) as u32,
+                                                        0,
+                                                        "No output recorded",
+                                                        zet_gpu::quad::Rgba::rgb(
+                                                            0.580, 0.659, 0.749,
+                                                        ),
+                                                    );
+                                                }
+                                                if self.inspector_output_truncated
+                                                    && rendered + 1
+                                                        < (insp_vp.rows as usize)
+                                                            .saturating_sub(start)
+                                                {
+                                                    r.draw_text_row(
+                                                        insp_vp,
+                                                        (start + 1 + rendered) as u32,
+                                                        0,
+                                                        "... preview truncated",
+                                                        zet_gpu::quad::Rgba::rgb(
+                                                            0.580, 0.659, 0.749,
+                                                        ),
+                                                    );
+                                                }
                                             }
-                                            r.draw_text_row(
-                                                insp_vp,
-                                                row as u32,
-                                                0,
-                                                &panels::truncate_to_cells(
-                                                    line,
-                                                    insp_vp.cols as usize,
-                                                ),
-                                                zet_gpu::quad::Rgba::rgb(0.918, 0.953, 1.0),
-                                            );
-                                            rendered += 1;
-                                        }
-                                        if rendered == 0 {
+                                        } else if start + 1 < insp_vp.rows as usize {
                                             r.draw_text_row(
                                                 insp_vp,
                                                 (start + 1) as u32,
                                                 0,
-                                                "No output recorded",
+                                                "Output unavailable",
                                                 zet_gpu::quad::Rgba::rgb(0.580, 0.659, 0.749),
                                             );
                                         }
@@ -2995,6 +3066,7 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         inspector_sel_id: None,
         inspector_output: None,
         inspector_output_id: None,
+        inspector_output_truncated: false,
         inspector_cache: panels::InspectorCache::new(),
         #[cfg(test)]
         chrome_query_count: 0,
@@ -3189,6 +3261,7 @@ mod layout_fit_tests {
             inspector_sel_id: None,
             inspector_output: None,
             inspector_output_id: None,
+            inspector_output_truncated: false,
             inspector_cache: super::panels::InspectorCache::new(),
             #[cfg(test)]
             chrome_query_count: 0,
@@ -4245,6 +4318,61 @@ mod layout_fit_tests {
         app.refresh_inspector();
         assert_eq!(app.inspector_output, None);
         assert_eq!(app.inspector_output_id, None);
+    }
+
+    #[test]
+    fn inspector_switching_commands_does_not_show_stale_output() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let first = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo first".to_string(),
+                output: "first output".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let second = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo second".to_string(),
+                output: "second output".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        app.refresh_inspector();
+
+        let now = std::time::Instant::now();
+        app.refresh_inspector_at(now);
+        app.inspector_sel = Some(4);
+        app.inspector_sel_id = Some(first);
+        app.inspector_output = None;
+        app.inspector_output_id = None;
+        app.sync_inspector_output();
+        assert_eq!(app.inspector_output.as_deref(), Some("first output"));
+
+        // Switch without advancing the 250 ms poll interval.
+        app.inspector_sel = Some(5);
+        app.inspector_sel_id = Some(second);
+        app.inspector_output = None;
+        app.inspector_output_id = None;
+        app.sync_inspector_output();
+        assert_eq!(app.inspector_output.as_deref(), Some("second output"));
+        assert_ne!(app.inspector_output.as_deref(), Some("first output"));
     }
 
     #[test]
