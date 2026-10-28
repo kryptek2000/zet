@@ -1,12 +1,12 @@
 # ZET — Delivery Roadmap
 
-**Updated:** 2026-10-27 · **Authority:** [Product Charter](ZET-PRODUCT-CHARTER.md)\
+**Updated:** 2026-10-25 · **Authority:** [Product Charter](ZET-PRODUCT-CHARTER.md)\
 **Product positioning:** ZET — The Outcome-Aware Terminal (provisional descriptor).  
 **No dates promised:** Release when correctness, usability, and measured performance meet gates.
 
 ## P0 — Restore and protect the foundation
 
-- Historical PR #13 renderer clipping/sidebearing work is a baseline item; verify its current master status before claiming it shipped. Do not treat green PR CI as merge approval.
+- Close renderer clipping/sidebearing CI repair only after independent approval; PR #13 is not considered merged merely because PR CI is green.
 - Confirm **master** green after the owner-approved merge.
 - Inventory actual implemented native features versus planned designs; no greenwashing README.
 - Capture reproducible baseline: startup, input, RSS, output, fonts/Unicode, Neovim/tmux/SSH, Wayland/X11 where testable.
@@ -23,7 +23,7 @@
 
 **Exit:** architect-approved native UI blueprint, state schema and testable acceptance criteria; no implementation based on HTML.
 
-## P2 — Native vertical slice (GPT-6 architect; Beam Free implementer; GLM-5.3-Flash auditor)
+## P2 — Native vertical slice (MiniMax implementer; Beam auditor)
 
 - Render collapsible mission rail, honest central PTY and optional inspector **inside existing Rust + wgpu app**; do not add Electron/webviews.
 - Use **real existing PTY/session data** for mission and inspector example. No hardcoded simulated work progress.
@@ -108,4 +108,4 @@ New autonomous orchestration platform, agent marketplace, cloud automation facto
 
 ## Implementation governance
 
-Current workflow: implement → validate → independent audit → owner preview when applicable → owner approval → merge → update canonical ZET. Use a single active integration stream whenever practical. No surprise direct pushes to master, no destructive cleanup, and no merge or release without owner authorization. Every feature must have a truth source, degradation state, keyboard behavior, security test, performance budget and a meaningful user job.
+PR per bounded phase; no surprise direct pushes to master; author implements, independent auditor checks; architect reviews; owner merges. Every feature must have a truth source, degradation state, keyboard behavior, security test, performance budget and a meaningful user job.
