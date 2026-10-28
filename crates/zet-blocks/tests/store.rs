@@ -367,7 +367,7 @@ fn output_preview_preserves_unicode_and_scrubs_legacy_rows() {
         .unwrap();
     let preview = store.output_preview("session-a", id, 10).unwrap().unwrap();
     assert!(preview.text.contains('😀'));
-    assert!(!preview.text.contains('\0'));
+    assert!(preview.text.contains('\0'));
     assert_eq!(
         store
             .output_preview("session-a", id, 0)
@@ -506,6 +506,67 @@ fn output_preview_handles_embedded_nul() {
         })
         .unwrap();
     let preview = store.output_preview("session-a", id, 10).unwrap().unwrap();
-    assert!(!preview.text.contains('\0'));
-    assert!(preview.text.contains('a'));
+    assert!(preview.text.contains('\0'));
+    assert!(preview.text.contains('b'));
+    assert!(preview.text.contains('c'));
+}
+
+#[test]
+fn output_preview_preserves_embedded_nul_content() {
+    let store = Store::open_in_memory().unwrap();
+    let id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "echo nul".to_string(),
+            output: "a\0b\nc".to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    let preview = store.output_preview("session-a", id, 10).unwrap().unwrap();
+    assert_eq!(preview.text, "a\0b\nc");
+    assert!(!preview.truncated);
+}
+
+#[test]
+fn output_preview_truncates_embedded_nul_content() {
+    let store = Store::open_in_memory().unwrap();
+    let id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "echo nul".to_string(),
+            output: "a\0bcdefghijklmnop".to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    let preview = store.output_preview("session-a", id, 3).unwrap().unwrap();
+    assert!(preview.truncated);
+    assert!(preview.text.starts_with("a\0b"));
+}
+
+#[test]
+fn output_preview_unicode_boundary_remains_valid() {
+    let store = Store::open_in_memory().unwrap();
+    let id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "echo unicode".to_string(),
+            output: "😀😀😀".to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    let preview = store.output_preview("session-a", id, 2).unwrap().unwrap();
+    assert_eq!(preview.text, "😀😀");
+    assert!(preview.truncated);
 }

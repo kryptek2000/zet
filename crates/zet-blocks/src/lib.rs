@@ -215,25 +215,43 @@ impl Store {
         max_chars: usize,
     ) -> Result<Option<OutputPreview>> {
         const MAX_PREVIEW_CHARS: usize = 4096;
-        const SCRUB_MARGIN: usize = 64;
+        const UTF8_BYTES_PER_CHAR: usize = 4;
+        const SECRET_MARGIN_BYTES: usize = 1024;
+        const SENTINEL: usize = 1;
         let max_chars = max_chars.min(MAX_PREVIEW_CHARS);
-        let fetch = max_chars.saturating_add(SCRUB_MARGIN);
-        // substr() is bounded by `fetch`; length() is intentionally not used,
-        // so SQLite does not scan the complete stored TEXT. A returned prefix
-        // of exactly `fetch` chars proves there may be more data, while a
-        // shorter prefix proves the stored value fit in the bounded fetch.
-        let mut stmt = self
-            .conn
-            .prepare("SELECT substr(output, 1, ?2) FROM blocks WHERE id = ?1 AND session = ?3")?;
-        let preview: Option<String> = stmt
-            .query_row(rusqlite::params![id, fetch as i64, session], |row| {
-                row.get(0)
-            })
+        let fetch = max_chars
+            .saturating_mul(UTF8_BYTES_PER_CHAR)
+            .saturating_add(SECRET_MARGIN_BYTES);
+        let fetch_with_sentinel = fetch.saturating_add(SENTINEL);
+        // CAST(output AS BLOB) makes substr byte-oriented, so an embedded
+        // NUL cannot terminate retrieval. The fetch size is bounded before
+        // display processing; SQLite does not need length(output).
+        let mut stmt = self.conn.prepare(
+            "SELECT substr(CAST(output AS BLOB), 1, ?2) FROM blocks WHERE id = ?1 AND session = ?3",
+        )?;
+        let raw: Option<Vec<u8>> = stmt
+            .query_row(
+                rusqlite::params![id, fetch_with_sentinel as i64, session],
+                |row| row.get(0),
+            )
             .optional()?;
-        let preview = match preview {
+        let raw = match raw {
             Some(value) => value,
             None => return Ok(None),
         };
+        let more_data = raw.len() == fetch_with_sentinel;
+        let bytes = if raw.len() > fetch {
+            &raw[..fetch]
+        } else {
+            &raw[..]
+        };
+        // Keep the largest valid UTF-8 prefix so a byte boundary cannot
+        // create an invalid string or expose a partial code point.
+        let mut valid_len = bytes.len();
+        while valid_len > 0 && std::str::from_utf8(&bytes[..valid_len]).is_err() {
+            valid_len -= 1;
+        }
+        let preview = String::from_utf8_lossy(&bytes[..valid_len]).to_string();
         let scrubbed = scrub_secrets(&preview);
         let mut text = String::new();
         for (count, c) in scrubbed.chars().enumerate() {
@@ -242,11 +260,7 @@ impl Store {
             }
             text.push(c);
         }
-        // `preview` is capped at fetch chars. If it reached that cap, more
-        // stored data may exist. Scrubbing only shortens or equalizes token
-        // text, so a scrubbed result longer than max_chars also indicates
-        // truncation.
-        let truncated = preview.chars().count() >= fetch || scrubbed.chars().count() > max_chars;
+        let truncated = more_data || preview.chars().count() > max_chars;
         Ok(Some(OutputPreview { text, truncated }))
     }
 
