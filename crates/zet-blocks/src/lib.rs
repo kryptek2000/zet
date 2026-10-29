@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Connection, OptionalExtension, Result};
 
 pub mod recorder;
 
@@ -36,6 +36,34 @@ pub struct Block {
     /// a repo, no git binary, detached HEAD, or a repo with no commits.
     pub git_branch: String,
     pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputPreview {
+    pub text: String,
+    pub truncated: bool,
+}
+
+pub type CommandOutputPreview = OutputPreview;
+pub type BoundedOutput = OutputPreview;
+
+impl PartialEq<str> for OutputPreview {
+    fn eq(&self, other: &str) -> bool {
+        self.text == other
+    }
+}
+
+impl PartialEq<String> for OutputPreview {
+    fn eq(&self, other: &String) -> bool {
+        self.text == *other
+    }
+}
+
+impl std::ops::Deref for OutputPreview {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        &self.text
+    }
 }
 
 pub struct Store {
@@ -111,6 +139,12 @@ impl Store {
         let command = scrub_secrets(&block.command);
         let output = scrub_secrets(&block.output);
         let git_branch = scrub_secrets(&block.git_branch);
+        // Working-directory metadata is arbitrary user text and may carry
+        // token-shaped secrets (e.g. a directory whose name embeds a key).
+        // Scrub it at the same single write path as the other fields. This
+        // is best-effort: a path containing a secret becomes unusable as a
+        // path, which is the intended tradeoff.
+        let cwd = scrub_secrets(&block.cwd);
         self.conn.execute(
             "INSERT INTO blocks (session, command, output, exit_code, cwd, git_branch, duration_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -119,12 +153,123 @@ impl Store {
                 command,
                 output,
                 block.exit_code,
-                block.cwd,
+                cwd,
                 git_branch,
                 duration_ms,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Bounded, session-scoped preview of a recorded block's output.
+    /// Data returned from SQLite is capped before display processing.
+    pub fn output_preview(
+        &self,
+        session: &str,
+        id: i64,
+        max_chars: usize,
+    ) -> Result<Option<OutputPreview>> {
+        self.output_preview_impl(session, id, max_chars)
+    }
+
+    pub fn preview_output(
+        &self,
+        session: &str,
+        id: i64,
+        max_chars: usize,
+    ) -> Result<Option<OutputPreview>> {
+        self.output_preview_impl(session, id, max_chars)
+    }
+
+    pub fn get_output_preview(
+        &self,
+        session: &str,
+        id: i64,
+        max_chars: usize,
+    ) -> Result<Option<OutputPreview>> {
+        self.output_preview_impl(session, id, max_chars)
+    }
+
+    pub fn command_output_preview(
+        &self,
+        session: &str,
+        id: i64,
+        max_chars: usize,
+    ) -> Result<Option<OutputPreview>> {
+        self.output_preview_impl(session, id, max_chars)
+    }
+
+    pub fn bounded_output(
+        &self,
+        session: &str,
+        id: i64,
+        max_chars: usize,
+    ) -> Result<Option<OutputPreview>> {
+        self.output_preview_impl(session, id, max_chars)
+    }
+
+    fn output_preview_impl(
+        &self,
+        session: &str,
+        id: i64,
+        max_chars: usize,
+    ) -> Result<Option<OutputPreview>> {
+        const MAX_PREVIEW_CHARS: usize = 4096;
+        const UTF8_BYTES_PER_CHAR: usize = 4;
+        const SECRET_MARGIN_BYTES: usize = 1024;
+        const SENTINEL: usize = 1;
+        let max_chars = max_chars.min(MAX_PREVIEW_CHARS);
+        let fetch = max_chars
+            .saturating_mul(UTF8_BYTES_PER_CHAR)
+            .saturating_add(SECRET_MARGIN_BYTES);
+        let fetch_with_sentinel = fetch.saturating_add(SENTINEL);
+        // CAST(output AS BLOB) makes substr byte-oriented, so an embedded
+        // NUL cannot terminate retrieval. The fetch size is bounded before
+        // display processing; SQLite does not need length(output).
+        let mut stmt = self.conn.prepare(
+            "SELECT CASE
+                WHEN output IS NULL THEN NULL
+                ELSE COALESCE(substr(CAST(output AS BLOB), 1, ?2), zeroblob(0))
+             END
+             FROM blocks WHERE id = ?1 AND session = ?3",
+        )?;
+        // The outer Option is the row-presence contract. The inner Option
+        // preserves a genuine SQL NULL (possible in legacy/corrupt stores)
+        // as unavailable, while COALESCE above turns SQLite's NULL result for
+        // a valid zero-length output into an empty blob.
+        let raw: Option<Option<Vec<u8>>> = stmt
+            .query_row(
+                rusqlite::params![id, fetch_with_sentinel as i64, session],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let raw = match raw {
+            Some(Some(value)) => value,
+            Some(None) | None => return Ok(None),
+        };
+        let more_data = raw.len() == fetch_with_sentinel;
+        let bytes = if raw.len() > fetch {
+            &raw[..fetch]
+        } else {
+            &raw[..]
+        };
+        // Keep the largest valid UTF-8 prefix so a byte boundary cannot
+        // create an invalid string or expose a partial code point.
+        let mut valid_len = bytes.len();
+        while valid_len > 0 && std::str::from_utf8(&bytes[..valid_len]).is_err() {
+            valid_len -= 1;
+        }
+        let preview = String::from_utf8_lossy(&bytes[..valid_len]).to_string();
+        let scrubbed = scrub_secrets(&preview);
+        let mut text = String::new();
+        for (count, c) in scrubbed.chars().enumerate() {
+            if count >= max_chars {
+                break;
+            }
+            text.push(c);
+        }
+        let truncated = more_data || preview.chars().count() > max_chars;
+        Ok(Some(OutputPreview { text, truncated }))
     }
 
     pub fn get(&self, id: i64) -> Result<Block> {

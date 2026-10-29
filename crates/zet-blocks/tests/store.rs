@@ -250,3 +250,417 @@ fn recent_commands_empty_history_and_zero_limit() {
     assert!(store.recent_commands("s", 0).unwrap().is_empty());
     assert_eq!(store.count("s").unwrap(), 0);
 }
+
+#[test]
+fn append_scrubs_secret_shaped_cwd() {
+    let store = Store::open_in_memory().unwrap();
+    let mut b = sample("s1");
+    b.cwd = "/tmp/sk-abcdefghijklmnopqrstuvwxyz012345".to_string();
+    let id = store.append(&b).unwrap();
+    let got = store.get(id).unwrap();
+    assert_eq!(got.cwd, "/tmp/[REDACTED]");
+    assert!(!got.cwd.contains("abcdefghijklmnopqrstuvwxyz"));
+}
+
+#[test]
+fn legacy_raw_cwd_survives_read() {
+    let path =
+        std::env::temp_dir().join(format!("zet-blocks-legacy-{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "CREATE TABLE blocks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session TEXT NOT NULL,
+                command TEXT NOT NULL,
+                output TEXT NOT NULL DEFAULT '',
+                exit_code INTEGER NOT NULL DEFAULT 0,
+                cwd TEXT NOT NULL DEFAULT '',
+                git_branch TEXT NOT NULL DEFAULT '',
+                duration_ms INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO blocks (session, command, output, exit_code, cwd, git_branch, duration_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            rusqlite::params![
+                "s1",
+                "echo hi",
+                "hi",
+                0,
+                "/tmp/sk-abcdefghijklmnopqrstuvwxyz012345",
+                "",
+                3
+            ],
+        )
+        .unwrap();
+    }
+    let store = Store::open(path.to_str().unwrap()).unwrap();
+    let got = store.list("s1").unwrap();
+    assert_eq!(got.len(), 1);
+    // Legacy rows are returned as-is; UI layer is responsible for scrubbing.
+    assert!(got[0].cwd.contains("sk-"));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn output_preview_is_session_scoped_and_bounded() {
+    let store = Store::open_in_memory().unwrap();
+    let long = "a".repeat(100);
+    let id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "echo long".to_string(),
+            output: long.clone(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+
+    // Same numeric ID in another session must not retrieve this output.
+    let other = Store::open_in_memory().unwrap();
+    let other_id = other
+        .append(&Block {
+            id: 0,
+            session: "session-b".to_string(),
+            command: "echo other".to_string(),
+            output: "other output".to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    assert_eq!(other_id, id);
+    assert!(store.output_preview("session-b", id, 10).unwrap().is_none());
+
+    let preview = store.output_preview("session-a", id, 10).unwrap().unwrap();
+    assert_eq!(preview.text, "aaaaaaaaaa");
+    assert!(preview.truncated);
+    assert_eq!(preview.text.chars().count(), 10);
+
+    let full = store.output_preview("session-a", id, 200).unwrap().unwrap();
+    assert_eq!(full.text, long);
+    assert!(!full.truncated);
+}
+
+#[test]
+fn silent_false_and_true_commands_are_valid_empty_previews() {
+    let store = Store::open_in_memory().unwrap();
+    let false_id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "false".to_string(),
+            output: String::new(),
+            exit_code: 1,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    let true_id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "true".to_string(),
+            output: String::new(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+
+    for id in [false_id, true_id] {
+        let preview = store.output_preview("session-a", id, 4096).unwrap();
+        let preview = preview.expect("recorded silent command must have a preview");
+        assert_eq!(preview.text, "");
+        assert!(!preview.truncated);
+    }
+}
+
+#[test]
+fn failed_command_with_output_remains_a_bounded_preview() {
+    let store = Store::open_in_memory().unwrap();
+    let id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "false --explain".to_string(),
+            output: "error: observed failure\n".to_string(),
+            exit_code: 1,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 4,
+        })
+        .unwrap();
+
+    let preview = store.output_preview("session-a", id, 8).unwrap().unwrap();
+    assert_eq!(preview.text, "error: o");
+    assert!(preview.truncated);
+}
+
+#[test]
+fn sql_null_output_stays_unavailable_while_empty_text_is_available() {
+    let path = temp_db("null-output");
+    let _ = std::fs::remove_file(&path);
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "CREATE TABLE blocks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session TEXT NOT NULL,
+                command TEXT NOT NULL,
+                output TEXT,
+                exit_code INTEGER NOT NULL DEFAULT 0,
+                cwd TEXT NOT NULL DEFAULT '',
+                git_branch TEXT NOT NULL DEFAULT '',
+                duration_ms INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO blocks (session, command, output, exit_code)
+             VALUES ('session-a', 'legacy-null', NULL, 0),
+                    ('session-a', 'recorded-empty', '', 0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let store = Store::open(path.to_str().unwrap()).unwrap();
+    assert!(store.output_preview("session-a", 1, 10).unwrap().is_none());
+    let empty = store.output_preview("session-a", 2, 10).unwrap().unwrap();
+    assert_eq!(empty.text, "");
+    assert!(!empty.truncated);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn output_preview_preserves_unicode_and_scrubs_legacy_rows() {
+    let store = Store::open_in_memory().unwrap();
+    let id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "echo unicode".to_string(),
+            output: "a😀b\nc\0d".to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    let preview = store.output_preview("session-a", id, 10).unwrap().unwrap();
+    assert!(preview.text.contains('😀'));
+    assert!(preview.text.contains('\0'));
+    assert_eq!(
+        store
+            .output_preview("session-a", id, 0)
+            .unwrap()
+            .unwrap()
+            .text,
+        ""
+    );
+}
+
+#[test]
+fn output_preview_handles_multimegabyte_output() {
+    let store = Store::open_in_memory().unwrap();
+    let big = "x".repeat(2_000_000);
+    let id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "cat big".to_string(),
+            output: big,
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    let preview = store.output_preview("session-a", id, 100).unwrap().unwrap();
+    assert_eq!(preview.text.chars().count(), 100);
+    assert!(preview.truncated);
+}
+
+#[test]
+fn output_preview_handles_oversized_budget() {
+    let store = Store::open_in_memory().unwrap();
+    let id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "echo hi".to_string(),
+            output: "hi".to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    let preview = store
+        .output_preview("session-a", id, usize::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(preview.text, "hi");
+    assert!(!preview.truncated);
+}
+
+#[test]
+fn output_preview_scrubs_secret_crossing_boundary() {
+    let store = Store::open_in_memory().unwrap();
+    let mut output = "a".repeat(5);
+    output.push_str("sk-abcdefghijklmnopqrstuvwxyz012345");
+    output.push_str(&"b".repeat(100));
+    let id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "echo secret".to_string(),
+            output,
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    let preview = store.output_preview("session-a", id, 20).unwrap().unwrap();
+    assert!(!preview.text.contains("abcdefghijklmnopqrstuvwxyz"));
+    assert!(preview.text.contains("[REDACTED]"));
+}
+
+#[test]
+fn output_preview_handles_legacy_raw_row() {
+    let path = std::env::temp_dir().join(format!(
+        "zet-blocks-legacy-preview-{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "CREATE TABLE blocks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session TEXT NOT NULL,
+                command TEXT NOT NULL,
+                output TEXT NOT NULL DEFAULT '',
+                exit_code INTEGER NOT NULL DEFAULT 0,
+                cwd TEXT NOT NULL DEFAULT '',
+                git_branch TEXT NOT NULL DEFAULT '',
+                duration_ms INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO blocks (session, command, output, exit_code, cwd, git_branch, duration_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            rusqlite::params![
+                "session-a",
+                "echo legacy",
+                "prefix sk-abcdefghijklmnopqrstuvwxyz012345 suffix",
+                0,
+                "/tmp",
+                "",
+                1
+            ],
+        )
+        .unwrap();
+    }
+    let store = Store::open(path.to_str().unwrap()).unwrap();
+    let id = store.list("session-a").unwrap()[0].id;
+    let preview = store.output_preview("session-a", id, 20).unwrap().unwrap();
+    assert!(!preview.text.contains("abcdefghijklmnopqrstuvwxyz"));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn output_preview_handles_embedded_nul() {
+    let store = Store::open_in_memory().unwrap();
+    let id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "echo nul".to_string(),
+            output: "a\0b\nc".to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    let preview = store.output_preview("session-a", id, 10).unwrap().unwrap();
+    assert!(preview.text.contains('\0'));
+    assert!(preview.text.contains('b'));
+    assert!(preview.text.contains('c'));
+}
+
+#[test]
+fn output_preview_preserves_embedded_nul_content() {
+    let store = Store::open_in_memory().unwrap();
+    let id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "echo nul".to_string(),
+            output: "a\0b\nc".to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    let preview = store.output_preview("session-a", id, 10).unwrap().unwrap();
+    assert_eq!(preview.text, "a\0b\nc");
+    assert!(!preview.truncated);
+}
+
+#[test]
+fn output_preview_truncates_embedded_nul_content() {
+    let store = Store::open_in_memory().unwrap();
+    let id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "echo nul".to_string(),
+            output: "a\0bcdefghijklmnop".to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    let preview = store.output_preview("session-a", id, 3).unwrap().unwrap();
+    assert!(preview.truncated);
+    assert!(preview.text.starts_with("a\0b"));
+}
+
+#[test]
+fn output_preview_unicode_boundary_remains_valid() {
+    let store = Store::open_in_memory().unwrap();
+    let id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "echo unicode".to_string(),
+            output: "😀😀😀".to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    let preview = store.output_preview("session-a", id, 2).unwrap().unwrap();
+    assert_eq!(preview.text, "😀😀");
+    assert!(preview.truncated);
+}

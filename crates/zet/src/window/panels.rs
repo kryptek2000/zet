@@ -50,9 +50,12 @@ pub struct SessionRow {
 /// A real recorded command as shown in the rail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandRow {
+    pub id: i64,
     pub command: String,
     pub exit: String,
     pub duration: String,
+    pub cwd: String,
+    pub git_branch: String,
     pub provenance: Provenance,
 }
 
@@ -1022,6 +1025,29 @@ pub fn sanitize_inspector_text(text: &str, max_cells: usize) -> String {
     truncate_to_cells(collapsed.trim(), max_cells)
 }
 
+/// Sanitize recorded command output for bounded Inspector display. Preserves
+/// line breaks while removing other control characters and bounding the
+/// result.
+pub fn sanitize_inspector_output(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    for (count, c) in text.chars().enumerate() {
+        if count >= max_chars {
+            break;
+        }
+        if c == '\n' {
+            out.push('\n');
+        } else if c == '\r' || c.is_control() {
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Read-only snapshot for the first Contextual Inspector slice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InspectorSnapshot {
@@ -1030,6 +1056,7 @@ pub struct InspectorSnapshot {
     pub cwd: String,
     pub state: String,
     pub exit: String,
+    pub commands: Vec<CommandRow>,
 }
 
 /// Dirty-flagged cache for Inspector snapshots.
@@ -1043,6 +1070,7 @@ pub struct InspectorCache {
     pub last_phase: Option<String>,
     pub last_tab_count: usize,
     pub last_active_dead: bool,
+    pub last_blocks: usize,
     pub last_refresh: Option<Instant>,
     pub poll_interval: Duration,
 }
@@ -1058,6 +1086,7 @@ impl InspectorCache {
             last_phase: None,
             last_tab_count: usize::MAX,
             last_active_dead: true,
+            last_blocks: usize::MAX,
             last_refresh: None,
             poll_interval: Duration::from_millis(250),
         }
@@ -1164,6 +1193,7 @@ mod inspector_cache_tests {
             cwd: "/tmp".to_string(),
             state: "prompt".to_string(),
             exit: "—".to_string(),
+            commands: Vec::new(),
         };
         cache.commit_refresh(
             1,
@@ -1188,6 +1218,7 @@ mod inspector_cache_tests {
             cwd: "/tmp".to_string(),
             state: "prompt".to_string(),
             exit: "—".to_string(),
+            commands: Vec::new(),
         };
         cache.commit_refresh(
             1,
@@ -1211,6 +1242,7 @@ mod inspector_cache_tests {
             cwd: "/tmp".to_string(),
             state: "prompt".to_string(),
             exit: "—".to_string(),
+            commands: Vec::new(),
         };
         cache.commit_refresh(
             1,
