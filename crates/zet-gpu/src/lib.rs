@@ -2,10 +2,12 @@ pub mod atlas;
 pub mod damage;
 pub mod exec_watch;
 pub mod input;
+pub mod presentation;
 pub mod quad;
 pub mod renderer;
 pub mod selection;
 pub mod text;
+pub mod theme;
 
 pub use renderer::Renderer;
 

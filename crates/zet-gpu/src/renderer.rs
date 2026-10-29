@@ -8,11 +8,85 @@ use std::sync::Arc;
 use winit::window::Window;
 
 use crate::atlas::{Atlas, Slot};
-use crate::quad::{cell_quad, Rgba, Vertex};
+use crate::presentation::UiTextStyle;
+use crate::quad::{cell_quad, solid_rect_px, solid_triangle_px, textured_rect_px, Rgba, Vertex};
 use crate::text::Shaper;
+use crate::theme::APERTURE_INSTRUMENT;
 
 const ATLAS_COLS: u32 = 16;
 const ATLAS_ROWS: u32 = 16;
+const UI_ATLAS_WIDTH: u32 = 2048;
+const UI_ATLAS_HEIGHT: u32 = 2048;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct UiGlyphKey {
+    character: char,
+    size_bits: u32,
+    line_height_bits: u32,
+    weight: u16,
+    family: crate::presentation::UiFontFamily,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UiGlyph {
+    slot: Option<Slot>,
+    offset_x: i32,
+    offset_y: i32,
+    advance: f32,
+}
+
+/// A small shelf allocator for variable-sized native chrome glyphs. The
+/// terminal atlas remains fixed-cell and is never mixed with this cache.
+#[derive(Debug)]
+struct UiAtlasPacker {
+    width: u32,
+    height: u32,
+    next_x: u32,
+    next_y: u32,
+    row_height: u32,
+}
+
+impl UiAtlasPacker {
+    fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            next_x: 0,
+            next_y: 0,
+            row_height: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.next_x = 0;
+        self.next_y = 0;
+        self.row_height = 0;
+    }
+
+    fn alloc(&mut self, width: u32, height: u32) -> Option<Slot> {
+        if width == 0 || height == 0 || width > self.width || height > self.height {
+            return None;
+        }
+        let gap = 1;
+        if self.next_x.saturating_add(width) > self.width {
+            self.next_x = 0;
+            self.next_y = self.next_y.saturating_add(self.row_height + gap);
+            self.row_height = 0;
+        }
+        if self.next_y.saturating_add(height) > self.height {
+            return None;
+        }
+        let slot = Slot {
+            x: self.next_x,
+            y: self.next_y,
+            w: width,
+            h: height,
+        };
+        self.next_x = self.next_x.saturating_add(width + gap);
+        self.row_height = self.row_height.max(height);
+        Some(slot)
+    }
+}
 
 const SHADER: &str = r#"
 struct Uniforms { screen: vec2<f32> };
@@ -65,159 +139,74 @@ impl fmt::Display for InitError {
 impl std::error::Error for InitError {}
 
 /// Renderer clear color as a quad tint (for inverted cursor glyphs).
-const BG_RGBA: Rgba = Rgba {
-    r: 0.008,
-    g: 0.012,
-    b: 0.027,
-    a: 1.0,
-};
+const BG_RGBA: Rgba = APERTURE_INSTRUMENT.terminal;
 
 /// Ghost-text ink: dimmed so suggestions read as preview, not content.
-const GHOST_RGBA: Rgba = Rgba {
-    r: 0.42,
-    g: 0.44,
-    b: 0.50,
-    a: 1.0,
-};
+const GHOST_RGBA: Rgba = APERTURE_INSTRUMENT.muted;
 
 /// Mouse-selection fill: dark mint-teal, solid (no blending) with white
 /// ink — distinct from the white-block cursor.
-const SEL_RGBA: Rgba = Rgba {
-    r: 0.10,
-    g: 0.30,
-    b: 0.27,
-    a: 1.0,
-};
+const SEL_RGBA: Rgba = APERTURE_INSTRUMENT.selected;
 
 /// Tab bar: near-black strip; the active segment lifts lighter with
 /// white ink, inactive segments dim. Same quad machinery as cells.
-pub const TABBAR_BG: Rgba = Rgba {
-    r: 0.018,
-    g: 0.026,
-    b: 0.045,
-    a: 1.0,
-};
-pub const TAB_ACTIVE_BG: Rgba = Rgba {
-    r: 0.045,
-    g: 0.075,
-    b: 0.150,
-    a: 1.0,
-};
-pub const TAB_DIM_INK: Rgba = Rgba {
-    r: 0.45,
-    g: 0.48,
-    b: 0.55,
-    a: 1.0,
-};
+pub const TABBAR_BG: Rgba = APERTURE_INSTRUMENT.top_bar;
+pub const TAB_ACTIVE_BG: Rgba = APERTURE_INSTRUMENT.active;
+pub const TAB_HOVER_BG: Rgba = APERTURE_INSTRUMENT.surface_raised;
+pub const TAB_DIM_INK: Rgba = APERTURE_INSTRUMENT.secondary;
 /// Inactive tab label ink; aliases the historical dim ink.
 pub const TAB_INACTIVE_INK: Rgba = TAB_DIM_INK;
 /// One-cell active-tab marker at the left edge of the active segment.
-pub const TAB_ACTIVE_ACCENT: Rgba = Rgba {
-    r: 0.16,
-    g: 0.64,
-    b: 0.78,
-    a: 1.0,
-};
+pub const TAB_ACTIVE_ACCENT: Rgba = APERTURE_INSTRUMENT.cyan;
 /// One-cell separator between tab segments.
-pub const TAB_SEPARATOR: Rgba = Rgba {
-    r: 0.05,
-    g: 0.07,
-    b: 0.11,
-    a: 1.0,
-};
+pub const TAB_SEPARATOR: Rgba = APERTURE_INSTRUMENT.border;
 
 /// Rail panel surface: one step above the terminal's near-black grid.
-pub const RAIL_BG: Rgba = Rgba {
-    r: 0.012,
-    g: 0.018,
-    b: 0.032,
-    a: 1.0,
-};
+pub const RAIL_BG: Rgba = APERTURE_INSTRUMENT.surface;
 /// Rail right-edge rule separating chrome from the live terminal.
-pub const RAIL_BORDER: Rgba = Rgba {
-    r: 0.07,
-    g: 0.10,
-    b: 0.16,
-    a: 1.0,
-};
+pub const RAIL_BORDER: Rgba = APERTURE_INSTRUMENT.border;
 /// Selected session-card fill.
-pub const RAIL_SELECTED_BG: Rgba = Rgba {
-    r: 0.040,
-    g: 0.065,
-    b: 0.125,
-    a: 1.0,
-};
+pub const RAIL_SELECTED_BG: Rgba = APERTURE_INSTRUMENT.selected;
 /// Subtle fill for the active session when it is not the rail selection.
-pub const RAIL_ACTIVE_BG: Rgba = Rgba {
-    r: 0.022,
-    g: 0.035,
-    b: 0.065,
-    a: 1.0,
-};
+pub const RAIL_ACTIVE_BG: Rgba = APERTURE_INSTRUMENT.active;
+/// Card hover surface, reserved for pointer-state wiring.
+pub const RAIL_HOVER_BG: Rgba = APERTURE_INSTRUMENT.surface_raised;
 /// Brand and active-session name ink.
-pub const RAIL_HEADER_INK: Rgba = Rgba::WHITE;
+pub const RAIL_HEADER_INK: Rgba = APERTURE_INSTRUMENT.text;
 /// Section labels (`SESSIONS`, `OBSERVED COMMANDS`).
-pub const RAIL_SECTION_INK: Rgba = Rgba {
-    r: 0.58,
-    g: 0.66,
-    b: 0.80,
-    a: 1.0,
-};
+pub const RAIL_SECTION_INK: Rgba = APERTURE_INSTRUMENT.secondary;
 /// Session names and command text.
-pub const RAIL_TEXT_INK: Rgba = Rgba {
-    r: 0.76,
-    g: 0.82,
-    b: 0.92,
-    a: 1.0,
-};
+pub const RAIL_TEXT_INK: Rgba = APERTURE_INSTRUMENT.text;
 /// Paths, counts and secondary detail.
-pub const RAIL_DIM_INK: Rgba = Rgba {
-    r: 0.40,
-    g: 0.47,
-    b: 0.58,
-    a: 1.0,
-};
+pub const RAIL_DIM_INK: Rgba = APERTURE_INSTRUMENT.muted;
 /// Restrained cyan marker for the active/focused rail state.
-pub const RAIL_ACCENT: Rgba = Rgba {
-    r: 0.16,
-    g: 0.64,
-    b: 0.78,
-    a: 1.0,
-};
+pub const RAIL_ACCENT: Rgba = APERTURE_INSTRUMENT.cyan;
 /// Brighter focus marker used only while the rail owns keyboard focus.
-pub const RAIL_FOCUS: Rgba = Rgba {
-    r: 0.30,
-    g: 0.82,
-    b: 0.92,
-    a: 1.0,
-};
+pub const RAIL_FOCUS: Rgba = APERTURE_INSTRUMENT.cyan;
 /// Live/healthy session state.
-pub const RAIL_OK: Rgba = Rgba {
-    r: 0.18,
-    g: 0.72,
-    b: 0.52,
-    a: 1.0,
-};
+pub const RAIL_OK: Rgba = APERTURE_INSTRUMENT.teal;
 /// Exited/failed session state.
-pub const RAIL_BAD: Rgba = Rgba {
-    r: 0.86,
-    g: 0.30,
-    b: 0.30,
-    a: 1.0,
-};
+pub const RAIL_BAD: Rgba = APERTURE_INSTRUMENT.red;
 /// Footer strip surface and ink.
-pub const RAIL_FOOTER_BG: Rgba = Rgba {
-    r: 0.008,
-    g: 0.012,
-    b: 0.022,
-    a: 1.0,
-};
-pub const RAIL_FOOTER_INK: Rgba = Rgba {
-    r: 0.42,
-    g: 0.50,
-    b: 0.62,
-    a: 1.0,
-};
+pub const RAIL_FOOTER_BG: Rgba = APERTURE_INSTRUMENT.footer;
+pub const RAIL_FOOTER_INK: Rgba = APERTURE_INSTRUMENT.secondary;
+
+/// Shared contextual-panel tokens. These are public so the composition
+/// layer can use the same semantic surfaces as the rail and tab bar.
+pub const PANEL_BG: Rgba = APERTURE_INSTRUMENT.surface;
+pub const PANEL_RAISED: Rgba = APERTURE_INSTRUMENT.surface_raised;
+pub const PANEL_INSET: Rgba = APERTURE_INSTRUMENT.surface_inset;
+pub const PANEL_BORDER: Rgba = APERTURE_INSTRUMENT.border;
+pub const PANEL_BORDER_STRONG: Rgba = APERTURE_INSTRUMENT.border_strong;
+pub const PANEL_TEXT: Rgba = APERTURE_INSTRUMENT.text;
+pub const PANEL_SECONDARY: Rgba = APERTURE_INSTRUMENT.secondary;
+pub const PANEL_MUTED: Rgba = APERTURE_INSTRUMENT.muted;
+pub const PANEL_CYAN: Rgba = APERTURE_INSTRUMENT.cyan;
+pub const PANEL_VIOLET: Rgba = APERTURE_INSTRUMENT.violet;
+pub const PANEL_TEAL: Rgba = APERTURE_INSTRUMENT.teal;
+pub const PANEL_RED: Rgba = APERTURE_INSTRUMENT.red;
+pub const PANEL_AMBER: Rgba = APERTURE_INSTRUMENT.amber;
+pub const PANEL_DANGER: Rgba = APERTURE_INSTRUMENT.danger;
 
 /// Search hits: amber wash for matches, orange for the current one
 /// (white ink, selection precedent — fill + re-inked glyphs).
@@ -296,6 +285,7 @@ pub struct Renderer {
     uniform_buf: wgpu::Buffer,
     uniform_group: wgpu::BindGroup,
     text_group: wgpu::BindGroup,
+    ui_text_group: wgpu::BindGroup,
     shaper: Shaper,
     cell_w: f32,
     cell_h: f32,
@@ -306,6 +296,11 @@ pub struct Renderer {
     slots: HashMap<char, Slot>,
     bg_slot: Option<Slot>,
     quads: Vec<Vertex>,
+    ui_atlas_tex: wgpu::Texture,
+    ui_atlas_size: (u32, u32),
+    ui_atlas_alloc: UiAtlasPacker,
+    ui_glyphs: HashMap<UiGlyphKey, UiGlyph>,
+    ui_quads: Vec<Vertex>,
 }
 
 impl Renderer {
@@ -379,6 +374,20 @@ impl Renderer {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
+        let ui_atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("zet-ui-atlas"),
+            size: wgpu::Extent3d {
+                width: UI_ATLAS_WIDTH,
+                height: UI_ATLAS_HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("zet-uniform"),
@@ -417,6 +426,7 @@ impl Renderer {
             ..Default::default()
         });
         let atlas_view = atlas_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let ui_atlas_view = ui_atlas_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let text_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("zet-text-layout"),
             entries: &[
@@ -445,6 +455,20 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+        let ui_text_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("zet-ui-text-group"),
+            layout: &text_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&ui_atlas_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -499,15 +523,16 @@ impl Renderer {
             queue,
             config,
             bg: wgpu::Color {
-                r: 0.008,
-                g: 0.012,
-                b: 0.027,
+                r: APERTURE_INSTRUMENT.space.r as f64,
+                g: APERTURE_INSTRUMENT.space.g as f64,
+                b: APERTURE_INSTRUMENT.space.b as f64,
                 a: 1.0,
             },
             pipeline,
             uniform_buf,
             uniform_group,
             text_group,
+            ui_text_group,
             shaper,
             cell_w,
             cell_h,
@@ -518,6 +543,11 @@ impl Renderer {
             slots: HashMap::new(),
             bg_slot: None,
             quads: Vec::new(),
+            ui_atlas_tex,
+            ui_atlas_size: (UI_ATLAS_WIDTH, UI_ATLAS_HEIGHT),
+            ui_atlas_alloc: UiAtlasPacker::new(UI_ATLAS_WIDTH, UI_ATLAS_HEIGHT),
+            ui_glyphs: HashMap::new(),
+            ui_quads: Vec::new(),
         };
         renderer.write_uniform(size.width.max(1), size.height.max(1));
         // Reserve the first atlas slot as a solid-white texel for bg fills.
@@ -621,6 +651,129 @@ impl Renderer {
         );
     }
 
+    fn write_ui_glyph(&self, slot: Slot, raster: &crate::text::UiGlyphRaster) {
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.ui_atlas_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: slot.x,
+                    y: slot.y,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &raster.pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(raster.width.saturating_mul(4)),
+                rows_per_image: Some(raster.height),
+            },
+            wgpu::Extent3d {
+                width: raster.width,
+                height: raster.height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    fn ui_glyph(&mut self, character: char, style: UiTextStyle) -> UiGlyph {
+        let key = UiGlyphKey {
+            character,
+            size_bits: style.size_px.to_bits(),
+            line_height_bits: style.line_height_px.to_bits(),
+            weight: style.weight,
+            family: style.family,
+        };
+        if let Some(&glyph) = self.ui_glyphs.get(&key) {
+            return glyph;
+        }
+
+        let raster = self.shaper.rasterize_ui_glyph(
+            character,
+            style.size_px,
+            style.line_height_px,
+            style.weight,
+            style.family,
+        );
+        let glyph = if raster.pixels.is_empty() {
+            UiGlyph {
+                slot: None,
+                offset_x: raster.offset_x,
+                offset_y: raster.offset_y,
+                advance: raster.advance,
+            }
+        } else {
+            let mut slot = self.ui_atlas_alloc.alloc(raster.width, raster.height);
+            if slot.is_none() {
+                // UI text is regenerated on demand. Resetting this bounded
+                // atlas is preferable to growing frame memory without limit;
+                // cached quads are rebuilt on the next redraw.
+                self.ui_atlas_alloc.reset();
+                self.ui_glyphs.clear();
+                slot = self.ui_atlas_alloc.alloc(raster.width, raster.height);
+            }
+            if let Some(slot) = slot {
+                self.write_ui_glyph(slot, &raster);
+                UiGlyph {
+                    slot: Some(slot),
+                    offset_x: raster.offset_x,
+                    offset_y: raster.offset_y,
+                    advance: raster.advance,
+                }
+            } else {
+                UiGlyph {
+                    slot: None,
+                    offset_x: raster.offset_x,
+                    offset_y: raster.offset_y,
+                    advance: raster.advance,
+                }
+            }
+        };
+        self.ui_glyphs.insert(key, glyph);
+        glyph
+    }
+
+    /// Stage native application text at pixel coordinates. This is a separate
+    /// atlas and vertex stream from the terminal grid, so chrome can choose
+    /// its own font size, weight, family, tracking, and clipping width.
+    pub fn draw_ui_text_px(
+        &mut self,
+        x: f32,
+        baseline: f32,
+        text: &str,
+        style: UiTextStyle,
+        ink: Rgba,
+        max_width: Option<u32>,
+    ) -> u32 {
+        let mut pen_x = x;
+        let start_x = x;
+        for character in text.chars() {
+            if character == '\n' || character == '\r' || character == '\t' {
+                continue;
+            }
+            let glyph = self.ui_glyph(character, style);
+            if max_width.is_some_and(|width| pen_x - start_x >= width as f32) {
+                break;
+            }
+            if let Some(slot) = glyph.slot {
+                let width = slot.w;
+                let height = slot.h;
+                self.ui_quads.extend(textured_rect_px(
+                    pen_x + glyph.offset_x as f32,
+                    baseline + glyph.offset_y as f32,
+                    width,
+                    height,
+                    (slot.x, slot.y, slot.w, slot.h),
+                    self.ui_atlas_size,
+                    ink,
+                ));
+            }
+            pen_x += glyph.advance.max(0.0) + style.tracking_px;
+        }
+        (pen_x - start_x).max(0.0).round() as u32
+    }
+
     /// Stage terminal grid cells as textured quads for the next render().
     /// M0: one glyph per cell; CJK/combining alignment is a follow-up.
     /// The cursor cell is drawn inverted (block cursor); mouse-selected
@@ -651,6 +804,7 @@ impl Renderer {
         sel: Option<crate::selection::Selection>,
     ) {
         self.quads.clear();
+        self.ui_quads.clear();
         let (cur_x, cur_y) = term.cursor();
         let show_cursor = term.cursor_visible() && term.view_offset() == 0;
         let sb = term.visible_base();
@@ -733,6 +887,49 @@ impl Renderer {
     /// reachable hit region.
     pub fn draw_tabbar(&mut self, labels: &[String], active: usize, cols: usize) {
         self.draw_tabbar_with_rail(labels, active, cols, 0);
+    }
+
+    /// Paint only the native tab surface at an arbitrary grid row. Text is
+    /// deliberately omitted: the application chrome uses the independent
+    /// pixel UI text stream for variable-size labels.
+    pub fn draw_tabbar_surface_at(
+        &mut self,
+        active: usize,
+        tab_count: usize,
+        cols: usize,
+        rail_cols: usize,
+        row: usize,
+    ) {
+        let n = tab_count.max(1);
+        let segments = crate::selection::tabbar_segments(cols, rail_cols, n);
+        for x in 0..cols {
+            let seg = crate::selection::tabbar_segment_for_x(x, rail_cols, cols, n);
+            let is_active = seg == Some(active);
+            let seg_start = seg.and_then(|s| segments.get(s)).map(|(start, _)| *start);
+            let is_seg_start = seg_start == Some(x);
+            let fill = if is_seg_start {
+                if is_active {
+                    TAB_ACTIVE_ACCENT
+                } else {
+                    TAB_SEPARATOR
+                }
+            } else if is_active {
+                TAB_ACTIVE_BG
+            } else {
+                TABBAR_BG
+            };
+            if let Some(bg_slot) = self.bg_slot {
+                self.quads.extend(cell_quad(
+                    x as u32,
+                    row as u32,
+                    self.cell_w,
+                    self.cell_h,
+                    (bg_slot.x, bg_slot.y),
+                    self.atlas_size,
+                    fill,
+                ));
+            }
+        }
     }
 
     /// Tab bar variant with an excluded leading rail region.
@@ -920,9 +1117,10 @@ impl Renderer {
         }
     }
 
-    /// One row of text at (`vp.x + col`, `vp.y + row`), clipped to the
-    /// viewport. Reuses the existing glyph cache and appends to the
-    /// current quad buffer.
+    /// One row of application text at (`vp.x + col`, `vp.y + row`). The
+    /// historical API is retained for callers that already express chrome
+    /// geometry in cells, but the glyphs now enter the independent pixel UI
+    /// stream rather than the terminal cell atlas.
     /// Newline and other control characters are non-rendering: they still
     /// consume one column in `viewport_text_cells`, but never reach
     /// `slot_for`, so a multi-line string stays on one row with gaps.
@@ -937,22 +1135,14 @@ impl Renderer {
         if row >= clipped.rows || col >= clipped.cols {
             return;
         }
-        for (cx, cy, c) in viewport_text_iter(clipped, row, col, text) {
-            if !is_renderable_text_char(c) {
-                continue;
-            }
-            if let Some(slot) = self.slot_for(c) {
-                self.quads.extend(cell_quad(
-                    cx,
-                    cy,
-                    self.cell_w,
-                    self.cell_h,
-                    (slot.x, slot.y),
-                    self.atlas_size,
-                    ink,
-                ));
-            }
-        }
+        let style = crate::presentation::UI_BODY;
+        let x = (clipped.x + col) as f32 * self.cell_w;
+        let row_top = (clipped.y + row) as f32 * self.cell_h;
+        let baseline = row_top
+            + ((self.cell_h - style.line_height_px).max(0.0) * 0.5)
+            + style.baseline_offset();
+        let max_width = clipped.cols.saturating_sub(col) * self.cell_w as u32;
+        self.draw_ui_text_px(x, baseline, text, style, ink, Some(max_width));
     }
 
     /// A one-cell-wide vertical rule spanning rows `[y0, y1)` at column
@@ -980,6 +1170,546 @@ impl Renderer {
                 color,
             ));
         }
+    }
+
+    /// Stage a bounded pixel-aligned rectangle for native chrome. Pixel
+    /// geometry is deliberately separate from terminal-cell geometry so
+    /// rounded panels never alter PTY sizing or hit testing.
+    pub fn draw_rect_px(&mut self, x: u32, y: u32, width: u32, height: u32, color: Rgba) {
+        if width == 0 || height == 0 || x >= self.config.width || y >= self.config.height {
+            return;
+        }
+        let Some(atlas_uv) = self.solid_uv() else {
+            return;
+        };
+        let x1 = x.saturating_add(width).min(self.config.width);
+        let y1 = y.saturating_add(height).min(self.config.height);
+        if x1 <= x || y1 <= y {
+            return;
+        }
+        self.quads.extend(solid_rect_px(
+            x as f32, y as f32, x1 as f32, y1 as f32, atlas_uv, color,
+        ));
+    }
+
+    /// Stage a rounded pixel-aligned rectangle as a small triangle fan. Four
+    /// segments per corner keep the silhouette smooth at normal display
+    /// scales without introducing a second shader or a full-screen effect.
+    pub fn draw_rounded_rect_px(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        radius: u32,
+        color: Rgba,
+    ) {
+        if width == 0 || height == 0 || x >= self.config.width || y >= self.config.height {
+            return;
+        }
+        let Some(atlas_uv) = self.solid_uv() else {
+            return;
+        };
+        let x1 = x.saturating_add(width).min(self.config.width);
+        let y1 = y.saturating_add(height).min(self.config.height);
+        if x1 <= x || y1 <= y {
+            return;
+        }
+        let radius = radius.min((x1 - x) / 2).min((y1 - y) / 2) as f32;
+        if radius < 0.5 {
+            self.quads.extend(solid_rect_px(
+                x as f32, y as f32, x1 as f32, y1 as f32, atlas_uv, color,
+            ));
+            return;
+        }
+        let x0 = x as f32;
+        let y0 = y as f32;
+        let x1 = x1 as f32;
+        let y1 = y1 as f32;
+        let corners = [
+            (x0 + radius, y0 + radius, std::f32::consts::PI),
+            (x1 - radius, y0 + radius, std::f32::consts::FRAC_PI_2 * 3.0),
+            (x1 - radius, y1 - radius, 0.0),
+            (x0 + radius, y1 - radius, std::f32::consts::FRAC_PI_2),
+        ];
+        let mut points = Vec::with_capacity(16);
+        for (cx, cy, start) in corners {
+            for segment in 0..4 {
+                let angle = start + std::f32::consts::FRAC_PI_2 * segment as f32 / 4.0;
+                points.push([cx + radius * angle.cos(), cy + radius * angle.sin()]);
+            }
+        }
+        let center = [(x0 + x1) * 0.5, (y0 + y1) * 0.5];
+        for i in 0..points.len() {
+            let next = points[(i + 1) % points.len()];
+            self.quads
+                .extend(solid_triangle_px(center, points[i], next, atlas_uv, color));
+        }
+    }
+
+    /// Stage an architectural panel with clipped corners. Aperture uses this
+    /// for the global frame and selected evidence surfaces; ordinary rows can
+    /// continue to use the cheaper rectangular/rounded primitives.
+    pub fn draw_chamfered_rect_px(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        cut: u32,
+        color: Rgba,
+    ) {
+        if width == 0 || height == 0 || x >= self.config.width || y >= self.config.height {
+            return;
+        }
+        let Some(atlas_uv) = self.solid_uv() else {
+            return;
+        };
+        let x1 = x.saturating_add(width).min(self.config.width);
+        let y1 = y.saturating_add(height).min(self.config.height);
+        if x1 <= x || y1 <= y {
+            return;
+        }
+        let cut = cut.min((x1 - x) / 2).min((y1 - y) / 2) as f32;
+        if cut < 0.5 {
+            self.quads.extend(solid_rect_px(
+                x as f32, y as f32, x1 as f32, y1 as f32, atlas_uv, color,
+            ));
+            return;
+        }
+        let x0 = x as f32;
+        let y0 = y as f32;
+        let x1 = x1 as f32;
+        let y1 = y1 as f32;
+        let points = [
+            [x0 + cut, y0],
+            [x1 - cut, y0],
+            [x1, y0 + cut],
+            [x1, y1 - cut],
+            [x1 - cut, y1],
+            [x0 + cut, y1],
+            [x0, y1 - cut],
+            [x0, y0 + cut],
+        ];
+        let center = [(x0 + x1) * 0.5, (y0 + y1) * 0.5];
+        for index in 0..points.len() {
+            self.quads.extend(solid_triangle_px(
+                center,
+                points[index],
+                points[(index + 1) % points.len()],
+                atlas_uv,
+                color,
+            ));
+        }
+    }
+
+    /// A one-pixel precision border plus a chamfered inset surface.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_chamfered_panel_px(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        cut: u32,
+        fill: Rgba,
+        border: Rgba,
+    ) {
+        self.draw_chamfered_rect_px(x, y, width, height, cut, border);
+        if width > 2 && height > 2 {
+            self.draw_chamfered_rect_px(
+                x.saturating_add(1),
+                y.saturating_add(1),
+                width.saturating_sub(2),
+                height.saturating_sub(2),
+                cut.saturating_sub(1),
+                fill,
+            );
+        }
+    }
+
+    /// Draw the compact geometric Aperture identity mark. It is a stylized Z
+    /// built from three precise bars, so it remains legible at small DPI and
+    /// does not depend on a bundled logo font or an external image asset.
+    pub fn draw_aperture_mark_px(&mut self, x: u32, y: u32, size: u32, color: Rgba) {
+        let Some(atlas_uv) = self.solid_uv() else {
+            return;
+        };
+        if size < 4 {
+            return;
+        }
+        let x = x as f32;
+        let y = y as f32;
+        let s = size as f32;
+        let t = (s * 0.22).max(2.0);
+        let polygon = |a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2]| {
+            [
+                solid_triangle_px(a, b, c, atlas_uv, color),
+                solid_triangle_px(a, c, d, atlas_uv, color),
+            ]
+        };
+        let bars = [
+            polygon([x, y], [x + s, y], [x + s - t, y + t], [x + t, y + t]),
+            polygon(
+                [x + s - t, y + t],
+                [x + s, y + t],
+                [x + t, y + s - t],
+                [x, y + s - t],
+            ),
+            polygon(
+                [x + t, y + s - t],
+                [x + s, y + s - t],
+                [x + s - t, y + s],
+                [x, y + s],
+            ),
+        ];
+        for bar in bars {
+            self.quads.extend(bar.into_iter().flatten());
+        }
+    }
+
+    /// Draw the faceted Aperture cyber crystal mark matching the owner-approved
+    /// Aperture Instrument concept. Uses multi-tonal polygons for depth and
+    /// electric cyan luminance.
+    pub fn draw_aperture_crystal_mark_px(&mut self, x: u32, y: u32, width: u32, height: u32) {
+        let Some(atlas_uv) = self.solid_uv() else {
+            return;
+        };
+        if width < 6 || height < 6 {
+            return;
+        }
+        let x = x as f32;
+        let y = y as f32;
+        let w = width as f32;
+        let h = height as f32;
+
+        let hi_color = Rgba::from_hex(0x7CE8FF);
+        let main_color = Rgba::from_hex(0x38D9FA);
+        let dark_color = Rgba::from_hex(0x0284C7);
+
+        // Top highlight facet
+        let p0 = [x + w * 0.15, y];
+        let p1 = [x + w * 0.70, y];
+        let p2 = [x + w * 0.55, y + h * 0.28];
+        let p3 = [x + w * 0.08, y + h * 0.28];
+        self.quads.extend(
+            [
+                solid_triangle_px(p0, p1, p2, atlas_uv, hi_color),
+                solid_triangle_px(p0, p2, p3, atlas_uv, hi_color),
+            ]
+            .into_iter()
+            .flatten(),
+        );
+
+        // Main diagonal body
+        let p4 = [x, y + h * 0.82];
+        let p5 = [x + w * 0.12, y + h];
+        let p6 = [x + w * 0.48, y + h * 0.40];
+        self.quads.extend(
+            [
+                solid_triangle_px(p3, p2, p6, atlas_uv, main_color),
+                solid_triangle_px(p3, p6, p4, atlas_uv, main_color),
+                solid_triangle_px(p4, p6, p5, atlas_uv, main_color),
+            ]
+            .into_iter()
+            .flatten(),
+        );
+
+        // Lower right wedge
+        let p7 = [x + w * 0.42, y + h];
+        let p8 = [x + w * 0.92, y + h];
+        let p9 = [x + w * 0.92, y + h * 0.45];
+        self.quads
+            .extend(solid_triangle_px(p7, p8, p9, atlas_uv, dark_color));
+
+        // Wedge highlight
+        let p10 = [x + w * 0.65, y + h * 0.45];
+        self.quads
+            .extend(solid_triangle_px(p7, p10, p9, atlas_uv, main_color));
+    }
+
+    /// Draw large, distinctive geometric ZET branding ('Z', 'E', 'T' vector letters).
+    /// Returns the total width consumed in pixels.
+    pub fn draw_zet_brand_px(&mut self, x: u32, y: u32, height: u32, color: Rgba) -> u32 {
+        if height < 6 {
+            return 0;
+        }
+        let h = height as f32;
+        let w = (h * 0.72).round().max(4.0);
+        let t = (h * 0.22).round().max(2.0);
+        let gap = (h * 0.32).round().max(3.0);
+        let x0 = x as f32;
+        let y0 = y as f32;
+
+        let Some(atlas_uv) = self.solid_uv() else {
+            return 0;
+        };
+
+        // Letter 'Z'
+        self.quads
+            .extend(solid_rect_px(x0, y0, x0 + w, y0 + t, atlas_uv, color));
+        self.quads.extend(solid_rect_px(
+            x0,
+            y0 + h - t,
+            x0 + w,
+            y0 + h,
+            atlas_uv,
+            color,
+        ));
+        // Diagonal bar of Z
+        let z_diag = [
+            solid_triangle_px(
+                [x0 + w, y0 + t],
+                [x0 + w - t * 0.75, y0 + t],
+                [x0, y0 + h - t],
+                atlas_uv,
+                color,
+            ),
+            solid_triangle_px(
+                [x0 + w, y0 + t],
+                [x0, y0 + h - t],
+                [x0 + t * 0.75, y0 + h - t],
+                atlas_uv,
+                color,
+            ),
+        ];
+        self.quads.extend(z_diag.into_iter().flatten());
+
+        // Letter 'E'
+        let ex = x0 + w + gap;
+        self.quads
+            .extend(solid_rect_px(ex, y0, ex + t, y0 + h, atlas_uv, color));
+        self.quads
+            .extend(solid_rect_px(ex + t, y0, ex + w, y0 + t, atlas_uv, color));
+        let mid_y = y0 + ((h - t) * 0.5).round();
+        self.quads.extend(solid_rect_px(
+            ex + t,
+            mid_y,
+            ex + w * 0.85,
+            mid_y + t,
+            atlas_uv,
+            color,
+        ));
+        self.quads.extend(solid_rect_px(
+            ex + t,
+            y0 + h - t,
+            ex + w,
+            y0 + h,
+            atlas_uv,
+            color,
+        ));
+
+        // Letter 'T'
+        let tx = ex + w + gap;
+        self.quads
+            .extend(solid_rect_px(tx, y0, tx + w, y0 + t, atlas_uv, color));
+        let stem_x = tx + ((w - t) * 0.5).round();
+        self.quads.extend(solid_rect_px(
+            stem_x,
+            y0 + t,
+            stem_x + t,
+            y0 + h,
+            atlas_uv,
+            color,
+        ));
+
+        (3.0 * w + 2.0 * gap) as u32
+    }
+
+    /// Draw precision cyan corner brackets/seams for Aperture Instrument panels.
+    pub fn draw_corner_brackets_px(
+        &mut self,
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+        cut: u32,
+        color: Rgba,
+    ) {
+        if x1 <= x0 || y1 <= y0 || cut == 0 {
+            return;
+        }
+        let Some(atlas_uv) = self.solid_uv() else {
+            return;
+        };
+        let (x0, y0, x1, y1, cut) = (x0 as f32, y0 as f32, x1 as f32, y1 as f32, cut as f32);
+        let arm = (cut * 0.8).max(5.0);
+        let t = 2.0f32;
+
+        // Top-Left: angled seam from (x0, y0+cut) to (x0+cut, y0) + arms
+        self.draw_line_px(x0, y0 + cut, x0 + cut, y0, t, color);
+        self.quads.extend(solid_rect_px(
+            x0 + cut,
+            y0,
+            x0 + cut + arm,
+            y0 + t,
+            atlas_uv,
+            color,
+        ));
+        self.quads.extend(solid_rect_px(
+            x0,
+            y0 + cut,
+            x0 + t,
+            y0 + cut + arm,
+            atlas_uv,
+            color,
+        ));
+
+        // Top-Right: angled seam from (x1-cut, y0) to (x1, y0+cut) + arms
+        self.draw_line_px(x1 - cut, y0, x1, y0 + cut, t, color);
+        self.quads.extend(solid_rect_px(
+            x1 - cut - arm,
+            y0,
+            x1 - cut,
+            y0 + t,
+            atlas_uv,
+            color,
+        ));
+        self.quads.extend(solid_rect_px(
+            x1 - t,
+            y0 + cut,
+            x1,
+            y0 + cut + arm,
+            atlas_uv,
+            color,
+        ));
+
+        // Bottom-Left: angled seam from (x0, y1-cut) to (x0+cut, y1) + arms
+        self.draw_line_px(x0, y1 - cut, x0 + cut, y1, t, color);
+        self.quads.extend(solid_rect_px(
+            x0 + cut,
+            y1 - t,
+            x0 + cut + arm,
+            y1,
+            atlas_uv,
+            color,
+        ));
+        self.quads.extend(solid_rect_px(
+            x0,
+            y1 - cut - arm,
+            x0 + t,
+            y1 - cut,
+            atlas_uv,
+            color,
+        ));
+
+        // Bottom-Right: angled seam from (x1-cut, y1) to (x1, y1-cut) + arms
+        self.draw_line_px(x1 - cut, y1, x1, y1 - cut, t, color);
+        self.quads.extend(solid_rect_px(
+            x1 - cut - arm,
+            y1 - t,
+            x1 - cut,
+            y1,
+            atlas_uv,
+            color,
+        ));
+        self.quads.extend(solid_rect_px(
+            x1 - t,
+            y1 - cut - arm,
+            x1,
+            y1 - cut,
+            atlas_uv,
+            color,
+        ));
+    }
+
+    /// Draw a line segment of specified thickness with solid tint.
+    pub fn draw_line_px(
+        &mut self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        thickness: f32,
+        color: Rgba,
+    ) {
+        let Some(atlas_uv) = self.solid_uv() else {
+            return;
+        };
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 0.001 {
+            return;
+        }
+        let nx = -dy / len * (thickness * 0.5);
+        let ny = dx / len * (thickness * 0.5);
+
+        let p0 = [x0 + nx, y0 + ny];
+        let p1 = [x1 + nx, y1 + ny];
+        let p2 = [x1 - nx, y1 - ny];
+        let p3 = [x0 - nx, y0 - ny];
+
+        self.quads.extend(
+            [
+                solid_triangle_px(p0, p1, p2, atlas_uv, color),
+                solid_triangle_px(p0, p2, p3, atlas_uv, color),
+            ]
+            .into_iter()
+            .flatten(),
+        );
+    }
+
+    /// Draw a circular status dot with optional subtle aura/halo.
+    pub fn draw_status_dot_px(
+        &mut self,
+        cx: u32,
+        cy: u32,
+        radius: u32,
+        fill: Rgba,
+        halo: Option<Rgba>,
+    ) {
+        let Some(atlas_uv) = self.solid_uv() else {
+            return;
+        };
+        let (cx, cy) = (cx as f32, cy as f32);
+        if let Some(halo_col) = halo {
+            let hr = radius as f32 + 3.0;
+            let segments = 12;
+            for i in 0..segments {
+                let a0 = i as f32 * std::f32::consts::TAU / segments as f32;
+                let a1 = (i + 1) as f32 * std::f32::consts::TAU / segments as f32;
+                let p0 = [cx + hr * a0.cos(), cy + hr * a0.sin()];
+                let p1 = [cx + hr * a1.cos(), cy + hr * a1.sin()];
+                self.quads
+                    .extend(solid_triangle_px([cx, cy], p0, p1, atlas_uv, halo_col));
+            }
+        }
+        let r = radius as f32;
+        let segments = 12;
+        for i in 0..segments {
+            let a0 = i as f32 * std::f32::consts::TAU / segments as f32;
+            let a1 = (i + 1) as f32 * std::f32::consts::TAU / segments as f32;
+            let p0 = [cx + r * a0.cos(), cy + r * a0.sin()];
+            let p1 = [cx + r * a1.cos(), cy + r * a1.sin()];
+            self.quads
+                .extend(solid_triangle_px([cx, cy], p0, p1, atlas_uv, fill));
+        }
+    }
+
+    /// Stage a small geometric diamond for the ZET identity mark.
+    pub fn draw_diamond_px(&mut self, center: (u32, u32), radius: u32, color: Rgba) {
+        let Some(atlas_uv) = self.solid_uv() else {
+            return;
+        };
+        let (cx, cy) = (center.0 as f32, center.1 as f32);
+        let r = radius as f32;
+        let top = [cx, cy - r];
+        let right = [cx + r, cy];
+        let bottom = [cx, cy + r];
+        let left = [cx - r, cy];
+        self.quads
+            .extend(solid_triangle_px(top, right, bottom, atlas_uv, color));
+        self.quads
+            .extend(solid_triangle_px(top, bottom, left, atlas_uv, color));
+    }
+
+    fn solid_uv(&self) -> Option<[f32; 2]> {
+        let slot = self.bg_slot?;
+        Some([
+            (slot.x as f32 + self.cell_w * 0.5) / self.atlas_size.0 as f32,
+            (slot.y as f32 + self.cell_h * 0.5) / self.atlas_size.1 as f32,
+        ])
     }
 }
 
@@ -1039,15 +1769,25 @@ impl Renderer {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let terminal_vertices = self.quads.len();
+        let ui_vertices = self.ui_quads.len();
+        let total_vertices = terminal_vertices.saturating_add(ui_vertices);
         let vbuf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("zet-quads"),
-            size: (self.quads.len() * 32).max(32) as u64,
+            size: (total_vertices * 32).max(32) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        if !self.quads.is_empty() {
+        if terminal_vertices > 0 {
             self.queue
                 .write_buffer(&vbuf, 0, bytemuck::cast_slice(&self.quads));
+        }
+        if ui_vertices > 0 {
+            self.queue.write_buffer(
+                &vbuf,
+                (terminal_vertices * 32) as u64,
+                bytemuck::cast_slice(&self.ui_quads),
+            );
         }
         let mut encoder = self
             .device
@@ -1071,12 +1811,18 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if !self.quads.is_empty() {
+            if total_vertices > 0 {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.uniform_group, &[]);
-                pass.set_bind_group(1, &self.text_group, &[]);
                 pass.set_vertex_buffer(0, vbuf.slice(..));
-                pass.draw(0..self.quads.len() as u32, 0..1);
+                if terminal_vertices > 0 {
+                    pass.set_bind_group(1, &self.text_group, &[]);
+                    pass.draw(0..terminal_vertices as u32, 0..1);
+                }
+                if ui_vertices > 0 {
+                    pass.set_bind_group(1, &self.ui_text_group, &[]);
+                    pass.draw(terminal_vertices as u32..total_vertices as u32, 0..1);
+                }
             }
         }
         self.queue.submit(Some(encoder.finish()));
@@ -1308,6 +2054,21 @@ pub fn viewport_cell_origin(vp: Viewport, col: u32, row: u32) -> Option<(u32, u3
 #[cfg(test)]
 mod viewport_tests {
     use super::*;
+
+    #[test]
+    fn ui_atlas_packer_wraps_shelves_without_overlap() {
+        let mut packer = UiAtlasPacker::new(10, 10);
+        let first = packer.alloc(4, 3).expect("first slot");
+        let second = packer.alloc(4, 3).expect("second slot");
+        let third = packer.alloc(6, 3).expect("wrapped slot");
+
+        assert_eq!((first.x, first.y), (0, 0));
+        assert_eq!((second.x, second.y), (5, 0));
+        assert_eq!((third.x, third.y), (0, 4));
+        assert!(first.x + first.w <= second.x);
+        assert!(second.x + second.w <= 10);
+        assert!(third.y + third.h <= 10);
+    }
 
     #[test]
     fn viewport_origin_offsets_search_cell() {
