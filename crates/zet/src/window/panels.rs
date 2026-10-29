@@ -219,6 +219,25 @@ pub fn format_command_row(command: &str, exit: &str, duration: &str, cols: u32) 
     }
 }
 
+/// Format the second line of a two-row command card. The readable form keeps
+/// the field names when the row has room; the existing bounded formatter is
+/// the conservative fallback for narrow rails so a duration unit is never
+/// rendered as a misleading bare number.
+pub fn format_command_metadata(exit: &str, duration: &str, cols: u32) -> String {
+    let cols = cols as usize;
+    if cols == 0 {
+        return String::new();
+    }
+    let exit = single_line(exit);
+    let duration = single_line(duration);
+    let labeled = format!("exit {exit}  {duration}");
+    if text_cells(&labeled) <= cols {
+        labeled
+    } else {
+        format_command_row("", &exit, &duration, cols as u32)
+    }
+}
+
 fn compact_duration(duration: &str, cols: usize) -> String {
     if cols == 0 {
         return String::new();
@@ -486,6 +505,7 @@ pub enum RailRow {
     SessionDetail(usize),
     CommandsHeader,
     Command(usize),
+    CommandDetail(usize),
     Footer,
     Empty,
 }
@@ -495,6 +515,9 @@ pub const SESSION_CARD_ROWS: usize = 2;
 /// Expanded rails leave one blank row between cards. Compact rails spend
 /// every row on a real session instead.
 pub const SESSION_GAP_ROWS: usize = 1;
+/// Every observed command owns a command line and a separate evidence line.
+/// Keeping this in the pure layout model makes drawing and hit-testing agree.
+pub const COMMAND_CARD_ROWS: usize = 2;
 
 /// Deterministic rail row layout shared by rendering and hit testing.
 ///
@@ -546,15 +569,17 @@ pub fn rail_rows(viewport_rows: u32, session_count: usize, command_count: usize)
         }
     }
 
-    if command_count > 0 && cursor + 2 < footer_row {
+    if command_count > 0 && cursor + 1 + COMMAND_CARD_ROWS < footer_row {
         rows[cursor] = RailRow::Empty;
         cursor += 1;
         rows[cursor] = RailRow::CommandsHeader;
         cursor += 1;
-        let command_capacity = footer_row.saturating_sub(cursor);
+        let command_capacity = footer_row.saturating_sub(cursor) / COMMAND_CARD_ROWS;
         let visible_commands = command_count.min(command_capacity);
         for i in 0..visible_commands {
-            rows[cursor + i] = RailRow::Command(i);
+            let command_row = cursor + i * COMMAND_CARD_ROWS;
+            rows[command_row] = RailRow::Command(i);
+            rows[command_row + 1] = RailRow::CommandDetail(i);
         }
     }
 
@@ -587,7 +612,7 @@ pub fn rail_command_at_row(
     viewport_rows: u32,
 ) -> Option<usize> {
     match rail_rows(viewport_rows, session_count, command_count).get(row as usize) {
-        Some(RailRow::Command(index)) => Some(*index),
+        Some(RailRow::Command(index)) | Some(RailRow::CommandDetail(index)) => Some(*index),
         _ => None,
     }
 }
@@ -603,7 +628,7 @@ pub fn rail_row_layout(
 
 #[cfg(test)]
 mod rail_row_tests {
-    use super::{rail_command_at_row, rail_rows, rail_session_at_row, RailRow};
+    use super::{rail_command_at_row, rail_rows, rail_session_at_row, RailRow, COMMAND_CARD_ROWS};
 
     #[test]
     fn one_session_has_two_rows_and_footer_last() {
@@ -665,16 +690,57 @@ mod rail_row_tests {
                 .count(),
             3
         );
+        assert_eq!(rows[11], RailRow::Command(0));
+        assert_eq!(rows[12], RailRow::CommandDetail(0));
+        assert_eq!(rows[13], RailRow::Command(1));
+        assert_eq!(rows[14], RailRow::CommandDetail(1));
+        assert_eq!(rows[15], RailRow::Command(2));
+        assert_eq!(rows[16], RailRow::CommandDetail(2));
         assert_eq!(rows[19], RailRow::Footer);
     }
 
     #[test]
     fn rail_command_hit_testing_matches_observed_rows() {
         assert_eq!(rail_command_at_row(11, 2, 3, 20), Some(0));
-        assert_eq!(rail_command_at_row(12, 2, 3, 20), Some(1));
-        assert_eq!(rail_command_at_row(13, 2, 3, 20), Some(2));
+        assert_eq!(rail_command_at_row(12, 2, 3, 20), Some(0));
+        assert_eq!(rail_command_at_row(13, 2, 3, 20), Some(1));
+        assert_eq!(rail_command_at_row(14, 2, 3, 20), Some(1));
+        assert_eq!(rail_command_at_row(15, 2, 3, 20), Some(2));
+        assert_eq!(rail_command_at_row(16, 2, 3, 20), Some(2));
         assert_eq!(rail_command_at_row(10, 2, 3, 20), None);
         assert_eq!(rail_command_at_row(19, 2, 3, 20), None);
+    }
+
+    #[test]
+    fn commands_are_paired_and_never_cross_the_footer() {
+        for rows in 0u32..=40 {
+            for sessions in 0usize..=8 {
+                for commands in 0usize..=8 {
+                    let layout = rail_rows(rows, sessions, commands);
+                    for (row, kind) in layout.iter().enumerate() {
+                        let Some(index) = (match kind {
+                            RailRow::Command(index) | RailRow::CommandDetail(index) => Some(*index),
+                            _ => None,
+                        }) else {
+                            continue;
+                        };
+                        let expected = if matches!(kind, RailRow::Command(_)) {
+                            RailRow::CommandDetail(index)
+                        } else {
+                            RailRow::Command(index)
+                        };
+                        let pair = layout.get(if matches!(kind, RailRow::Command(_)) {
+                            row + 1
+                        } else {
+                            row.saturating_sub(1)
+                        });
+                        assert_eq!(pair, Some(&expected), "unpaired command row {row}");
+                        assert!(row < layout.len().saturating_sub(1));
+                    }
+                }
+            }
+        }
+        assert_eq!(COMMAND_CARD_ROWS, 2);
     }
 
     #[test]
@@ -917,6 +983,27 @@ mod tests {
         let row = format_command_row("make --a-very-long-target-name", "—", "—", 24);
         assert!(row.ends_with("— —"));
         assert_fits(&row, 24);
+    }
+
+    #[test]
+    fn command_metadata_prefers_labeled_evidence_when_it_fits() {
+        let row = format_command_metadata("127", "812ms", 20);
+        assert_eq!(row, "exit 127  812ms");
+        assert_fits(&row, 20);
+    }
+
+    #[test]
+    fn command_metadata_stays_bounded_on_narrow_rails() {
+        for cols in 0..=24u32 {
+            let row = format_command_metadata("127", "812ms", cols);
+            assert_fits(&row, cols);
+            if cols >= 6 {
+                assert!(
+                    row.ends_with("812ms") || row.ends_with("…ms"),
+                    "cols={cols}: duration lost in {row:?}"
+                );
+            }
+        }
     }
 
     #[test]

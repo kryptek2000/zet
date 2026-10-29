@@ -1642,9 +1642,9 @@ impl App {
     ) {
         use zet_gpu::renderer::{
             PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_DANGER, PANEL_INSET, PANEL_RED, PANEL_SECONDARY,
-            PANEL_TEAL, PANEL_VIOLET, RAIL_ACCENT, RAIL_ACTIVE_BG, RAIL_BORDER, RAIL_DIM_INK,
-            RAIL_FOCUS, RAIL_FOOTER_BG, RAIL_FOOTER_INK, RAIL_HEADER_INK, RAIL_HOVER_BG,
-            RAIL_SECTION_INK, RAIL_SELECTED_BG, RAIL_TEXT_INK,
+            PANEL_TEAL, PANEL_TEXT, PANEL_VIOLET, RAIL_ACCENT, RAIL_ACTIVE_BG, RAIL_BORDER,
+            RAIL_DIM_INK, RAIL_FOCUS, RAIL_FOOTER_BG, RAIL_FOOTER_INK, RAIL_HEADER_INK,
+            RAIL_HOVER_BG, RAIL_SECTION_INK, RAIL_SELECTED_BG, RAIL_TEXT_INK,
         };
         let (cw, ch) = r.cell_px();
         let origin_x = vp.x.saturating_mul(cw);
@@ -1930,14 +1930,15 @@ impl App {
                     if let Some(command) = snapshot.commands.get(index) {
                         let failed = !matches!(command.exit.as_str(), "0" | "—");
                         let selected_command_row = selected_command == Some(command.id);
-                        let hovered_command_row = hovered_row == Some(row);
+                        let hovered_command_row = hovered_row
+                            .is_some_and(|hover| hover == row || hover == row.saturating_add(1));
 
                         if selected_command_row || hovered_command_row {
                             Self::draw_panel_card(
                                 r,
                                 vp,
                                 row,
-                                1,
+                                panels::COMMAND_CARD_ROWS as u32,
                                 if selected_command_row {
                                     RAIL_SELECTED_BG
                                 } else {
@@ -1954,7 +1955,8 @@ impl App {
                                     .saturating_add(row.saturating_mul(ch))
                                     .saturating_add(4),
                                 3,
-                                ch.saturating_sub(8),
+                                ch.saturating_mul(panels::COMMAND_CARD_ROWS as u32)
+                                    .saturating_sub(8),
                                 if failed {
                                     PANEL_RED
                                 } else if focused {
@@ -1965,11 +1967,34 @@ impl App {
                             );
                         }
 
+                        let line_ink = if selected_command_row {
+                            PANEL_TEXT
+                        } else {
+                            RAIL_TEXT_INK
+                        };
+                        let command_text = panels::truncate_to_cells(
+                            &command.command,
+                            content_cols.saturating_sub(5) as usize,
+                        );
+                        Self::draw_ui_row(r, content, row, 5, &command_text, UI_BODY, line_ink);
+                    }
+                }
+                panels::RailRow::CommandDetail(index) => {
+                    if let Some(command) = snapshot.commands.get(index) {
+                        let failed = !matches!(command.exit.as_str(), "0" | "—");
+                        let selected_command_row = selected_command == Some(command.id);
+                        let status_ink = if failed {
+                            PANEL_RED
+                        } else if selected_command_row {
+                            PANEL_CYAN
+                        } else {
+                            PANEL_TEAL
+                        };
                         if failed {
                             r.draw_status_dot_px(
                                 origin_x + cw * 3 + 2,
                                 node_y,
-                                5,
+                                if selected_command_row { 5 } else { 4 },
                                 PANEL_RED,
                                 Some(PANEL_DANGER),
                             );
@@ -1978,27 +2003,17 @@ impl App {
                             r.draw_status_dot_px(
                                 origin_x + cw * 3 + 2,
                                 node_y,
-                                4,
+                                if selected_command_row { 4 } else { 3 },
                                 PANEL_TEAL,
                                 None,
                             );
                         }
-
-                        let line_ink = if selected_command_row {
-                            PANEL_SECONDARY
-                        } else {
-                            RAIL_TEXT_INK
-                        };
-                        Self::draw_command_summary_row(
-                            r,
-                            content,
-                            row,
-                            4,
-                            2,
-                            command,
-                            line_ink,
-                            if failed { PANEL_RED } else { PANEL_TEAL },
+                        let status = panels::format_command_metadata(
+                            &command.exit,
+                            &command.duration,
+                            content_cols.saturating_sub(6),
                         );
+                        Self::draw_ui_row(r, content, row, 5, &status, UI_META, status_ink);
                     }
                 }
                 panels::RailRow::Footer => {
@@ -2516,20 +2531,34 @@ impl App {
                 vp,
                 card_row + 1,
                 4,
-                &panels::truncate_to_cells(&command.command, vp.cols.saturating_sub(6) as usize),
+                &panels::truncate_to_cells(&command.command, vp.cols.saturating_sub(10) as usize),
                 UI_COMMAND,
                 PANEL_TEXT,
             );
         }
-        if card_rows > 2 {
-            Self::draw_evidence_group_heading(r, vp, card_row + 2, "OBSERVED RESULT", PANEL_VIOLET);
+        // The evidence groups are inset from the selected-command surface.
+        // Their rows are deliberately separated so dividers never share a
+        // baseline with a value, and each group remains visually legible on
+        // the narrowest supported Inspector.
+        let observed_heading = card_row.saturating_add(2);
+        let observed_exit = card_row.saturating_add(4);
+        let observed_duration = card_row.saturating_add(5);
+        if observed_heading.saturating_add(4) <= vp.rows {
+            Self::draw_instrument_surface(r, vp, observed_heading, 4, PANEL_INSET, PANEL_BORDER, 6);
+            Self::draw_evidence_group_heading(
+                r,
+                vp,
+                observed_heading,
+                "OBSERVED RESULT",
+                PANEL_VIOLET,
+            );
         }
-        if card_rows > 3 {
-            Self::draw_ui_row(r, vp, card_row + 3, 2, "EXIT", UI_META, PANEL_MUTED);
+        if observed_exit < vp.rows {
+            Self::draw_ui_row(r, vp, observed_exit, 2, "EXIT", UI_META, PANEL_MUTED);
             Self::draw_ui_row(
                 r,
                 vp,
-                card_row + 3,
+                observed_exit,
                 8,
                 &command.exit,
                 UI_VALUE,
@@ -2537,47 +2566,62 @@ impl App {
             );
             r.draw_status_dot_px(
                 vp.x.saturating_mul(cw).saturating_add(cw.saturating_mul(6)),
-                vp.y.saturating_add(card_row + 3)
+                vp.y.saturating_add(observed_exit)
                     .saturating_mul(ch)
                     .saturating_add(ch / 2),
                 3,
                 if failed { PANEL_RED } else { PANEL_TEAL },
                 None,
             );
-            Self::draw_ui_row(r, vp, card_row + 3, 15, "DURATION", UI_META, PANEL_MUTED);
+        }
+        if observed_duration < vp.rows {
             Self::draw_ui_row(
                 r,
                 vp,
-                card_row + 3,
-                25.min(vp.cols.saturating_sub(1)),
+                observed_duration,
+                2,
+                "DURATION",
+                UI_META,
+                PANEL_MUTED,
+            );
+            Self::draw_ui_row(
+                r,
+                vp,
+                observed_duration,
+                12,
                 &command.duration,
                 UI_VALUE,
                 PANEL_SECONDARY,
             );
         }
-        if card_rows > 5 {
+        let context_heading = card_row.saturating_add(7);
+        let context_cwd = card_row.saturating_add(9);
+        let context_branch = card_row.saturating_add(10);
+        let context_session = card_row.saturating_add(11);
+        if context_heading.saturating_add(6) <= vp.rows {
+            Self::draw_instrument_surface(r, vp, context_heading, 6, PANEL_INSET, PANEL_BORDER, 6);
             Self::draw_evidence_group_heading(
                 r,
                 vp,
-                card_row + 5,
+                context_heading,
                 "EXECUTION CONTEXT",
                 PANEL_VIOLET,
             );
         }
-        if card_rows > 6 {
-            Self::draw_ui_row(r, vp, card_row + 6, 2, "CWD", UI_META, PANEL_MUTED);
+        if context_cwd < vp.rows {
+            Self::draw_ui_row(r, vp, context_cwd, 2, "CWD", UI_META, PANEL_MUTED);
             Self::draw_ui_row(
                 r,
                 vp,
-                card_row + 6,
+                context_cwd,
                 8,
                 &panels::truncate_to_cells(&command.cwd, vp.cols.saturating_sub(9) as usize),
                 UI_BODY,
                 PANEL_SECONDARY,
             );
         }
-        if card_rows > 7 {
-            Self::draw_ui_row(r, vp, card_row + 7, 2, "BRANCH", UI_META, PANEL_MUTED);
+        if context_branch < vp.rows {
+            Self::draw_ui_row(r, vp, context_branch, 2, "BRANCH", UI_META, PANEL_MUTED);
             let branch = if command.git_branch.is_empty() {
                 "—"
             } else {
@@ -2586,30 +2630,30 @@ impl App {
             Self::draw_ui_row(
                 r,
                 vp,
-                card_row + 7,
+                context_branch,
                 8,
                 &panels::truncate_to_cells(branch, vp.cols.saturating_sub(9) as usize),
                 UI_BODY,
                 PANEL_SECONDARY,
             );
         }
-        if card_rows > 8 {
-            Self::draw_ui_row(r, vp, card_row + 8, 2, "SESSION", UI_META, PANEL_MUTED);
+        if context_session < vp.rows {
+            Self::draw_ui_row(r, vp, context_session, 2, "SESSION", UI_META, PANEL_MUTED);
             Self::draw_ui_row(
                 r,
                 vp,
-                card_row + 8,
+                context_session,
                 10,
                 &snapshot.session,
                 UI_BODY,
                 PANEL_SECONDARY,
             );
-            Self::draw_evidence_divider(r, vp, card_row + 9, PANEL_BORDER);
+            Self::draw_evidence_divider(r, vp, context_session.saturating_add(1), PANEL_BORDER);
         }
 
         // The output well is deliberately bounded by the remaining card
         // height. It carries no synthetic line count or timestamp.
-        let output_label = card_row.saturating_add(10);
+        let output_label = card_row.saturating_add(14);
         let provenance_row = vp.rows.saturating_sub(2);
         if output_label < provenance_row {
             Self::draw_ui_row(
@@ -2701,6 +2745,15 @@ impl App {
             }
         }
         if provenance_row < vp.rows {
+            r.draw_fill(
+                zet_gpu::renderer::Viewport {
+                    x: vp.x,
+                    y: vp.y + provenance_row,
+                    cols: vp.cols,
+                    rows: 1,
+                },
+                PANEL_INSET,
+            );
             Self::draw_evidence_divider(r, vp, provenance_row, PANEL_BORDER);
             Self::draw_ui_row(r, vp, provenance_row, 2, "PROVENANCE", UI_META, PANEL_MUTED);
             let provenance = format!("RECORDED / SESSION {}", snapshot.session);
