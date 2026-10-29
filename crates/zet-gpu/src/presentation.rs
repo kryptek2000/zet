@@ -43,29 +43,35 @@ impl UiTextStyle {
 }
 
 /// Compact geometric wordmark role for the application identity.
-pub const UI_BRAND: UiTextStyle = UiTextStyle::new(24.0, 29.0, 700, 1.1, UiFontFamily::SansSerif);
+pub const UI_BRAND: UiTextStyle = UiTextStyle::new(26.0, 30.0, 700, 1.1, UiFontFamily::SansSerif);
 
 /// Upper application/header labels.
-pub const UI_HEADER: UiTextStyle = UiTextStyle::new(13.0, 18.0, 700, 1.5, UiFontFamily::Monospace);
+pub const UI_HEADER: UiTextStyle = UiTextStyle::new(15.0, 19.0, 700, 1.45, UiFontFamily::Monospace);
 
 /// Indexed section headings such as `COMMAND LEDGER`.
-pub const UI_SECTION: UiTextStyle = UiTextStyle::new(12.5, 18.0, 700, 1.1, UiFontFamily::Monospace);
+pub const UI_SECTION: UiTextStyle =
+    UiTextStyle::new(14.0, 18.0, 700, 1.05, UiFontFamily::Monospace);
 
 /// Ordinary native labels and observed values.
-pub const UI_BODY: UiTextStyle = UiTextStyle::new(12.5, 18.0, 400, 0.15, UiFontFamily::Monospace);
+pub const UI_BODY: UiTextStyle = UiTextStyle::new(13.5, 18.0, 400, 0.1, UiFontFamily::Monospace);
 
 /// Compact state, path, and provenance metadata.
-pub const UI_META: UiTextStyle = UiTextStyle::new(10.5, 15.0, 500, 0.15, UiFontFamily::Monospace);
+pub const UI_META: UiTextStyle = UiTextStyle::new(11.5, 16.0, 500, 0.15, UiFontFamily::Monospace);
+
+/// Session identity role: larger than supporting state while remaining below
+/// the selected command focal point.
+pub const UI_SESSION: UiTextStyle =
+    UiTextStyle::new(15.0, 18.0, 600, 0.05, UiFontFamily::Monospace);
 
 /// Selected command identity and other high-salience evidence labels.
 pub const UI_COMMAND: UiTextStyle =
-    UiTextStyle::new(16.0, 21.0, 600, 0.05, UiFontFamily::Monospace);
+    UiTextStyle::new(16.5, 20.0, 600, 0.05, UiFontFamily::Monospace);
 
 /// Important observed values such as exit status and duration.
-pub const UI_VALUE: UiTextStyle = UiTextStyle::new(14.0, 18.0, 500, 0.05, UiFontFamily::Monospace);
+pub const UI_VALUE: UiTextStyle = UiTextStyle::new(15.0, 18.0, 500, 0.05, UiFontFamily::Monospace);
 
 /// Captured output stays readable and dense without inheriting terminal cells.
-pub const UI_OUTPUT: UiTextStyle = UiTextStyle::new(11.5, 15.0, 400, 0.0, UiFontFamily::Monospace);
+pub const UI_OUTPUT: UiTextStyle = UiTextStyle::new(13.0, 16.0, 400, 0.0, UiFontFamily::Monospace);
 
 /// Pixel-space rectangle used by presentation geometry and hit-test helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,7 +119,8 @@ mod tests {
     fn typography_roles_are_independent() {
         assert!(UI_COMMAND.size_px > UI_BODY.size_px);
         assert!(UI_VALUE.size_px > UI_BODY.size_px);
-        assert!(UI_OUTPUT.size_px >= 11.0);
+        assert!(UI_SESSION.size_px > UI_BODY.size_px);
+        assert!(UI_OUTPUT.size_px >= 13.0);
         assert!(UI_BRAND.weight > UI_BODY.weight);
         assert!(UI_SECTION.tracking_px > UI_BODY.tracking_px);
         assert_ne!(UI_BRAND.family, UI_OUTPUT.family);
