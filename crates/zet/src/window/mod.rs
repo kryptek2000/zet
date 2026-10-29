@@ -1528,44 +1528,65 @@ impl App {
         focused: bool,
     ) {
         use zet_gpu::renderer::{
-            PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_DANGER, PANEL_INSET, PANEL_SECONDARY,
-            PANEL_VIOLET, RAIL_ACCENT, RAIL_ACTIVE_BG, RAIL_BAD, RAIL_BORDER, RAIL_DIM_INK,
-            RAIL_FOCUS, RAIL_FOOTER_BG, RAIL_FOOTER_INK, RAIL_HEADER_INK, RAIL_HOVER_BG, RAIL_OK,
+            PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_DANGER, PANEL_INSET, PANEL_RED, PANEL_SECONDARY,
+            PANEL_TEAL, PANEL_VIOLET, RAIL_ACCENT, RAIL_ACTIVE_BG, RAIL_BORDER, RAIL_DIM_INK,
+            RAIL_FOCUS, RAIL_FOOTER_BG, RAIL_FOOTER_INK, RAIL_HEADER_INK, RAIL_HOVER_BG,
             RAIL_SECTION_INK, RAIL_SELECTED_BG, RAIL_TEXT_INK,
         };
         let (cw, ch) = r.cell_px();
         let origin_x = vp.x.saturating_mul(cw);
         let origin_y = vp.y.saturating_mul(ch);
-        // The rail is an instrument spine, not a second terminal. These
-        // quiet pixel seams establish its architecture without changing the
-        // cell-aligned hit regions underneath.
-        r.draw_rect_px(
-            origin_x,
-            origin_y,
-            2,
-            vp.rows.saturating_mul(ch),
+        let rail_w = vp.cols.saturating_mul(cw);
+        let rail_h = vp.rows.saturating_mul(ch);
+
+        // Architectural chamfered frame for Mission Rail (cut top-left and cut bottom-left)
+        r.draw_chamfered_panel_px(
+            origin_x.saturating_add(2),
+            origin_y.saturating_add(2),
+            rail_w.saturating_sub(4),
+            rail_h.saturating_sub(4),
+            10,
+            zet_gpu::renderer::RAIL_BG,
             if focused { RAIL_FOCUS } else { RAIL_BORDER },
         );
-        r.draw_rect_px(
-            origin_x.saturating_add(vp.cols.saturating_mul(cw).saturating_sub(2)),
-            origin_y,
-            2,
-            vp.rows.saturating_mul(ch),
-            RAIL_BORDER,
+
+        // Precision corner brackets on the chamfered cuts
+        r.draw_line_px(
+            origin_x as f32 + 2.0,
+            origin_y as f32 + 12.0,
+            origin_x as f32 + 12.0,
+            origin_y as f32 + 2.0,
+            2.0,
+            if focused {
+                PANEL_CYAN
+            } else {
+                PANEL_BORDER_STRONG
+            },
         );
-        let spine_x = origin_x.saturating_add(cw.saturating_sub(4));
-        r.draw_rect_px(
-            spine_x,
-            origin_y.saturating_add(ch.saturating_mul(2)),
-            1,
-            vp.rows
-                .saturating_mul(ch)
-                .saturating_sub(ch.saturating_mul(2)),
-            RAIL_BORDER,
+        r.draw_line_px(
+            origin_x as f32 + 2.0,
+            origin_y as f32 + rail_h as f32 - 12.0,
+            origin_x as f32 + 12.0,
+            origin_y as f32 + rail_h as f32 - 2.0,
+            2.0,
+            if focused {
+                PANEL_CYAN
+            } else {
+                PANEL_BORDER_STRONG
+            },
         );
 
-        // The rightmost rail cell is the panel rule, so content uses the
-        // remaining columns. This keeps text out of the terminal grid.
+        // Vertical indexed spine connecting sections 01..04
+        let spine_x = origin_x.saturating_add(14);
+        r.draw_rect_px(
+            spine_x,
+            origin_y.saturating_add(ch),
+            1,
+            rail_h.saturating_sub(ch * 2),
+            PANEL_BORDER_STRONG,
+        );
+
+        // Content viewport (leaving 1 column for border)
         let content_cols = vp.cols.saturating_sub(1).max(1);
         let content = zet_gpu::renderer::Viewport {
             x: vp.x,
@@ -1582,9 +1603,6 @@ impl App {
 
         let rows = panels::rail_rows(vp.rows, snapshot.sessions.len(), snapshot.commands.len());
         let footer_row = vp.rows.saturating_sub(1);
-        // Resources are intentionally a truthful empty state until a real
-        // resource source exists. Place the section in the last spare area
-        // rather than making a fake interactive row in the data model.
         let resources_row = rows
             .iter()
             .enumerate()
@@ -1593,29 +1611,41 @@ impl App {
             .find_map(|(row, kind)| {
                 (row >= 4 && matches!(kind, panels::RailRow::Empty)).then_some(row as u32)
             });
+
         for (row, kind) in rows.into_iter().enumerate() {
             let row = row as u32;
+            let node_y = origin_y + row * ch + ch / 2;
             match kind {
                 panels::RailRow::Header => {
+                    r.draw_status_dot_px(spine_x, node_y, 3, RAIL_ACCENT, None);
                     r.draw_text_row(content, row, 1, "01", RAIL_ACCENT);
-                    r.draw_text_row(content, row, 5, "WORKSPACE", RAIL_HEADER_INK);
+                    r.draw_text_row(content, row, 4, "WORKSPACE", RAIL_HEADER_INK);
                 }
                 panels::RailRow::Mode => {
-                    let mode = format!("LIVE / {}", snapshot.mode.to_uppercase());
+                    r.draw_text_row(content, row, 4, "CWD", PANEL_CYAN);
+                    let ws_path = if snapshot.footer.is_empty() {
+                        "/tmp"
+                    } else {
+                        &snapshot.footer
+                    };
                     r.draw_text_row(
                         content,
                         row,
-                        5,
-                        &panels::truncate_to_cells(&mode, content_cols.saturating_sub(6) as usize),
-                        PANEL_VIOLET,
+                        8,
+                        &panels::truncate_to_cells(
+                            ws_path,
+                            content_cols.saturating_sub(9) as usize,
+                        ),
+                        PANEL_SECONDARY,
                     );
                 }
                 panels::RailRow::SessionsHeader => {
+                    r.draw_status_dot_px(spine_x, node_y, 3, RAIL_ACCENT, None);
                     r.draw_text_row(content, row, 1, "02", RAIL_ACCENT);
-                    r.draw_text_row(content, row, 5, "SESSIONS", RAIL_SECTION_INK);
+                    r.draw_text_row(content, row, 4, "SESSIONS", RAIL_SECTION_INK);
                     let count = snapshot.sessions.len().to_string();
                     let count_col = content_cols.saturating_sub(panels::text_cells(&count) as u32);
-                    if count_col > 5 {
+                    if count_col > 4 {
                         r.draw_text_row(content, row, count_col, &count, RAIL_DIM_INK);
                     }
                 }
@@ -1627,6 +1657,7 @@ impl App {
                     let is_selected = index == selected;
                     let is_hovered = hovered_row
                         .is_some_and(|hover| hover == row || hover == row.saturating_add(1));
+
                     let card_border = if is_selected && focused {
                         PANEL_CYAN
                     } else if is_hovered {
@@ -1640,73 +1671,52 @@ impl App {
                         RAIL_SELECTED_BG
                     } else if is_hovered {
                         RAIL_HOVER_BG
-                    } else if is_active && !focused {
+                    } else if is_active {
                         RAIL_ACTIVE_BG
                     } else {
                         PANEL_INSET
                     };
-                    Self::draw_panel_card(r, vp, row, 2, card_fill, card_border);
-                    // The active/selected seam is visible even when the rail
-                    // does not own keyboard focus, so state is not conveyed
-                    // by a single accent color.
-                    let bar = if is_selected && focused {
-                        Some(RAIL_FOCUS)
-                    } else if is_active {
-                        Some(RAIL_ACCENT)
-                    } else {
-                        None
-                    };
-                    if let Some(bar) = bar {
+
+                    if is_active || is_selected || is_hovered {
+                        Self::draw_panel_card(r, vp, row, 2, card_fill, card_border);
+                    }
+
+                    if is_active || (is_selected && focused) {
                         r.draw_rect_px(
-                            vp.x.saturating_mul(cw).saturating_add(5),
-                            vp.y.saturating_add(row)
-                                .saturating_mul(ch)
-                                .saturating_add(5),
-                            2,
-                            ch.saturating_mul(2).saturating_sub(12),
-                            bar,
+                            origin_x.saturating_add(4),
+                            origin_y
+                                .saturating_add(row.saturating_mul(ch))
+                                .saturating_add(4),
+                            3,
+                            ch.saturating_mul(2).saturating_sub(8),
+                            PANEL_CYAN,
                         );
                     }
 
-                    let marker = if is_active { "◆" } else { "·" };
-                    let marker_ink = if is_selected && focused {
-                        RAIL_FOCUS
-                    } else if is_active {
-                        RAIL_ACCENT
+                    if is_active {
+                        r.draw_status_dot_px(
+                            origin_x + cw * 4,
+                            node_y,
+                            4,
+                            PANEL_CYAN,
+                            Some(PANEL_BORDER_STRONG),
+                        );
                     } else {
-                        RAIL_DIM_INK
-                    };
-                    r.draw_text_row(content, row, 1, marker, marker_ink);
+                        r.draw_text_row(content, row, 3, "○", RAIL_DIM_INK);
+                    }
 
-                    let dot = if session.state == "running" {
-                        "●"
-                    } else if session.state == "exited" {
-                        "×"
-                    } else {
-                        "○"
-                    };
-                    let dot_ink = if session.state == "running" {
-                        RAIL_OK
-                    } else if session.state == "exited" {
-                        RAIL_BAD
-                    } else {
-                        RAIL_DIM_INK
-                    };
-                    r.draw_text_row(content, row, 3, dot, dot_ink);
-
-                    let name = format!("S{:02}  {}", session.index, session.cwd_tail);
-                    let name_budget = content_cols.saturating_sub(6);
+                    let name = format!("{}  {}", session.index, session.cwd_tail);
+                    let name_budget = content_cols.saturating_sub(5);
                     let name = panels::truncate_to_cells(&name, name_budget as usize);
                     let name_ink = if is_active || is_selected {
-                        RAIL_HEADER_INK
+                        PANEL_CYAN
                     } else {
                         RAIL_TEXT_INK
                     };
                     r.draw_text_row(content, row, 5, &name, name_ink);
 
-                    // Detail row: state + shortened path, both real.
                     if row + 1 < vp.rows {
-                        let detail_cols = content_cols.saturating_sub(3);
+                        let detail_cols = content_cols.saturating_sub(5);
                         let state_text = if session.state == "exited" && session.exit != "—" {
                             format!("exit {}", session.exit)
                         } else {
@@ -1716,20 +1726,20 @@ impl App {
                             panels::format_session_detail(&state_text, &session.cwd, detail_cols);
                         if !state.is_empty() {
                             let state_ink = if session.state == "running" {
-                                RAIL_OK
+                                PANEL_TEAL
                             } else if session.state == "exited" {
-                                RAIL_BAD
+                                PANEL_RED
                             } else {
                                 RAIL_DIM_INK
                             };
-                            r.draw_text_row(content, row + 1, 2, &state, state_ink);
+                            r.draw_text_row(content, row + 1, 5, &state, state_ink);
                         }
                         if !path.is_empty() {
                             let state_cells = panels::text_cells(&state) as u32;
                             r.draw_text_row(
                                 content,
                                 row + 1,
-                                2 + state_cells + 1,
+                                5 + state_cells + 1,
                                 &path,
                                 RAIL_DIM_INK,
                             );
@@ -1738,11 +1748,12 @@ impl App {
                 }
                 panels::RailRow::SessionDetail(_) => {}
                 panels::RailRow::CommandsHeader => {
+                    r.draw_status_dot_px(spine_x, node_y, 3, RAIL_ACCENT, None);
                     r.draw_text_row(content, row, 1, "03", RAIL_ACCENT);
-                    r.draw_text_row(content, row, 5, "COMMAND LEDGER", RAIL_SECTION_INK);
+                    r.draw_text_row(content, row, 4, "COMMAND LEDGER", RAIL_SECTION_INK);
                     let count = snapshot.commands.len().to_string();
                     let count_col = content_cols.saturating_sub(panels::text_cells(&count) as u32);
-                    if count_col > 5 {
+                    if count_col > 4 {
                         r.draw_text_row(content, row, count_col, &count, RAIL_DIM_INK);
                     }
                 }
@@ -1751,6 +1762,7 @@ impl App {
                         let failed = !matches!(command.exit.as_str(), "0" | "—");
                         let selected_command_row = selected_command == Some(command.id);
                         let hovered_command_row = hovered_row == Some(row);
+
                         if selected_command_row || hovered_command_row {
                             Self::draw_panel_card(
                                 r,
@@ -1775,23 +1787,27 @@ impl App {
                                 },
                             );
                         }
-                        let marker = if failed { "×" } else { "›" };
-                        let marker_ink = if failed { RAIL_BAD } else { RAIL_ACCENT };
-                        r.draw_text_row(content, row, 1, marker, marker_ink);
-                        if selected_command_row {
-                            let (cw, ch) = r.cell_px();
-                            r.draw_rounded_rect_px(
-                                vp.x.saturating_mul(cw).saturating_add(6),
-                                vp.y.saturating_add(row)
-                                    .saturating_mul(ch)
-                                    .saturating_add(6),
-                                3,
-                                ch.saturating_sub(12),
-                                1,
-                                if failed { RAIL_BAD } else { PANEL_CYAN },
+
+                        if failed {
+                            r.draw_status_dot_px(
+                                origin_x + cw * 3 + 2,
+                                node_y,
+                                5,
+                                PANEL_RED,
+                                Some(PANEL_DANGER),
+                            );
+                            r.draw_text_row(content, row, 3, "✕", PANEL_RED);
+                        } else {
+                            r.draw_status_dot_px(
+                                origin_x + cw * 3 + 2,
+                                node_y,
+                                4,
+                                PANEL_TEAL,
+                                None,
                             );
                         }
-                        let budget = content_cols.saturating_sub(3);
+
+                        let budget = content_cols.saturating_sub(4);
                         let line = panels::format_command_row(
                             &command.command,
                             &command.exit,
@@ -1799,13 +1815,13 @@ impl App {
                             budget,
                         );
                         let line_ink = if failed {
-                            RAIL_BAD
+                            PANEL_RED
                         } else if selected_command_row {
                             PANEL_SECONDARY
                         } else {
                             RAIL_TEXT_INK
                         };
-                        r.draw_text_row(content, row, 3, &line, line_ink);
+                        r.draw_text_row(content, row, 4, &line, line_ink);
                     }
                 }
                 panels::RailRow::Footer => {
@@ -1825,11 +1841,13 @@ impl App {
                 panels::RailRow::Empty => {}
             }
         }
+
         if let Some(row) = resources_row {
+            r.draw_status_dot_px(spine_x, origin_y + row * ch + ch / 2, 3, RAIL_ACCENT, None);
             r.draw_text_row(content, row, 1, "04", RAIL_ACCENT);
-            r.draw_text_row(content, row, 5, "RESOURCES", RAIL_SECTION_INK);
+            r.draw_text_row(content, row, 4, "RESOURCES", RAIL_SECTION_INK);
             if row.saturating_add(1) < footer_row {
-                r.draw_text_row(content, row + 1, 5, "— NO CONFIGURED SOURCES", RAIL_DIM_INK);
+                r.draw_text_row(content, row + 1, 4, "— NO CONFIGURED SOURCES", RAIL_DIM_INK);
             }
         }
     }
@@ -2293,7 +2311,7 @@ impl App {
             PANEL_CYAN,
         );
         let mark = ch.saturating_sub(8).min(16);
-        r.draw_aperture_mark_px(5, 4, mark, PANEL_CYAN);
+        r.draw_aperture_crystal_mark_px(5, 4, mark, mark);
         r.draw_text_row(header, 0, 4, "ZET", PANEL_TEXT);
         r.draw_text_row(header, 0, 9, "APERTURE", PANEL_VIOLET);
         let mode = if layout.inspector { "MC" } else { "WS" };

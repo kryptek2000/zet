@@ -30,31 +30,30 @@ pub struct Theme {
     pub footer: Rgba,
 }
 
-/// Owner-approved Aperture Instrument visual language: near-black graphite
-/// with restrained cyan, violet, teal, red and amber semantic accents.
+/// Owner-approved Aperture Instrument visual language: deep-space near-black
+/// graphite surfaces with restrained cyan, violet, teal, red and amber semantic accents.
 pub const APERTURE_INSTRUMENT: Theme = Theme {
-    space: Rgba::from_hex(0x080B13),
-    terminal: Rgba::from_hex(0x101522),
-    surface: Rgba::from_hex(0x0B111D),
-    surface_raised: Rgba::from_hex(0x141C2B),
-    surface_inset: Rgba::from_hex(0x080B13),
-    border: Rgba::from_hex(0x27354B),
-    border_strong: Rgba::from_hex(0x34506C),
+    space: Rgba::from_hex(0x05080E),
+    terminal: Rgba::from_hex(0x080C14),
+    surface: Rgba::from_hex(0x0A0F1A),
+    surface_raised: Rgba::from_hex(0x111A28),
+    surface_inset: Rgba::from_hex(0x070B12),
+    border: Rgba::from_hex(0x192638),
+    border_strong: Rgba::from_hex(0x24364E),
     text: Rgba::from_hex(0xE8F1FF),
-    secondary: Rgba::from_hex(0x9AAFC6),
-    // Lifted from the reference's muted anchor so compact metadata meets
-    // the existing native chrome contrast gate on dark graphite surfaces.
+    secondary: Rgba::from_hex(0x889EB8),
+    // Compact metadata and muted line numbers on dark graphite surfaces.
     muted: Rgba::from_hex(0x7188A1),
-    cyan: Rgba::from_hex(0x49DFFF),
-    violet: Rgba::from_hex(0xAA8AFF),
-    teal: Rgba::from_hex(0x46D4BD),
-    red: Rgba::from_hex(0xFF667B),
-    amber: Rgba::from_hex(0xF0B96A),
-    selected: Rgba::from_hex(0x132936),
-    active: Rgba::from_hex(0x10222D),
-    danger: Rgba::from_hex(0x26151F),
-    top_bar: Rgba::from_hex(0x080B13),
-    footer: Rgba::from_hex(0x0A101B),
+    cyan: Rgba::from_hex(0x38D9FA),
+    violet: Rgba::from_hex(0x9678E8),
+    teal: Rgba::from_hex(0x34D399),
+    red: Rgba::from_hex(0xF43F5E),
+    amber: Rgba::from_hex(0xF59E0B),
+    selected: Rgba::from_hex(0x0E2333),
+    active: Rgba::from_hex(0x0B1E2B),
+    danger: Rgba::from_hex(0x251219),
+    top_bar: Rgba::from_hex(0x05080E),
+    footer: Rgba::from_hex(0x070B12),
 };
 
 /// Compatibility name for code and downstream theme experiments that still
@@ -80,6 +79,7 @@ mod tests {
     fn primary_roles_have_readable_contrast() {
         assert!(contrast(APERTURE_INSTRUMENT.text, APERTURE_INSTRUMENT.surface) >= 4.5);
         assert!(contrast(APERTURE_INSTRUMENT.secondary, APERTURE_INSTRUMENT.surface) >= 4.5);
+        assert!(contrast(APERTURE_INSTRUMENT.muted, APERTURE_INSTRUMENT.surface) >= 3.0);
         assert!(contrast(APERTURE_INSTRUMENT.cyan, APERTURE_INSTRUMENT.surface) >= 3.0);
         assert!(contrast(APERTURE_INSTRUMENT.red, APERTURE_INSTRUMENT.surface) >= 3.0);
     }

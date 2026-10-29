@@ -415,9 +415,9 @@ impl Renderer {
             queue,
             config,
             bg: wgpu::Color {
-                r: APERTURE_INSTRUMENT.terminal.r as f64,
-                g: APERTURE_INSTRUMENT.terminal.g as f64,
-                b: APERTURE_INSTRUMENT.terminal.b as f64,
+                r: APERTURE_INSTRUMENT.space.r as f64,
+                g: APERTURE_INSTRUMENT.space.g as f64,
+                b: APERTURE_INSTRUMENT.space.b as f64,
                 a: 1.0,
             },
             pipeline,
@@ -1091,6 +1091,325 @@ impl Renderer {
         ];
         for bar in bars {
             self.quads.extend(bar.into_iter().flatten());
+        }
+    }
+
+    /// Draw the faceted Aperture cyber crystal mark matching the owner-approved
+    /// Aperture Instrument concept. Uses multi-tonal polygons for depth and
+    /// electric cyan luminance.
+    pub fn draw_aperture_crystal_mark_px(&mut self, x: u32, y: u32, width: u32, height: u32) {
+        let Some(atlas_uv) = self.solid_uv() else {
+            return;
+        };
+        if width < 6 || height < 6 {
+            return;
+        }
+        let x = x as f32;
+        let y = y as f32;
+        let w = width as f32;
+        let h = height as f32;
+
+        let hi_color = Rgba::from_hex(0x7CE8FF);
+        let main_color = Rgba::from_hex(0x38D9FA);
+        let dark_color = Rgba::from_hex(0x0284C7);
+
+        // Top highlight facet
+        let p0 = [x + w * 0.15, y];
+        let p1 = [x + w * 0.70, y];
+        let p2 = [x + w * 0.55, y + h * 0.28];
+        let p3 = [x + w * 0.08, y + h * 0.28];
+        self.quads.extend(
+            [
+                solid_triangle_px(p0, p1, p2, atlas_uv, hi_color),
+                solid_triangle_px(p0, p2, p3, atlas_uv, hi_color),
+            ]
+            .into_iter()
+            .flatten(),
+        );
+
+        // Main diagonal body
+        let p4 = [x, y + h * 0.82];
+        let p5 = [x + w * 0.12, y + h];
+        let p6 = [x + w * 0.48, y + h * 0.40];
+        self.quads.extend(
+            [
+                solid_triangle_px(p3, p2, p6, atlas_uv, main_color),
+                solid_triangle_px(p3, p6, p4, atlas_uv, main_color),
+                solid_triangle_px(p4, p6, p5, atlas_uv, main_color),
+            ]
+            .into_iter()
+            .flatten(),
+        );
+
+        // Lower right wedge
+        let p7 = [x + w * 0.42, y + h];
+        let p8 = [x + w * 0.92, y + h];
+        let p9 = [x + w * 0.92, y + h * 0.45];
+        self.quads
+            .extend(solid_triangle_px(p7, p8, p9, atlas_uv, dark_color));
+
+        // Wedge highlight
+        let p10 = [x + w * 0.65, y + h * 0.45];
+        self.quads
+            .extend(solid_triangle_px(p7, p10, p9, atlas_uv, main_color));
+    }
+
+    /// Draw large, distinctive geometric ZET branding ('Z', 'E', 'T' vector letters).
+    /// Returns the total width consumed in pixels.
+    pub fn draw_zet_brand_px(&mut self, x: u32, y: u32, height: u32, color: Rgba) -> u32 {
+        if height < 6 {
+            return 0;
+        }
+        let h = height as f32;
+        let w = (h * 0.72).round().max(4.0);
+        let t = (h * 0.22).round().max(2.0);
+        let gap = (h * 0.32).round().max(3.0);
+        let x0 = x as f32;
+        let y0 = y as f32;
+
+        let Some(atlas_uv) = self.solid_uv() else {
+            return 0;
+        };
+
+        // Letter 'Z'
+        self.quads
+            .extend(solid_rect_px(x0, y0, x0 + w, y0 + t, atlas_uv, color));
+        self.quads.extend(solid_rect_px(
+            x0,
+            y0 + h - t,
+            x0 + w,
+            y0 + h,
+            atlas_uv,
+            color,
+        ));
+        // Diagonal bar of Z
+        let z_diag = [
+            solid_triangle_px(
+                [x0 + w, y0 + t],
+                [x0 + w - t * 0.75, y0 + t],
+                [x0, y0 + h - t],
+                atlas_uv,
+                color,
+            ),
+            solid_triangle_px(
+                [x0 + w, y0 + t],
+                [x0, y0 + h - t],
+                [x0 + t * 0.75, y0 + h - t],
+                atlas_uv,
+                color,
+            ),
+        ];
+        self.quads.extend(z_diag.into_iter().flatten());
+
+        // Letter 'E'
+        let ex = x0 + w + gap;
+        self.quads
+            .extend(solid_rect_px(ex, y0, ex + t, y0 + h, atlas_uv, color));
+        self.quads
+            .extend(solid_rect_px(ex + t, y0, ex + w, y0 + t, atlas_uv, color));
+        let mid_y = y0 + ((h - t) * 0.5).round();
+        self.quads.extend(solid_rect_px(
+            ex + t,
+            mid_y,
+            ex + w * 0.85,
+            mid_y + t,
+            atlas_uv,
+            color,
+        ));
+        self.quads.extend(solid_rect_px(
+            ex + t,
+            y0 + h - t,
+            ex + w,
+            y0 + h,
+            atlas_uv,
+            color,
+        ));
+
+        // Letter 'T'
+        let tx = ex + w + gap;
+        self.quads
+            .extend(solid_rect_px(tx, y0, tx + w, y0 + t, atlas_uv, color));
+        let stem_x = tx + ((w - t) * 0.5).round();
+        self.quads.extend(solid_rect_px(
+            stem_x,
+            y0 + t,
+            stem_x + t,
+            y0 + h,
+            atlas_uv,
+            color,
+        ));
+
+        (3.0 * w + 2.0 * gap) as u32
+    }
+
+    /// Draw precision cyan corner brackets/seams for Aperture Instrument panels.
+    pub fn draw_corner_brackets_px(
+        &mut self,
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+        cut: u32,
+        color: Rgba,
+    ) {
+        if x1 <= x0 || y1 <= y0 || cut == 0 {
+            return;
+        }
+        let Some(atlas_uv) = self.solid_uv() else {
+            return;
+        };
+        let (x0, y0, x1, y1, cut) = (x0 as f32, y0 as f32, x1 as f32, y1 as f32, cut as f32);
+        let arm = (cut * 0.8).max(5.0);
+        let t = 2.0f32;
+
+        // Top-Left: angled seam from (x0, y0+cut) to (x0+cut, y0) + arms
+        self.draw_line_px(x0, y0 + cut, x0 + cut, y0, t, color);
+        self.quads.extend(solid_rect_px(
+            x0 + cut,
+            y0,
+            x0 + cut + arm,
+            y0 + t,
+            atlas_uv,
+            color,
+        ));
+        self.quads.extend(solid_rect_px(
+            x0,
+            y0 + cut,
+            x0 + t,
+            y0 + cut + arm,
+            atlas_uv,
+            color,
+        ));
+
+        // Top-Right: angled seam from (x1-cut, y0) to (x1, y0+cut) + arms
+        self.draw_line_px(x1 - cut, y0, x1, y0 + cut, t, color);
+        self.quads.extend(solid_rect_px(
+            x1 - cut - arm,
+            y0,
+            x1 - cut,
+            y0 + t,
+            atlas_uv,
+            color,
+        ));
+        self.quads.extend(solid_rect_px(
+            x1 - t,
+            y0 + cut,
+            x1,
+            y0 + cut + arm,
+            atlas_uv,
+            color,
+        ));
+
+        // Bottom-Left: angled seam from (x0, y1-cut) to (x0+cut, y1) + arms
+        self.draw_line_px(x0, y1 - cut, x0 + cut, y1, t, color);
+        self.quads.extend(solid_rect_px(
+            x0 + cut,
+            y1 - t,
+            x0 + cut + arm,
+            y1,
+            atlas_uv,
+            color,
+        ));
+        self.quads.extend(solid_rect_px(
+            x0,
+            y1 - cut - arm,
+            x0 + t,
+            y1 - cut,
+            atlas_uv,
+            color,
+        ));
+
+        // Bottom-Right: angled seam from (x1-cut, y1) to (x1, y1-cut) + arms
+        self.draw_line_px(x1 - cut, y1, x1, y1 - cut, t, color);
+        self.quads.extend(solid_rect_px(
+            x1 - cut - arm,
+            y1 - t,
+            x1 - cut,
+            y1,
+            atlas_uv,
+            color,
+        ));
+        self.quads.extend(solid_rect_px(
+            x1 - t,
+            y1 - cut - arm,
+            x1,
+            y1 - cut,
+            atlas_uv,
+            color,
+        ));
+    }
+
+    /// Draw a line segment of specified thickness with solid tint.
+    pub fn draw_line_px(
+        &mut self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        thickness: f32,
+        color: Rgba,
+    ) {
+        let Some(atlas_uv) = self.solid_uv() else {
+            return;
+        };
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 0.001 {
+            return;
+        }
+        let nx = -dy / len * (thickness * 0.5);
+        let ny = dx / len * (thickness * 0.5);
+
+        let p0 = [x0 + nx, y0 + ny];
+        let p1 = [x1 + nx, y1 + ny];
+        let p2 = [x1 - nx, y1 - ny];
+        let p3 = [x0 - nx, y0 - ny];
+
+        self.quads.extend(
+            [
+                solid_triangle_px(p0, p1, p2, atlas_uv, color),
+                solid_triangle_px(p0, p2, p3, atlas_uv, color),
+            ]
+            .into_iter()
+            .flatten(),
+        );
+    }
+
+    /// Draw a circular status dot with optional subtle aura/halo.
+    pub fn draw_status_dot_px(
+        &mut self,
+        cx: u32,
+        cy: u32,
+        radius: u32,
+        fill: Rgba,
+        halo: Option<Rgba>,
+    ) {
+        let Some(atlas_uv) = self.solid_uv() else {
+            return;
+        };
+        let (cx, cy) = (cx as f32, cy as f32);
+        if let Some(halo_col) = halo {
+            let hr = radius as f32 + 3.0;
+            let segments = 12;
+            for i in 0..segments {
+                let a0 = i as f32 * std::f32::consts::TAU / segments as f32;
+                let a1 = (i + 1) as f32 * std::f32::consts::TAU / segments as f32;
+                let p0 = [cx + hr * a0.cos(), cy + hr * a0.sin()];
+                let p1 = [cx + hr * a1.cos(), cy + hr * a1.sin()];
+                self.quads
+                    .extend(solid_triangle_px([cx, cy], p0, p1, atlas_uv, halo_col));
+            }
+        }
+        let r = radius as f32;
+        let segments = 12;
+        for i in 0..segments {
+            let a0 = i as f32 * std::f32::consts::TAU / segments as f32;
+            let a1 = (i + 1) as f32 * std::f32::consts::TAU / segments as f32;
+            let p0 = [cx + r * a0.cos(), cy + r * a0.sin()];
+            let p1 = [cx + r * a1.cos(), cy + r * a1.sin()];
+            self.quads
+                .extend(solid_triangle_px([cx, cy], p0, p1, atlas_uv, fill));
         }
     }
 

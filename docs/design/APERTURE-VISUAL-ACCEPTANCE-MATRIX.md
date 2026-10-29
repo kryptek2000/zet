@@ -13,7 +13,7 @@ reference watermark are not runtime data and must not be copied into ZET.
 
 | Reference area | Native counterpart | Fidelity requirement | Deviation / reason |
 |---|---|---|---|
-| ZET logo and upper chrome | `draw_app_chrome` plus renderer aperture-mark primitive | A large geometric cyan ZET mark, confident wordmark, dark header, and live session identity establish product ownership at first glance. | System decoration remains outside the app; only supported native chrome is drawn. |
+| ZET logo and upper chrome | `draw_app_chrome` plus renderer crystal-mark primitive | A faceted cyan geometric mark, confident wordmark, dark header, and live session identity establish product ownership at first glance. | System decoration remains outside the app; only supported native chrome is drawn. |
 | Main proportions | `layout::resolve` with semantic rail/terminal/Inspector widths | Large workspace targets approximately 18% rail / 56% terminal / 26% Inspector while retaining `MIN_TERM_COLS`. | Cell quantization and narrow-window refusal can move boundaries by a few columns. |
 | Mission Rail structure | `draw_rail` and `panels::rail_rows` | Rail reads as an indexed instrument: `01 WORKSPACE`, `02 SESSIONS`, `03 COMMAND LEDGER`, `04 RESOURCES`; navigation is visibly separate from evidence detail. | Resources stay honest and noninteractive when no resource source exists. |
 | Indexed navigation spine | Rail pixel seam and section markers | A thin vertical structural line, compact indices, and controlled cyan active seam replace a plain text column. | Spine is pixel geometry around cell-aligned text so PTY geometry is unchanged. |
@@ -35,19 +35,20 @@ The default Aperture theme uses the approved graphite/cyan anchors:
 
 | Role | Token |
 |---|---|
-| space | `#080B13` |
-| terminal | `#101522` |
-| elevated graphite | `#141C2B` |
-| deep inset | `#0B111D` |
-| precision border | `#27354B` |
+| space | `#05080E` |
+| terminal | `#080C14` |
+| elevated graphite | `#111A28` |
+| deep inset | `#070B12` |
+| precision border | `#192638` |
+| strong precision border | `#24364E` |
 | primary text | `#E8F1FF` |
-| secondary text | `#9AAFC6` |
-| muted text | `#7188A1` (lifted from the reference anchor for compact-text contrast) |
-| electric cyan | `#49DFFF` |
-| contextual violet | `#AA8AFF` |
-| precision teal | `#46D4BD` |
-| failure red | `#FF667B` |
-| warning amber | `#F0B96A` |
+| secondary text | `#889EB8` |
+| muted text | `#7188A1` |
+| electric cyan | `#38D9FA` |
+| contextual violet | `#9678E8` |
+| precision teal | `#34D399` |
+| failure red | `#F43F5E` |
+| warning amber | `#F59E0B` |
 
 The tokens describe semantic meaning, so a future user theme can replace the
 palette without changing panel or evidence semantics.
