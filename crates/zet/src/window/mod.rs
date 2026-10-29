@@ -17,7 +17,7 @@ use zet_gpu::input::{
     is_paste, is_rail_toggle, is_search, is_select_all, translate,
 };
 use zet_gpu::presentation::{
-    UI_BODY, UI_BRAND, UI_COMMAND, UI_HEADER, UI_META, UI_OUTPUT, UI_SECTION,
+    UI_BODY, UI_BRAND, UI_COMMAND, UI_HEADER, UI_META, UI_OUTPUT, UI_SECTION, UI_VALUE,
 };
 use zet_gpu::selection::Selection;
 use zet_gpu::Renderer;
@@ -1834,9 +1834,7 @@ impl App {
                                 vp,
                                 row,
                                 1,
-                                if selected_command_row && failed {
-                                    PANEL_DANGER
-                                } else if selected_command_row {
+                                if selected_command_row {
                                     RAIL_SELECTED_BG
                                 } else {
                                     RAIL_HOVER_BG
@@ -1879,9 +1877,7 @@ impl App {
                             &command.duration,
                             budget,
                         );
-                        let line_ink = if failed {
-                            PANEL_RED
-                        } else if selected_command_row {
+                        let line_ink = if failed || selected_command_row {
                             PANEL_SECONDARY
                         } else {
                             RAIL_TEXT_INK
@@ -1955,6 +1951,72 @@ impl App {
         }
     }
 
+    fn draw_evidence_command_header(
+        r: &mut Renderer,
+        vp: zet_gpu::renderer::Viewport,
+        row: u32,
+        failed: bool,
+        focused: bool,
+    ) {
+        use zet_gpu::renderer::{
+            PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_INSET, PANEL_RAISED, PANEL_RED,
+        };
+
+        let (cw, ch) = r.cell_px();
+        let x = vp.x.saturating_mul(cw).saturating_add(10);
+        let y =
+            vp.y.saturating_add(row)
+                .saturating_mul(ch)
+                .saturating_add(2);
+        let width = vp.cols.saturating_mul(cw).saturating_sub(20);
+        let height = ch.saturating_sub(4);
+        if width < 20 || height < 8 {
+            return;
+        }
+        let seam = if failed { PANEL_RED } else { PANEL_CYAN };
+        r.draw_chamfered_panel_px(
+            x,
+            y,
+            width,
+            height,
+            7,
+            PANEL_INSET,
+            if focused { seam } else { PANEL_BORDER_STRONG },
+        );
+        r.draw_rect_px(
+            x.saturating_add(5),
+            y.saturating_add(6),
+            3,
+            height.saturating_sub(12).max(2),
+            seam,
+        );
+        r.draw_rect_px(
+            x.saturating_add(width.saturating_sub(5)),
+            y.saturating_add(7),
+            1,
+            height.saturating_sub(14).max(1),
+            if failed { PANEL_RED } else { PANEL_RAISED },
+        );
+    }
+
+    fn draw_evidence_divider(
+        r: &mut Renderer,
+        vp: zet_gpu::renderer::Viewport,
+        row: u32,
+        color: zet_gpu::quad::Rgba,
+    ) {
+        let (cw, ch) = r.cell_px();
+        let x = vp.x.saturating_mul(cw).saturating_add(12);
+        let y =
+            vp.y.saturating_add(row)
+                .saturating_mul(ch)
+                .saturating_sub(1);
+        let width = vp.cols.saturating_mul(cw).saturating_sub(24);
+        if width > 8 {
+            r.draw_rect_px(x, y, width, 1, color);
+        }
+    }
+
     /// Render the Inspector as an evidence detail surface. The command index
     /// remains a compact navigation aid for the existing P3-A1 keyboard and
     /// mouse contract, while the selected command and bounded output own the
@@ -1971,9 +2033,9 @@ impl App {
         focused: bool,
     ) {
         use zet_gpu::renderer::{
-            PANEL_AMBER, PANEL_BG, PANEL_BORDER, PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_DANGER,
-            PANEL_INSET, PANEL_MUTED, PANEL_RAISED, PANEL_RED, PANEL_SECONDARY, PANEL_TEAL,
-            PANEL_TEXT, PANEL_VIOLET,
+            PANEL_AMBER, PANEL_BG, PANEL_BORDER, PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_INSET,
+            PANEL_MUTED, PANEL_RAISED, PANEL_RED, PANEL_SECONDARY, PANEL_TEAL, PANEL_TEXT,
+            PANEL_VIOLET,
         };
         let (cw, ch) = r.cell_px();
         let origin_x = vp.x.saturating_mul(cw);
@@ -2076,7 +2138,7 @@ impl App {
                 2,
                 12.min(vp.cols.saturating_sub(1)),
                 &snapshot.state,
-                UI_BODY,
+                UI_VALUE,
                 state_ink,
             );
             Self::draw_ui_row(r, vp, 3, 2, "LAST EXIT", UI_META, PANEL_MUTED);
@@ -2093,7 +2155,7 @@ impl App {
                 3,
                 12.min(vp.cols.saturating_sub(1)),
                 &snapshot.exit,
-                UI_BODY,
+                UI_VALUE,
                 exit_ink,
             );
             Self::draw_ui_row(r, vp, 4, 2, "CWD", UI_META, PANEL_MUTED);
@@ -2164,11 +2226,7 @@ impl App {
                         vp,
                         row,
                         1,
-                        if selected && failed {
-                            PANEL_DANGER
-                        } else {
-                            PANEL_RAISED
-                        },
+                        PANEL_RAISED,
                         if selected {
                             if focused {
                                 PANEL_CYAN
@@ -2243,7 +2301,7 @@ impl App {
             vp,
             card_row,
             card_rows,
-            if failed { PANEL_DANGER } else { PANEL_INSET },
+            PANEL_RAISED,
             if selected.is_some() {
                 if focused {
                     PANEL_CYAN
@@ -2255,6 +2313,24 @@ impl App {
             },
             10,
         );
+        if selected.is_some() {
+            Self::draw_evidence_divider(r, vp, card_row + 2, PANEL_BORDER);
+            Self::draw_evidence_command_header(r, vp, card_row + 1, failed, focused);
+            if failed {
+                let card_x = vp.x.saturating_mul(cw).saturating_add(5);
+                let card_y =
+                    vp.y.saturating_add(card_row)
+                        .saturating_mul(ch)
+                        .saturating_add(7);
+                r.draw_rect_px(
+                    card_x,
+                    card_y,
+                    3,
+                    card_rows.saturating_mul(ch).saturating_sub(14).max(2),
+                    PANEL_RED,
+                );
+            }
+        }
         let Some(command) = selected else {
             if card_rows > 2 {
                 Self::draw_ui_row(
@@ -2299,7 +2375,7 @@ impl App {
                 card_row + 2,
                 8,
                 &command.exit,
-                UI_BODY,
+                UI_VALUE,
                 if failed { PANEL_RED } else { PANEL_TEAL },
             );
             Self::draw_ui_row(r, vp, card_row + 2, 15, "DURATION", UI_META, PANEL_MUTED);
@@ -2309,9 +2385,10 @@ impl App {
                 card_row + 2,
                 25.min(vp.cols.saturating_sub(1)),
                 &command.duration,
-                UI_BODY,
+                UI_VALUE,
                 PANEL_SECONDARY,
             );
+            Self::draw_evidence_divider(r, vp, card_row + 3, PANEL_BORDER);
         }
         if card_rows > 3 {
             Self::draw_ui_row(r, vp, card_row + 3, 2, "CWD", UI_META, PANEL_MUTED);
@@ -2353,6 +2430,7 @@ impl App {
                 UI_BODY,
                 PANEL_SECONDARY,
             );
+            Self::draw_evidence_divider(r, vp, card_row + 6, PANEL_BORDER);
         }
 
         // The output well is deliberately bounded by the remaining card
@@ -2381,13 +2459,14 @@ impl App {
                     PANEL_BORDER,
                     5,
                 );
+                Self::draw_evidence_divider(r, vp, output_row, PANEL_BORDER_STRONG);
                 if let Some(text) = output {
                     if text.is_empty() {
                         Self::draw_ui_row(
                             r,
                             vp,
                             output_row + 1,
-                            2,
+                            3,
                             "EMPTY OUTPUT",
                             UI_OUTPUT,
                             PANEL_MUTED,
@@ -2401,10 +2480,10 @@ impl App {
                                 r,
                                 vp,
                                 row,
-                                2,
+                                3,
                                 &panels::truncate_to_cells(
                                     line,
-                                    vp.cols.saturating_sub(5) as usize,
+                                    vp.cols.saturating_sub(7) as usize,
                                 ),
                                 UI_OUTPUT,
                                 PANEL_TEXT,
@@ -2416,7 +2495,7 @@ impl App {
                                 r,
                                 vp,
                                 output_row + 1,
-                                2,
+                                3,
                                 "EMPTY OUTPUT",
                                 UI_OUTPUT,
                                 PANEL_MUTED,
@@ -2427,7 +2506,7 @@ impl App {
                                 r,
                                 vp,
                                 output_row + 1 + rendered as u32,
-                                2,
+                                3,
                                 "PREVIEW TRUNCATED",
                                 UI_META,
                                 PANEL_AMBER,
@@ -2439,7 +2518,7 @@ impl App {
                         r,
                         vp,
                         output_row + 1,
-                        2,
+                        3,
                         "OUTPUT UNAVAILABLE",
                         UI_OUTPUT,
                         PANEL_AMBER,
@@ -2448,6 +2527,7 @@ impl App {
             }
         }
         if provenance_row < vp.rows {
+            Self::draw_evidence_divider(r, vp, provenance_row, PANEL_BORDER);
             Self::draw_ui_row(r, vp, provenance_row, 2, "PROVENANCE", UI_META, PANEL_MUTED);
             let provenance = format!("RECORDED / SESSION {}", snapshot.session);
             Self::draw_ui_row(
