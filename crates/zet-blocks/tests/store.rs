@@ -351,6 +351,100 @@ fn output_preview_is_session_scoped_and_bounded() {
 }
 
 #[test]
+fn silent_false_and_true_commands_are_valid_empty_previews() {
+    let store = Store::open_in_memory().unwrap();
+    let false_id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "false".to_string(),
+            output: String::new(),
+            exit_code: 1,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+    let true_id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "true".to_string(),
+            output: String::new(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 1,
+        })
+        .unwrap();
+
+    for id in [false_id, true_id] {
+        let preview = store.output_preview("session-a", id, 4096).unwrap();
+        let preview = preview.expect("recorded silent command must have a preview");
+        assert_eq!(preview.text, "");
+        assert!(!preview.truncated);
+    }
+}
+
+#[test]
+fn failed_command_with_output_remains_a_bounded_preview() {
+    let store = Store::open_in_memory().unwrap();
+    let id = store
+        .append(&Block {
+            id: 0,
+            session: "session-a".to_string(),
+            command: "false --explain".to_string(),
+            output: "error: observed failure\n".to_string(),
+            exit_code: 1,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 4,
+        })
+        .unwrap();
+
+    let preview = store.output_preview("session-a", id, 8).unwrap().unwrap();
+    assert_eq!(preview.text, "error: o");
+    assert!(preview.truncated);
+}
+
+#[test]
+fn sql_null_output_stays_unavailable_while_empty_text_is_available() {
+    let path = temp_db("null-output");
+    let _ = std::fs::remove_file(&path);
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "CREATE TABLE blocks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session TEXT NOT NULL,
+                command TEXT NOT NULL,
+                output TEXT,
+                exit_code INTEGER NOT NULL DEFAULT 0,
+                cwd TEXT NOT NULL DEFAULT '',
+                git_branch TEXT NOT NULL DEFAULT '',
+                duration_ms INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO blocks (session, command, output, exit_code)
+             VALUES ('session-a', 'legacy-null', NULL, 0),
+                    ('session-a', 'recorded-empty', '', 0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let store = Store::open(path.to_str().unwrap()).unwrap();
+    assert!(store.output_preview("session-a", 1, 10).unwrap().is_none());
+    let empty = store.output_preview("session-a", 2, 10).unwrap().unwrap();
+    assert_eq!(empty.text, "");
+    assert!(!empty.truncated);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn output_preview_preserves_unicode_and_scrubs_legacy_rows() {
     let store = Store::open_in_memory().unwrap();
     let id = store
