@@ -8,12 +8,85 @@ use std::sync::Arc;
 use winit::window::Window;
 
 use crate::atlas::{Atlas, Slot};
-use crate::quad::{cell_quad, solid_rect_px, solid_triangle_px, Rgba, Vertex};
+use crate::presentation::UiTextStyle;
+use crate::quad::{cell_quad, solid_rect_px, solid_triangle_px, textured_rect_px, Rgba, Vertex};
 use crate::text::Shaper;
 use crate::theme::APERTURE_INSTRUMENT;
 
 const ATLAS_COLS: u32 = 16;
 const ATLAS_ROWS: u32 = 16;
+const UI_ATLAS_WIDTH: u32 = 2048;
+const UI_ATLAS_HEIGHT: u32 = 2048;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct UiGlyphKey {
+    character: char,
+    size_bits: u32,
+    line_height_bits: u32,
+    weight: u16,
+    family: crate::presentation::UiFontFamily,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UiGlyph {
+    slot: Option<Slot>,
+    offset_x: i32,
+    offset_y: i32,
+    advance: f32,
+}
+
+/// A small shelf allocator for variable-sized native chrome glyphs. The
+/// terminal atlas remains fixed-cell and is never mixed with this cache.
+#[derive(Debug)]
+struct UiAtlasPacker {
+    width: u32,
+    height: u32,
+    next_x: u32,
+    next_y: u32,
+    row_height: u32,
+}
+
+impl UiAtlasPacker {
+    fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            next_x: 0,
+            next_y: 0,
+            row_height: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.next_x = 0;
+        self.next_y = 0;
+        self.row_height = 0;
+    }
+
+    fn alloc(&mut self, width: u32, height: u32) -> Option<Slot> {
+        if width == 0 || height == 0 || width > self.width || height > self.height {
+            return None;
+        }
+        let gap = 1;
+        if self.next_x.saturating_add(width) > self.width {
+            self.next_x = 0;
+            self.next_y = self.next_y.saturating_add(self.row_height + gap);
+            self.row_height = 0;
+        }
+        if self.next_y.saturating_add(height) > self.height {
+            return None;
+        }
+        let slot = Slot {
+            x: self.next_x,
+            y: self.next_y,
+            w: width,
+            h: height,
+        };
+        self.next_x = self.next_x.saturating_add(width + gap);
+        self.row_height = self.row_height.max(height);
+        Some(slot)
+    }
+}
 
 const SHADER: &str = r#"
 struct Uniforms { screen: vec2<f32> };
@@ -212,6 +285,7 @@ pub struct Renderer {
     uniform_buf: wgpu::Buffer,
     uniform_group: wgpu::BindGroup,
     text_group: wgpu::BindGroup,
+    ui_text_group: wgpu::BindGroup,
     shaper: Shaper,
     cell_w: f32,
     cell_h: f32,
@@ -222,6 +296,11 @@ pub struct Renderer {
     slots: HashMap<char, Slot>,
     bg_slot: Option<Slot>,
     quads: Vec<Vertex>,
+    ui_atlas_tex: wgpu::Texture,
+    ui_atlas_size: (u32, u32),
+    ui_atlas_alloc: UiAtlasPacker,
+    ui_glyphs: HashMap<UiGlyphKey, UiGlyph>,
+    ui_quads: Vec<Vertex>,
 }
 
 impl Renderer {
@@ -295,6 +374,20 @@ impl Renderer {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
+        let ui_atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("zet-ui-atlas"),
+            size: wgpu::Extent3d {
+                width: UI_ATLAS_WIDTH,
+                height: UI_ATLAS_HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("zet-uniform"),
@@ -333,6 +426,7 @@ impl Renderer {
             ..Default::default()
         });
         let atlas_view = atlas_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let ui_atlas_view = ui_atlas_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let text_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("zet-text-layout"),
             entries: &[
@@ -361,6 +455,20 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+        let ui_text_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("zet-ui-text-group"),
+            layout: &text_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&ui_atlas_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -424,6 +532,7 @@ impl Renderer {
             uniform_buf,
             uniform_group,
             text_group,
+            ui_text_group,
             shaper,
             cell_w,
             cell_h,
@@ -434,6 +543,11 @@ impl Renderer {
             slots: HashMap::new(),
             bg_slot: None,
             quads: Vec::new(),
+            ui_atlas_tex,
+            ui_atlas_size: (UI_ATLAS_WIDTH, UI_ATLAS_HEIGHT),
+            ui_atlas_alloc: UiAtlasPacker::new(UI_ATLAS_WIDTH, UI_ATLAS_HEIGHT),
+            ui_glyphs: HashMap::new(),
+            ui_quads: Vec::new(),
         };
         renderer.write_uniform(size.width.max(1), size.height.max(1));
         // Reserve the first atlas slot as a solid-white texel for bg fills.
@@ -537,6 +651,129 @@ impl Renderer {
         );
     }
 
+    fn write_ui_glyph(&self, slot: Slot, raster: &crate::text::UiGlyphRaster) {
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.ui_atlas_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: slot.x,
+                    y: slot.y,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &raster.pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(raster.width.saturating_mul(4)),
+                rows_per_image: Some(raster.height),
+            },
+            wgpu::Extent3d {
+                width: raster.width,
+                height: raster.height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    fn ui_glyph(&mut self, character: char, style: UiTextStyle) -> UiGlyph {
+        let key = UiGlyphKey {
+            character,
+            size_bits: style.size_px.to_bits(),
+            line_height_bits: style.line_height_px.to_bits(),
+            weight: style.weight,
+            family: style.family,
+        };
+        if let Some(&glyph) = self.ui_glyphs.get(&key) {
+            return glyph;
+        }
+
+        let raster = self.shaper.rasterize_ui_glyph(
+            character,
+            style.size_px,
+            style.line_height_px,
+            style.weight,
+            style.family,
+        );
+        let glyph = if raster.pixels.is_empty() {
+            UiGlyph {
+                slot: None,
+                offset_x: raster.offset_x,
+                offset_y: raster.offset_y,
+                advance: raster.advance,
+            }
+        } else {
+            let mut slot = self.ui_atlas_alloc.alloc(raster.width, raster.height);
+            if slot.is_none() {
+                // UI text is regenerated on demand. Resetting this bounded
+                // atlas is preferable to growing frame memory without limit;
+                // cached quads are rebuilt on the next redraw.
+                self.ui_atlas_alloc.reset();
+                self.ui_glyphs.clear();
+                slot = self.ui_atlas_alloc.alloc(raster.width, raster.height);
+            }
+            if let Some(slot) = slot {
+                self.write_ui_glyph(slot, &raster);
+                UiGlyph {
+                    slot: Some(slot),
+                    offset_x: raster.offset_x,
+                    offset_y: raster.offset_y,
+                    advance: raster.advance,
+                }
+            } else {
+                UiGlyph {
+                    slot: None,
+                    offset_x: raster.offset_x,
+                    offset_y: raster.offset_y,
+                    advance: raster.advance,
+                }
+            }
+        };
+        self.ui_glyphs.insert(key, glyph);
+        glyph
+    }
+
+    /// Stage native application text at pixel coordinates. This is a separate
+    /// atlas and vertex stream from the terminal grid, so chrome can choose
+    /// its own font size, weight, family, tracking, and clipping width.
+    pub fn draw_ui_text_px(
+        &mut self,
+        x: f32,
+        baseline: f32,
+        text: &str,
+        style: UiTextStyle,
+        ink: Rgba,
+        max_width: Option<u32>,
+    ) -> u32 {
+        let mut pen_x = x;
+        let start_x = x;
+        for character in text.chars() {
+            if character == '\n' || character == '\r' || character == '\t' {
+                continue;
+            }
+            let glyph = self.ui_glyph(character, style);
+            if max_width.is_some_and(|width| pen_x - start_x >= width as f32) {
+                break;
+            }
+            if let Some(slot) = glyph.slot {
+                let width = slot.w;
+                let height = slot.h;
+                self.ui_quads.extend(textured_rect_px(
+                    pen_x + glyph.offset_x as f32,
+                    baseline + glyph.offset_y as f32,
+                    width,
+                    height,
+                    (slot.x, slot.y, slot.w, slot.h),
+                    self.ui_atlas_size,
+                    ink,
+                ));
+            }
+            pen_x += glyph.advance.max(0.0) + style.tracking_px;
+        }
+        (pen_x - start_x).max(0.0).round() as u32
+    }
+
     /// Stage terminal grid cells as textured quads for the next render().
     /// M0: one glyph per cell; CJK/combining alignment is a follow-up.
     /// The cursor cell is drawn inverted (block cursor); mouse-selected
@@ -567,6 +804,7 @@ impl Renderer {
         sel: Option<crate::selection::Selection>,
     ) {
         self.quads.clear();
+        self.ui_quads.clear();
         let (cur_x, cur_y) = term.cursor();
         let show_cursor = term.cursor_visible() && term.view_offset() == 0;
         let sb = term.visible_base();
@@ -649,6 +887,49 @@ impl Renderer {
     /// reachable hit region.
     pub fn draw_tabbar(&mut self, labels: &[String], active: usize, cols: usize) {
         self.draw_tabbar_with_rail(labels, active, cols, 0);
+    }
+
+    /// Paint only the native tab surface at an arbitrary grid row. Text is
+    /// deliberately omitted: the application chrome uses the independent
+    /// pixel UI text stream for variable-size labels.
+    pub fn draw_tabbar_surface_at(
+        &mut self,
+        active: usize,
+        tab_count: usize,
+        cols: usize,
+        rail_cols: usize,
+        row: usize,
+    ) {
+        let n = tab_count.max(1);
+        let segments = crate::selection::tabbar_segments(cols, rail_cols, n);
+        for x in 0..cols {
+            let seg = crate::selection::tabbar_segment_for_x(x, rail_cols, cols, n);
+            let is_active = seg == Some(active);
+            let seg_start = seg.and_then(|s| segments.get(s)).map(|(start, _)| *start);
+            let is_seg_start = seg_start == Some(x);
+            let fill = if is_seg_start {
+                if is_active {
+                    TAB_ACTIVE_ACCENT
+                } else {
+                    TAB_SEPARATOR
+                }
+            } else if is_active {
+                TAB_ACTIVE_BG
+            } else {
+                TABBAR_BG
+            };
+            if let Some(bg_slot) = self.bg_slot {
+                self.quads.extend(cell_quad(
+                    x as u32,
+                    row as u32,
+                    self.cell_w,
+                    self.cell_h,
+                    (bg_slot.x, bg_slot.y),
+                    self.atlas_size,
+                    fill,
+                ));
+            }
+        }
     }
 
     /// Tab bar variant with an excluded leading rail region.
@@ -836,9 +1117,10 @@ impl Renderer {
         }
     }
 
-    /// One row of text at (`vp.x + col`, `vp.y + row`), clipped to the
-    /// viewport. Reuses the existing glyph cache and appends to the
-    /// current quad buffer.
+    /// One row of application text at (`vp.x + col`, `vp.y + row`). The
+    /// historical API is retained for callers that already express chrome
+    /// geometry in cells, but the glyphs now enter the independent pixel UI
+    /// stream rather than the terminal cell atlas.
     /// Newline and other control characters are non-rendering: they still
     /// consume one column in `viewport_text_cells`, but never reach
     /// `slot_for`, so a multi-line string stays on one row with gaps.
@@ -853,22 +1135,14 @@ impl Renderer {
         if row >= clipped.rows || col >= clipped.cols {
             return;
         }
-        for (cx, cy, c) in viewport_text_iter(clipped, row, col, text) {
-            if !is_renderable_text_char(c) {
-                continue;
-            }
-            if let Some(slot) = self.slot_for(c) {
-                self.quads.extend(cell_quad(
-                    cx,
-                    cy,
-                    self.cell_w,
-                    self.cell_h,
-                    (slot.x, slot.y),
-                    self.atlas_size,
-                    ink,
-                ));
-            }
-        }
+        let style = crate::presentation::UI_BODY;
+        let x = (clipped.x + col) as f32 * self.cell_w;
+        let row_top = (clipped.y + row) as f32 * self.cell_h;
+        let baseline = row_top
+            + ((self.cell_h - style.line_height_px).max(0.0) * 0.5)
+            + style.baseline_offset();
+        let max_width = clipped.cols.saturating_sub(col) * self.cell_w as u32;
+        self.draw_ui_text_px(x, baseline, text, style, ink, Some(max_width));
     }
 
     /// A one-cell-wide vertical rule spanning rows `[y0, y1)` at column
@@ -1495,15 +1769,25 @@ impl Renderer {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let terminal_vertices = self.quads.len();
+        let ui_vertices = self.ui_quads.len();
+        let total_vertices = terminal_vertices.saturating_add(ui_vertices);
         let vbuf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("zet-quads"),
-            size: (self.quads.len() * 32).max(32) as u64,
+            size: (total_vertices * 32).max(32) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        if !self.quads.is_empty() {
+        if terminal_vertices > 0 {
             self.queue
                 .write_buffer(&vbuf, 0, bytemuck::cast_slice(&self.quads));
+        }
+        if ui_vertices > 0 {
+            self.queue.write_buffer(
+                &vbuf,
+                (terminal_vertices * 32) as u64,
+                bytemuck::cast_slice(&self.ui_quads),
+            );
         }
         let mut encoder = self
             .device
@@ -1527,12 +1811,18 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if !self.quads.is_empty() {
+            if total_vertices > 0 {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.uniform_group, &[]);
-                pass.set_bind_group(1, &self.text_group, &[]);
                 pass.set_vertex_buffer(0, vbuf.slice(..));
-                pass.draw(0..self.quads.len() as u32, 0..1);
+                if terminal_vertices > 0 {
+                    pass.set_bind_group(1, &self.text_group, &[]);
+                    pass.draw(0..terminal_vertices as u32, 0..1);
+                }
+                if ui_vertices > 0 {
+                    pass.set_bind_group(1, &self.ui_text_group, &[]);
+                    pass.draw(terminal_vertices as u32..total_vertices as u32, 0..1);
+                }
             }
         }
         self.queue.submit(Some(encoder.finish()));
@@ -1764,6 +2054,21 @@ pub fn viewport_cell_origin(vp: Viewport, col: u32, row: u32) -> Option<(u32, u3
 #[cfg(test)]
 mod viewport_tests {
     use super::*;
+
+    #[test]
+    fn ui_atlas_packer_wraps_shelves_without_overlap() {
+        let mut packer = UiAtlasPacker::new(10, 10);
+        let first = packer.alloc(4, 3).expect("first slot");
+        let second = packer.alloc(4, 3).expect("second slot");
+        let third = packer.alloc(6, 3).expect("wrapped slot");
+
+        assert_eq!((first.x, first.y), (0, 0));
+        assert_eq!((second.x, second.y), (5, 0));
+        assert_eq!((third.x, third.y), (0, 4));
+        assert!(first.x + first.w <= second.x);
+        assert!(second.x + second.w <= 10);
+        assert!(third.y + third.h <= 10);
+    }
 
     #[test]
     fn viewport_origin_offsets_search_cell() {

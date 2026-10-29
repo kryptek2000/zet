@@ -255,3 +255,45 @@ pub fn solid_triangle_px(
         },
     ]
 }
+
+/// Pixel-positioned textured rectangle used by the native presentation text
+/// atlas. The terminal cell path uses [`cell_quad`]; this path keeps glyph
+/// bounds and UVs independent of terminal cell dimensions.
+pub fn textured_rect_px(
+    x: f32,
+    y: f32,
+    width: u32,
+    height: u32,
+    slot_px: (u32, u32, u32, u32),
+    atlas_px: (u32, u32),
+    color: Rgba,
+) -> [Vertex; 6] {
+    let c = [color.r, color.g, color.b, color.a];
+    let x1 = x + width as f32;
+    let y1 = y + height as f32;
+    let u0 = slot_px.0 as f32 / atlas_px.0 as f32;
+    let v0 = slot_px.1 as f32 / atlas_px.1 as f32;
+    let u1 = slot_px.0.saturating_add(slot_px.2) as f32 / atlas_px.0 as f32;
+    let v1 = slot_px.1.saturating_add(slot_px.3) as f32 / atlas_px.1 as f32;
+    let tl = Vertex {
+        pos: [x, y],
+        uv: [u0, v0],
+        color: c,
+    };
+    let tr = Vertex {
+        pos: [x1, y],
+        uv: [u1, v0],
+        color: c,
+    };
+    let bl = Vertex {
+        pos: [x, y1],
+        uv: [u0, v1],
+        color: c,
+    };
+    let br = Vertex {
+        pos: [x1, y1],
+        uv: [u1, v1],
+        color: c,
+    };
+    [tl, bl, br, tl, br, tr]
+}

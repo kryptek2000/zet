@@ -20,13 +20,13 @@ reference watermark are not runtime data and must not be copied into ZET.
 | Session selection | Rail session rows and existing `rail_sel` focus | Active session is immediately legible through surface, seam, marker, and type—not color alone; real cwd/state/exit remain the only data. | No invented session names or telemetry. |
 | Command rows | Observed rows in `draw_rail` | Command ledger uses disciplined row alignment, duration/exit reservation, failure markers, and stable selected-command linkage. | Long rows use existing Unicode-safe truncation. |
 | Living Terminal frame | `draw_terminal_in` plus terminal-frame chrome | The terminal remains the largest, calmest, near-black surface with a precise cyan edge seam and integrated `LIVING TERMINAL` header. | No decorative pixels are drawn over PTY cells or output. |
-| Inspector header | Inspector composition in `RedrawRequested` | Header identifies `CONTEXTUAL INSPECTOR`, uses the same aperture seam, and visually belongs to the workspace rather than a generic card. | Header text remains cell-rendered for font fallback and Unicode correctness. |
+| Inspector header | Inspector composition in `RedrawRequested` plus `draw_ui_row` | Header identifies `CONTEXTUAL INSPECTOR`, uses the same aperture seam, and visually belongs to the workspace rather than a generic card. | Text is rasterized through the independent UI atlas; terminal fallback and Unicode behavior remain separate. |
 | Selected command module | Contextual selected-command surface | Selected command is the dominant Inspector object with real command text, observed status, exit, duration, cwd, branch, and session context. | Unavailable fields remain `—`; no timestamps are inferred. |
 | Evidence detail hierarchy | Inspector sections: `SELECTED COMMAND`, `OBSERVED RESULT`, `RECORDED OUTPUT`, `PROVENANCE` | Technical facts are grouped, labeled, and separated by hierarchy; the Inspector explains the selected item instead of mirroring the rail. | Existing keyboard row contract remains intact while the visual hierarchy is reordered. |
 | Output preview container | Bounded sanitized output well | Captured output has a distinct inset surface, readable monospace text, safe clipping, and explicit empty/unavailable/truncated state. | Preview remains bounded by the P3-A1 recorder contract. |
 | Provenance section | Inspector footer/details | Session identity and recorded-command origin are visible as observed context without implying verification, files, CI, or causality. | No provenance is rendered when the data is unavailable. |
 | Color balance | `zet_gpu::theme::APERTURE_INSTRUMENT` semantic roles | Near-black graphite dominates; cyan/violet/teal/red/amber are sparse semantic accents, not a blue-gray wash. | ANSI terminal colors continue to follow terminal semantics. |
-| Typography | Existing cosmic-text/glyph atlas with role-specific sizes via geometry and spacing | Wordmark, uppercase section labels, command text, metadata, and output have distinct hierarchy and generous scanning rhythm. | The current atlas remains the fallback-safe native text path; no external font dependency is introduced. |
+| Typography | `presentation::UiTextStyle`, `Shaper::rasterize_ui_glyph`, and the bounded UI atlas | Wordmark, uppercase section labels, command text, metadata, and output have distinct hierarchy and generous scanning rhythm. | Cosmic-text fallback remains native and packaged; the terminal keeps its fixed cell atlas while chrome uses independent pixel glyphs. |
 | Depth and accents | Chamfered panel, seam, inset, and selected-state primitives | Selective architectural cut corners, layered inset surfaces, 1–2 px seams, and restrained elevation produce Aperture's instrument depth. | No full-screen shader, continuous glow, or expensive animation is introduced. |
 
 ## Semantic design tokens
@@ -59,3 +59,8 @@ The source image is the approved visual reference. Final side-by-side native
 capture, narrow-window capture, and owner visual acceptance remain preview
 steps because desktop capture must be owner-supervised. The implementation
 must report material deviations rather than label the result pixel-perfect.
+
+The presentation-layer checkpoint is implemented in this feature branch:
+terminal content remains cell-positioned, while application surfaces and
+chrome text are staged in pixel coordinates with a separate glyph atlas and
+draw range.

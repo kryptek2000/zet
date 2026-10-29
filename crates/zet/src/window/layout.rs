@@ -5,9 +5,9 @@
 //! of non-overlapping [`Viewport`]s. Keeping it pure makes every geometry
 //! rule below unit-testable without a display.
 //!
-//! The live application still renders a single full-width grid; wiring this
-//! resolver into `App` is deliberately deferred to a later slice so that
-//! Slice 1 changes no rendering or PTY behaviour.
+//! The live application keeps terminal content on this cell grid while the
+//! Aperture presentation layer composes native pixel chrome around it. The
+//! resolver remains the single source of truth for PTY-safe viewport bounds.
 
 /// Minimum width of the mission rail, in terminal columns. The resolver grows
 /// the rail toward the Aperture target proportion on wider windows.

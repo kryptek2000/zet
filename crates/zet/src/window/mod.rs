@@ -16,6 +16,9 @@ use zet_gpu::input::{
     is_agent_toggle, is_close_tab, is_copy, is_cycle_tab, is_inspector_toggle, is_new_tab,
     is_paste, is_rail_toggle, is_search, is_select_all, translate,
 };
+use zet_gpu::presentation::{
+    UI_BODY, UI_BRAND, UI_COMMAND, UI_HEADER, UI_META, UI_OUTPUT, UI_SECTION,
+};
 use zet_gpu::selection::Selection;
 use zet_gpu::Renderer;
 use zet_pty::shell::ShellState;
@@ -29,6 +32,10 @@ const HOOKS: [(&str, &str); 2] = [
     ("bash", "zet-integration.bash"),
     ("zsh", "zet-integration.zsh"),
 ];
+
+/// Three compact pixel rows reserve enough vertical room for Aperture's
+/// identity/header band while leaving Terminal Focus completely untouched.
+const APP_CHROME_ROWS: usize = 3;
 
 fn shell_program() -> (String, Option<String>) {
     let prog = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
@@ -898,11 +905,15 @@ impl App {
         }
     }
 
-    /// The integrated chrome owns row 0 whenever tabs need a tab bar or a
-    /// panel is visible. Terminal Focus with one tab remains a full-height
-    /// terminal; any contextual workspace gets a stable identity row.
+    /// Aperture's integrated chrome owns a compact pixel-oriented band
+    /// whenever tabs need a tab bar or a contextual panel is visible.
+    /// Terminal Focus with one tab remains a full-height terminal.
     fn bar_rows(&self) -> usize {
-        (self.tabs.len() > 1 || self.layout.rail || self.layout.inspector) as usize
+        if self.tabs.len() > 1 || self.layout.rail || self.layout.inspector {
+            APP_CHROME_ROWS
+        } else {
+            0
+        }
     }
 
     /// Width of the currently resolved rail, in columns. Zero in the
@@ -1373,11 +1384,12 @@ impl App {
 
     fn handle_mouse_click(&mut self, x: f64, y: f64, cw: u32, ch: u32) {
         self.needs_draw = true;
-        // Tab bar owns pixel row 0: clicks switch tabs.
+        // The bottom row of Aperture's compact header owns tab switching;
+        // identity/header pixels above it are not ghost controls.
         if self.bar_rows() > 0
             && x >= 0.0
             && y >= 0.0
-            && (y / ch.max(1) as f64).floor() as usize == 0
+            && (y / ch.max(1) as f64).floor() as usize == self.bar_rows() - 1
         {
             let col = (x / cw.max(1) as f64).floor() as usize;
             if col >= self.cols {
@@ -1518,6 +1530,31 @@ impl App {
         r.draw_chamfered_panel_px(x, y, width, height, 5, fill, border);
     }
 
+    /// Cell-addressed callers can still express panel rows in the existing
+    /// layout model, but their text is placed in pixel space with an explicit
+    /// presentation role. This keeps mouse/layout contracts cell-safe while
+    /// removing chrome typography from the terminal glyph grid.
+    fn draw_ui_row(
+        r: &mut Renderer,
+        vp: zet_gpu::renderer::Viewport,
+        row: u32,
+        col: u32,
+        text: &str,
+        style: zet_gpu::presentation::UiTextStyle,
+        ink: zet_gpu::quad::Rgba,
+    ) {
+        if row >= vp.rows || col >= vp.cols {
+            return;
+        }
+        let (cw, ch) = r.cell_px();
+        let x = (vp.x.saturating_add(col)).saturating_mul(cw) as f32;
+        let row_top = (vp.y.saturating_add(row)).saturating_mul(ch) as f32;
+        let baseline =
+            row_top + ((ch as f32 - style.line_height_px).max(0.0) * 0.5) + style.baseline_offset();
+        let max_width = vp.cols.saturating_sub(col).saturating_mul(cw);
+        r.draw_ui_text_px(x, baseline, text, style, ink, Some(max_width));
+    }
+
     fn draw_rail(
         r: &mut Renderer,
         vp: zet_gpu::renderer::Viewport,
@@ -1618,17 +1655,18 @@ impl App {
             match kind {
                 panels::RailRow::Header => {
                     r.draw_status_dot_px(spine_x, node_y, 3, RAIL_ACCENT, None);
-                    r.draw_text_row(content, row, 1, "01", RAIL_ACCENT);
-                    r.draw_text_row(content, row, 4, "WORKSPACE", RAIL_HEADER_INK);
+                    Self::draw_ui_row(r, content, row, 1, "01", UI_SECTION, RAIL_ACCENT);
+                    Self::draw_ui_row(r, content, row, 4, "WORKSPACE", UI_SECTION, RAIL_HEADER_INK);
                 }
                 panels::RailRow::Mode => {
-                    r.draw_text_row(content, row, 4, "CWD", PANEL_CYAN);
+                    Self::draw_ui_row(r, content, row, 4, "CWD", UI_META, PANEL_CYAN);
                     let ws_path = if snapshot.footer.is_empty() {
                         "/tmp"
                     } else {
                         &snapshot.footer
                     };
-                    r.draw_text_row(
+                    Self::draw_ui_row(
+                        r,
                         content,
                         row,
                         8,
@@ -1636,17 +1674,26 @@ impl App {
                             ws_path,
                             content_cols.saturating_sub(9) as usize,
                         ),
+                        UI_BODY,
                         PANEL_SECONDARY,
                     );
                 }
                 panels::RailRow::SessionsHeader => {
                     r.draw_status_dot_px(spine_x, node_y, 3, RAIL_ACCENT, None);
-                    r.draw_text_row(content, row, 1, "02", RAIL_ACCENT);
-                    r.draw_text_row(content, row, 4, "SESSIONS", RAIL_SECTION_INK);
+                    Self::draw_ui_row(r, content, row, 1, "02", UI_SECTION, RAIL_ACCENT);
+                    Self::draw_ui_row(r, content, row, 4, "SESSIONS", UI_SECTION, RAIL_SECTION_INK);
                     let count = snapshot.sessions.len().to_string();
                     let count_col = content_cols.saturating_sub(panels::text_cells(&count) as u32);
                     if count_col > 4 {
-                        r.draw_text_row(content, row, count_col, &count, RAIL_DIM_INK);
+                        Self::draw_ui_row(
+                            r,
+                            content,
+                            row,
+                            count_col,
+                            &count,
+                            UI_META,
+                            RAIL_DIM_INK,
+                        );
                     }
                 }
                 panels::RailRow::Session(index) => {
@@ -1702,7 +1749,7 @@ impl App {
                             Some(PANEL_BORDER_STRONG),
                         );
                     } else {
-                        r.draw_text_row(content, row, 3, "○", RAIL_DIM_INK);
+                        Self::draw_ui_row(r, content, row, 3, "○", UI_META, RAIL_DIM_INK);
                     }
 
                     let name = format!("{}  {}", session.index, session.cwd_tail);
@@ -1713,7 +1760,7 @@ impl App {
                     } else {
                         RAIL_TEXT_INK
                     };
-                    r.draw_text_row(content, row, 5, &name, name_ink);
+                    Self::draw_ui_row(r, content, row, 5, &name, UI_BODY, name_ink);
 
                     if row + 1 < vp.rows {
                         let detail_cols = content_cols.saturating_sub(5);
@@ -1732,15 +1779,17 @@ impl App {
                             } else {
                                 RAIL_DIM_INK
                             };
-                            r.draw_text_row(content, row + 1, 5, &state, state_ink);
+                            Self::draw_ui_row(r, content, row + 1, 5, &state, UI_META, state_ink);
                         }
                         if !path.is_empty() {
                             let state_cells = panels::text_cells(&state) as u32;
-                            r.draw_text_row(
+                            Self::draw_ui_row(
+                                r,
                                 content,
                                 row + 1,
                                 5 + state_cells + 1,
                                 &path,
+                                UI_META,
                                 RAIL_DIM_INK,
                             );
                         }
@@ -1749,12 +1798,28 @@ impl App {
                 panels::RailRow::SessionDetail(_) => {}
                 panels::RailRow::CommandsHeader => {
                     r.draw_status_dot_px(spine_x, node_y, 3, RAIL_ACCENT, None);
-                    r.draw_text_row(content, row, 1, "03", RAIL_ACCENT);
-                    r.draw_text_row(content, row, 4, "COMMAND LEDGER", RAIL_SECTION_INK);
+                    Self::draw_ui_row(r, content, row, 1, "03", UI_SECTION, RAIL_ACCENT);
+                    Self::draw_ui_row(
+                        r,
+                        content,
+                        row,
+                        4,
+                        "COMMAND LEDGER",
+                        UI_SECTION,
+                        RAIL_SECTION_INK,
+                    );
                     let count = snapshot.commands.len().to_string();
                     let count_col = content_cols.saturating_sub(panels::text_cells(&count) as u32);
                     if count_col > 4 {
-                        r.draw_text_row(content, row, count_col, &count, RAIL_DIM_INK);
+                        Self::draw_ui_row(
+                            r,
+                            content,
+                            row,
+                            count_col,
+                            &count,
+                            UI_META,
+                            RAIL_DIM_INK,
+                        );
                     }
                 }
                 panels::RailRow::Command(index) => {
@@ -1796,7 +1861,7 @@ impl App {
                                 PANEL_RED,
                                 Some(PANEL_DANGER),
                             );
-                            r.draw_text_row(content, row, 3, "✕", PANEL_RED);
+                            Self::draw_ui_row(r, content, row, 3, "✕", UI_META, PANEL_RED);
                         } else {
                             r.draw_status_dot_px(
                                 origin_x + cw * 3 + 2,
@@ -1821,7 +1886,7 @@ impl App {
                         } else {
                             RAIL_TEXT_INK
                         };
-                        r.draw_text_row(content, row, 4, &line, line_ink);
+                        Self::draw_ui_row(r, content, row, 4, &line, UI_BODY, line_ink);
                     }
                 }
                 panels::RailRow::Footer => {
@@ -1836,7 +1901,7 @@ impl App {
                     );
                     let footer =
                         panels::format_footer(&snapshot.footer, content_cols.saturating_sub(1));
-                    r.draw_text_row(content, row, 1, &footer, RAIL_FOOTER_INK);
+                    Self::draw_ui_row(r, content, row, 1, &footer, UI_META, RAIL_FOOTER_INK);
                 }
                 panels::RailRow::Empty => {}
             }
@@ -1844,10 +1909,26 @@ impl App {
 
         if let Some(row) = resources_row {
             r.draw_status_dot_px(spine_x, origin_y + row * ch + ch / 2, 3, RAIL_ACCENT, None);
-            r.draw_text_row(content, row, 1, "04", RAIL_ACCENT);
-            r.draw_text_row(content, row, 4, "RESOURCES", RAIL_SECTION_INK);
+            Self::draw_ui_row(r, content, row, 1, "04", UI_SECTION, RAIL_ACCENT);
+            Self::draw_ui_row(
+                r,
+                content,
+                row,
+                4,
+                "RESOURCES",
+                UI_SECTION,
+                RAIL_SECTION_INK,
+            );
             if row.saturating_add(1) < footer_row {
-                r.draw_text_row(content, row + 1, 4, "— NO CONFIGURED SOURCES", RAIL_DIM_INK);
+                Self::draw_ui_row(
+                    r,
+                    content,
+                    row + 1,
+                    4,
+                    "— NO CONFIGURED SOURCES",
+                    UI_META,
+                    RAIL_DIM_INK,
+                );
             }
         }
     }
@@ -1920,7 +2001,7 @@ impl App {
             },
         );
 
-        r.draw_text_row(vp, 0, 2, "CONTEXTUAL INSPECTOR", PANEL_TEXT);
+        Self::draw_ui_row(r, vp, 0, 2, "CONTEXTUAL INSPECTOR", UI_HEADER, PANEL_TEXT);
         r.draw_rect_px(
             origin_x.saturating_add(cw.saturating_mul(2)),
             origin_y.saturating_add(ch.saturating_mul(1).saturating_sub(2)),
@@ -1946,9 +2027,25 @@ impl App {
                     PANEL_BORDER,
                     7,
                 );
-                r.draw_text_row(vp, 4, 2, "NO ACTIVE SESSION", PANEL_MUTED);
-                r.draw_text_row(vp, 6, 2, "Open a terminal session to", PANEL_SECONDARY);
-                r.draw_text_row(vp, 7, 2, "observe recorded evidence.", PANEL_SECONDARY);
+                Self::draw_ui_row(r, vp, 4, 2, "NO ACTIVE SESSION", UI_SECTION, PANEL_MUTED);
+                Self::draw_ui_row(
+                    r,
+                    vp,
+                    6,
+                    2,
+                    "Open a terminal session to",
+                    UI_BODY,
+                    PANEL_SECONDARY,
+                );
+                Self::draw_ui_row(
+                    r,
+                    vp,
+                    7,
+                    2,
+                    "observe recorded evidence.",
+                    UI_BODY,
+                    PANEL_SECONDARY,
+                );
             }
             return;
         };
@@ -1957,28 +2054,32 @@ impl App {
         // ledger so the Inspector has a different job from the Mission Rail.
         if vp.rows > 5 {
             Self::draw_instrument_surface(r, vp, 1, 4, PANEL_RAISED, PANEL_BORDER, 7);
-            r.draw_text_row(vp, 1, 2, "SESSION", PANEL_MUTED);
-            r.draw_text_row(
+            Self::draw_ui_row(r, vp, 1, 2, "SESSION", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(
+                r,
                 vp,
                 1,
                 12.min(vp.cols.saturating_sub(1)),
                 &snapshot.session,
+                UI_BODY,
                 PANEL_TEXT,
             );
-            r.draw_text_row(vp, 2, 2, "STATE", PANEL_MUTED);
+            Self::draw_ui_row(r, vp, 2, 2, "STATE", UI_META, PANEL_MUTED);
             let state_ink = match snapshot.state.as_str() {
                 "exited" => PANEL_RED,
                 "running" => PANEL_TEAL,
                 _ => PANEL_CYAN,
             };
-            r.draw_text_row(
+            Self::draw_ui_row(
+                r,
                 vp,
                 2,
                 12.min(vp.cols.saturating_sub(1)),
                 &snapshot.state,
+                UI_BODY,
                 state_ink,
             );
-            r.draw_text_row(vp, 3, 2, "LAST EXIT", PANEL_MUTED);
+            Self::draw_ui_row(r, vp, 3, 2, "LAST EXIT", UI_META, PANEL_MUTED);
             let exit_ink = if snapshot.exit == "0" {
                 PANEL_TEAL
             } else if snapshot.exit == "—" {
@@ -1986,43 +2087,65 @@ impl App {
             } else {
                 PANEL_RED
             };
-            r.draw_text_row(
+            Self::draw_ui_row(
+                r,
                 vp,
                 3,
                 12.min(vp.cols.saturating_sub(1)),
                 &snapshot.exit,
+                UI_BODY,
                 exit_ink,
             );
-            r.draw_text_row(vp, 4, 2, "CWD", PANEL_MUTED);
-            r.draw_text_row(
+            Self::draw_ui_row(r, vp, 4, 2, "CWD", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(
+                r,
                 vp,
                 4,
                 12.min(vp.cols.saturating_sub(1)),
                 &panels::truncate_to_cells(&snapshot.cwd, vp.cols.saturating_sub(13) as usize),
+                UI_BODY,
                 PANEL_SECONDARY,
             );
-            r.draw_text_row(vp, 5, 2, "EVIDENCE / OBSERVED", PANEL_MUTED);
+            Self::draw_ui_row(r, vp, 5, 2, "EVIDENCE / OBSERVED", UI_SECTION, PANEL_MUTED);
         }
 
         let activity_header = panels::INSPECTOR_ACTIVITY_START.saturating_sub(1);
         if activity_header < vp.rows {
-            r.draw_text_row(vp, activity_header, 2, "EVIDENCE INDEX", PANEL_VIOLET);
+            Self::draw_ui_row(
+                r,
+                vp,
+                activity_header,
+                2,
+                "EVIDENCE INDEX",
+                UI_SECTION,
+                PANEL_VIOLET,
+            );
             let count = snapshot.commands.len().to_string();
             let count_col = vp
                 .cols
                 .saturating_sub(panels::text_cells(&count) as u32 + 2);
             if count_col > 2 {
-                r.draw_text_row(vp, activity_header, count_col, &count, PANEL_MUTED);
+                Self::draw_ui_row(
+                    r,
+                    vp,
+                    activity_header,
+                    count_col,
+                    &count,
+                    UI_META,
+                    PANEL_MUTED,
+                );
             }
         }
 
         if snapshot.commands.is_empty() {
             if panels::INSPECTOR_ACTIVITY_START < vp.rows {
-                r.draw_text_row(
+                Self::draw_ui_row(
+                    r,
                     vp,
                     panels::INSPECTOR_ACTIVITY_START,
                     2,
                     "NO RECORDED COMMANDS",
+                    UI_BODY,
                     PANEL_MUTED,
                 );
             }
@@ -2068,11 +2191,13 @@ impl App {
                         if failed { PANEL_RED } else { PANEL_CYAN },
                     );
                 }
-                r.draw_text_row(
+                Self::draw_ui_row(
+                    r,
                     vp,
                     row,
                     2,
                     &format!("{:02}", index + 1),
+                    UI_META,
                     if selected { PANEL_CYAN } else { PANEL_MUTED },
                 );
                 let line = panels::format_command_row(
@@ -2081,11 +2206,13 @@ impl App {
                     &command.duration,
                     vp.cols.saturating_sub(7),
                 );
-                r.draw_text_row(
+                Self::draw_ui_row(
+                    r,
                     vp,
                     row,
                     6,
                     &line,
+                    UI_BODY,
                     if failed { PANEL_RED } else { PANEL_SECONDARY },
                 );
             }
@@ -2095,7 +2222,15 @@ impl App {
         if detail >= vp.rows {
             return;
         }
-        r.draw_text_row(vp, detail, 2, "SELECTED COMMAND", PANEL_VIOLET);
+        Self::draw_ui_row(
+            r,
+            vp,
+            detail,
+            2,
+            "SELECTED COMMAND",
+            UI_SECTION,
+            PANEL_VIOLET,
+        );
         let card_row = detail.saturating_add(1);
         let card_rows = vp.rows.saturating_sub(card_row);
         if card_rows == 0 {
@@ -2122,18 +2257,22 @@ impl App {
         );
         let Some(command) = selected else {
             if card_rows > 2 {
-                r.draw_text_row(
+                Self::draw_ui_row(
+                    r,
                     vp,
                     card_row + 1,
                     2,
                     "SELECT A RECORDED COMMAND",
+                    UI_COMMAND,
                     PANEL_SECONDARY,
                 );
-                r.draw_text_row(
+                Self::draw_ui_row(
+                    r,
                     vp,
                     card_row + 3,
                     2,
                     "Evidence will appear here.",
+                    UI_BODY,
                     PANEL_MUTED,
                 );
             }
@@ -2141,61 +2280,79 @@ impl App {
         };
 
         if card_rows > 1 {
-            r.draw_text_row(vp, card_row + 1, 2, "$", PANEL_CYAN);
-            r.draw_text_row(
+            Self::draw_ui_row(r, vp, card_row + 1, 2, "$", UI_COMMAND, PANEL_CYAN);
+            Self::draw_ui_row(
+                r,
                 vp,
                 card_row + 1,
                 4,
                 &panels::truncate_to_cells(&command.command, vp.cols.saturating_sub(6) as usize),
+                UI_COMMAND,
                 PANEL_TEXT,
             );
         }
         if card_rows > 2 {
-            r.draw_text_row(vp, card_row + 2, 2, "EXIT", PANEL_MUTED);
-            r.draw_text_row(
+            Self::draw_ui_row(r, vp, card_row + 2, 2, "EXIT", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(
+                r,
                 vp,
                 card_row + 2,
                 8,
                 &command.exit,
+                UI_BODY,
                 if failed { PANEL_RED } else { PANEL_TEAL },
             );
-            r.draw_text_row(vp, card_row + 2, 15, "DURATION", PANEL_MUTED);
-            r.draw_text_row(
+            Self::draw_ui_row(r, vp, card_row + 2, 15, "DURATION", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(
+                r,
                 vp,
                 card_row + 2,
                 25.min(vp.cols.saturating_sub(1)),
                 &command.duration,
+                UI_BODY,
                 PANEL_SECONDARY,
             );
         }
         if card_rows > 3 {
-            r.draw_text_row(vp, card_row + 3, 2, "CWD", PANEL_MUTED);
-            r.draw_text_row(
+            Self::draw_ui_row(r, vp, card_row + 3, 2, "CWD", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(
+                r,
                 vp,
                 card_row + 3,
                 8,
                 &panels::truncate_to_cells(&command.cwd, vp.cols.saturating_sub(9) as usize),
+                UI_BODY,
                 PANEL_SECONDARY,
             );
         }
         if card_rows > 4 {
-            r.draw_text_row(vp, card_row + 4, 2, "BRANCH", PANEL_MUTED);
+            Self::draw_ui_row(r, vp, card_row + 4, 2, "BRANCH", UI_META, PANEL_MUTED);
             let branch = if command.git_branch.is_empty() {
                 "—"
             } else {
                 &command.git_branch
             };
-            r.draw_text_row(
+            Self::draw_ui_row(
+                r,
                 vp,
                 card_row + 4,
                 8,
                 &panels::truncate_to_cells(branch, vp.cols.saturating_sub(9) as usize),
+                UI_BODY,
                 PANEL_SECONDARY,
             );
         }
         if card_rows > 5 {
-            r.draw_text_row(vp, card_row + 5, 2, "SESSION", PANEL_MUTED);
-            r.draw_text_row(vp, card_row + 5, 10, &snapshot.session, PANEL_SECONDARY);
+            Self::draw_ui_row(r, vp, card_row + 5, 2, "SESSION", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(
+                r,
+                vp,
+                card_row + 5,
+                10,
+                &snapshot.session,
+                UI_BODY,
+                PANEL_SECONDARY,
+            );
         }
 
         // The output well is deliberately bounded by the remaining card
@@ -2203,7 +2360,15 @@ impl App {
         let output_label = card_row.saturating_add(7);
         let provenance_row = vp.rows.saturating_sub(2);
         if output_label < provenance_row {
-            r.draw_text_row(vp, output_label, 2, "RECORDED OUTPUT", PANEL_VIOLET);
+            Self::draw_ui_row(
+                r,
+                vp,
+                output_label,
+                2,
+                "RECORDED OUTPUT",
+                UI_SECTION,
+                PANEL_VIOLET,
+            );
             let output_row = output_label.saturating_add(1);
             let output_rows = provenance_row.saturating_sub(output_row);
             if output_rows > 0 {
@@ -2218,13 +2383,22 @@ impl App {
                 );
                 if let Some(text) = output {
                     if text.is_empty() {
-                        r.draw_text_row(vp, output_row + 1, 2, "EMPTY OUTPUT", PANEL_MUTED);
+                        Self::draw_ui_row(
+                            r,
+                            vp,
+                            output_row + 1,
+                            2,
+                            "EMPTY OUTPUT",
+                            UI_OUTPUT,
+                            PANEL_MUTED,
+                        );
                     } else {
                         let max_lines = output_rows.saturating_sub(2) as usize;
                         let mut rendered = 0usize;
                         for line in text.lines().take(max_lines) {
                             let row = output_row + 1 + rendered as u32;
-                            r.draw_text_row(
+                            Self::draw_ui_row(
+                                r,
                                 vp,
                                 row,
                                 2,
@@ -2232,91 +2406,195 @@ impl App {
                                     line,
                                     vp.cols.saturating_sub(5) as usize,
                                 ),
+                                UI_OUTPUT,
                                 PANEL_TEXT,
                             );
                             rendered += 1;
                         }
                         if rendered == 0 {
-                            r.draw_text_row(vp, output_row + 1, 2, "EMPTY OUTPUT", PANEL_MUTED);
+                            Self::draw_ui_row(
+                                r,
+                                vp,
+                                output_row + 1,
+                                2,
+                                "EMPTY OUTPUT",
+                                UI_OUTPUT,
+                                PANEL_MUTED,
+                            );
                         }
                         if output_truncated && rendered + 1 < max_lines {
-                            r.draw_text_row(
+                            Self::draw_ui_row(
+                                r,
                                 vp,
                                 output_row + 1 + rendered as u32,
                                 2,
                                 "PREVIEW TRUNCATED",
+                                UI_META,
                                 PANEL_AMBER,
                             );
                         }
                     }
                 } else {
-                    r.draw_text_row(vp, output_row + 1, 2, "OUTPUT UNAVAILABLE", PANEL_AMBER);
+                    Self::draw_ui_row(
+                        r,
+                        vp,
+                        output_row + 1,
+                        2,
+                        "OUTPUT UNAVAILABLE",
+                        UI_OUTPUT,
+                        PANEL_AMBER,
+                    );
                 }
             }
         }
         if provenance_row < vp.rows {
-            r.draw_text_row(vp, provenance_row, 2, "PROVENANCE", PANEL_MUTED);
+            Self::draw_ui_row(r, vp, provenance_row, 2, "PROVENANCE", UI_META, PANEL_MUTED);
             let provenance = format!("RECORDED / SESSION {}", snapshot.session);
-            r.draw_text_row(
+            Self::draw_ui_row(
+                r,
                 vp,
                 provenance_row,
                 13,
                 &panels::truncate_to_cells(&provenance, vp.cols.saturating_sub(14) as usize),
+                UI_META,
                 PANEL_SECONDARY,
             );
         }
     }
 
-    /// Integrated top chrome for panel layouts. The rail owns the left
-    /// identity segment, while the existing tab bar owns the live session
-    /// segments to its right. The mark is native geometry, not an image
-    /// overlay, so it scales with the same surface and remains cheap.
-    fn draw_app_chrome(r: &mut Renderer, cols: u32, rail_cols: u32, layout: layout::Layout) {
-        if rail_cols == 0 || cols == 0 {
+    /// Integrated Aperture header. It is a real pixel-composed band rather
+    /// than a one-row terminal banner: the identity, descriptor, datum seam,
+    /// and tab surface share a precise architectural frame while the live
+    /// terminal begins below it on an untouched cell grid.
+    fn draw_app_chrome(
+        r: &mut Renderer,
+        cols: u32,
+        rail_cols: u32,
+        bar_rows: usize,
+        layout: layout::Layout,
+    ) {
+        if cols == 0 || bar_rows == 0 {
             return;
         }
         use zet_gpu::renderer::{
-            PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_TEXT, PANEL_VIOLET, TABBAR_BG,
+            PANEL_BG, PANEL_BORDER, PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_TEXT, PANEL_VIOLET,
+            TABBAR_BG,
         };
-        let header = zet_gpu::renderer::Viewport {
+        let band = zet_gpu::renderer::Viewport {
             x: 0,
             y: 0,
             cols,
-            rows: 1,
+            rows: bar_rows as u32,
         };
-        r.draw_fill(
-            zet_gpu::renderer::Viewport {
-                x: 0,
-                y: 0,
-                cols: rail_cols,
-                rows: 1,
-            },
-            TABBAR_BG,
-        );
+        r.draw_fill(band, PANEL_BG);
         let (cw, ch) = r.cell_px();
+        let width_px = cols.saturating_mul(cw);
+        let band_h = (bar_rows as u32).saturating_mul(ch);
+        let rail_px = rail_cols.saturating_mul(cw);
+
+        // Header depth: a near-black identity deck above a quieter tab datum.
+        r.draw_rect_px(0, 0, width_px, ch.saturating_mul(2), TABBAR_BG);
         r.draw_rect_px(
             0,
-            ch.saturating_sub(2),
-            rail_cols.saturating_mul(cw),
-            2,
-            PANEL_CYAN,
+            ch.saturating_mul(2).saturating_sub(1),
+            width_px,
+            1,
+            PANEL_BORDER,
         );
-        // A short cyan datum carries the header into the live terminal
-        // surface without covering any terminal cell content.
+        r.draw_rect_px(0, band_h.saturating_sub(2), rail_px, 2, PANEL_CYAN);
+        // A short cyan datum carries the identity into the terminal seam.
         r.draw_rect_px(
-            rail_cols.saturating_mul(cw),
-            ch.saturating_sub(2),
-            10.min(cols.saturating_sub(rail_cols).saturating_mul(cw)),
+            rail_px,
+            band_h.saturating_sub(2),
+            32.min(width_px.saturating_sub(rail_px)),
             2,
             PANEL_CYAN,
         );
-        let mark = ch.saturating_sub(8).min(16);
-        r.draw_aperture_crystal_mark_px(5, 4, mark, mark);
-        r.draw_text_row(header, 0, 4, "ZET", PANEL_TEXT);
-        r.draw_text_row(header, 0, 9, "APERTURE", PANEL_VIOLET);
-        let mode = if layout.inspector { "MC" } else { "WS" };
-        let mode_col = rail_cols.saturating_sub(3);
-        r.draw_text_row(header, 0, mode_col, mode, PANEL_BORDER_STRONG);
+
+        // Distinctive native geometry plus independent typography. The
+        // descriptor is a product identity, not an invented operational
+        // metric or an inert control.
+        let mark_size = ch.saturating_mul(2).saturating_sub(8).max(18);
+        r.draw_aperture_crystal_mark_px(18, 8, mark_size, mark_size);
+        let brand_x = 18u32.saturating_add(mark_size).saturating_add(14);
+        r.draw_ui_text_px(
+            brand_x as f32,
+            8.0 + UI_BRAND.baseline_offset(),
+            "ZET",
+            UI_BRAND,
+            PANEL_TEXT,
+            Some(100),
+        );
+        r.draw_ui_text_px(
+            brand_x as f32,
+            34.0 + UI_HEADER.baseline_offset(),
+            "APERTURE / OUTCOME-AWARE TERMINAL",
+            UI_HEADER,
+            PANEL_VIOLET,
+            Some(width_px.saturating_sub(brand_x).saturating_sub(180)),
+        );
+
+        let mode = if layout.inspector {
+            "EVIDENCE VIEW"
+        } else {
+            "WORKSPACE"
+        };
+        let mode_width = (mode.chars().count() as u32)
+            .saturating_mul(8)
+            .saturating_add(22);
+        let mode_x = width_px.saturating_sub(mode_width).saturating_sub(18);
+        r.draw_chamfered_panel_px(mode_x, 14, mode_width, 26, 5, PANEL_BG, PANEL_BORDER_STRONG);
+        r.draw_ui_text_px(
+            mode_x.saturating_add(10) as f32,
+            18.0 + UI_META.baseline_offset(),
+            mode,
+            UI_META,
+            PANEL_CYAN,
+            Some(mode_width.saturating_sub(14)),
+        );
+    }
+
+    fn draw_ui_tabbar(
+        r: &mut Renderer,
+        labels: &[String],
+        active: usize,
+        cols: usize,
+        rail_cols: usize,
+        row: usize,
+    ) {
+        use zet_gpu::renderer::{PANEL_SECONDARY, PANEL_TEXT};
+        let segments = zet_gpu::selection::tabbar_segments(cols, rail_cols, labels.len().max(1));
+        let (cw, ch) = r.cell_px();
+        let cw_usize = cw as usize;
+        let style = UI_HEADER;
+        let baseline = row as f32 * ch as f32
+            + ((ch as f32 - style.line_height_px).max(0.0) * 0.5)
+            + style.baseline_offset();
+        for (index, &(start, end)) in segments.iter().enumerate() {
+            let Some(label) = labels.get(index) else {
+                continue;
+            };
+            let ink = if index == active {
+                PANEL_TEXT
+            } else {
+                PANEL_SECONDARY
+            };
+            let width = end
+                .saturating_sub(start)
+                .saturating_sub(2)
+                .saturating_mul(cw_usize) as u32;
+            if width == 0 {
+                continue;
+            }
+            r.draw_ui_text_px(
+                start.saturating_add(1).saturating_mul(cw_usize) as f32,
+                baseline,
+                label,
+                style,
+                ink,
+                Some(width),
+            );
+        }
     }
 
     /// Short per-tab labels: index + cwd tail, truncated to segment.
@@ -3396,8 +3674,9 @@ impl ApplicationHandler for App {
                         }
                     }
                     if bar > 0 {
-                        r.draw_tabbar_with_rail(&labels, active, cols, rail_cols);
-                        Self::draw_app_chrome(r, cols as u32, rail_cols as u32, self.layout);
+                        Self::draw_app_chrome(r, cols as u32, rail_cols as u32, bar, self.layout);
+                        r.draw_tabbar_surface_at(active, labels.len(), cols, rail_cols, bar - 1);
+                        Self::draw_ui_tabbar(r, &labels, active, cols, rail_cols, bar - 1);
                     }
                     if let Some((cx, cy, g)) = ghost {
                         r.draw_ghost(gpu_vp, cy, cx, &g);
@@ -3771,18 +4050,18 @@ mod layout_fit_tests {
         );
         app.fit_all();
         assert_eq!(app.tabs[0].term.cols(), 82);
-        assert_eq!(app.tabs[0].term.rows(), 23);
+        assert_eq!(app.tabs[0].term.rows(), 21);
 
         app.tabs.push(make_test_tab());
         app.fit_all();
         assert_eq!(app.tabs[0].term.cols(), 82);
-        assert_eq!(app.tabs[0].term.rows(), 23);
+        assert_eq!(app.tabs[0].term.rows(), 21);
         assert_eq!(app.tabs[1].term.cols(), 82);
-        assert_eq!(app.tabs[1].term.rows(), 23);
+        assert_eq!(app.tabs[1].term.rows(), 21);
 
         app.tabs.pop();
         app.fit_all();
-        assert_eq!(app.tabs[0].term.rows(), 23);
+        assert_eq!(app.tabs[0].term.rows(), 21);
     }
 
     #[test]
@@ -3813,9 +4092,9 @@ mod layout_fit_tests {
 
         app.fit_all();
         for tab in &mut app.tabs {
-            assert_eq!((tab.term.cols(), tab.term.rows()), (82, 23));
+            assert_eq!((tab.term.cols(), tab.term.rows()), (82, 21));
             if let Some(session) = &mut tab.session {
-                assert_eq!(session.size().unwrap(), (82, 23));
+                assert_eq!(session.size().unwrap(), (82, 21));
             }
         }
 
@@ -3826,9 +4105,9 @@ mod layout_fit_tests {
 
         app.fit_all();
         assert_eq!(app.tabs[0].term.cols(), 82);
-        assert_eq!(app.tabs[0].term.rows(), 23);
+        assert_eq!(app.tabs[0].term.rows(), 21);
         if let Some(session) = &mut app.tabs[0].session {
-            assert_eq!(session.size().unwrap(), (82, 23));
+            assert_eq!(session.size().unwrap(), (82, 21));
             session.shutdown();
         }
     }
@@ -4129,13 +4408,13 @@ mod layout_fit_tests {
             crate::window::layout::LayoutMode::Workspace.layout(),
         );
         app.tabs.push(make_test_tab());
-        app.mouse_px = Some((10.0, 160.0));
-        app.handle_mouse_click(10.0, 160.0, 10, 20);
+        app.mouse_px = Some((10.0, 200.0));
+        app.handle_mouse_click(10.0, 200.0, 10, 20);
         assert_eq!(app.focus, super::Focus::Rail);
         assert_eq!(app.rail_sel, 1);
 
-        app.mouse_px = Some((300.0, 40.0));
-        app.handle_mouse_click(300.0, 40.0, 10, 20);
+        app.mouse_px = Some((300.0, 80.0));
+        app.handle_mouse_click(300.0, 80.0, 10, 20);
         assert_eq!(app.focus, super::Focus::Terminal);
         assert!(app.tabs[app.active].selection.is_some());
 
@@ -4156,19 +4435,19 @@ mod layout_fit_tests {
         app.active = 1;
 
         // Rail-area clicks never switch tabs.
-        app.handle_mouse_click(10.0, 0.0, 10, 20);
+        app.handle_mouse_click(10.0, 40.0, 10, 20);
         assert_eq!(app.active, 1);
 
         // The first valid tab segment is tab 0.
-        app.handle_mouse_click(240.0, 0.0, 10, 20);
+        app.handle_mouse_click(240.0, 40.0, 10, 20);
         assert_eq!(app.active, 0);
 
         // The second valid tab segment is tab 1.
-        app.handle_mouse_click(640.0, 0.0, 10, 20);
+        app.handle_mouse_click(640.0, 40.0, 10, 20);
         assert_eq!(app.active, 1);
 
         // Outside the window cannot switch tabs.
-        app.handle_mouse_click(1040.0, 0.0, 10, 20);
+        app.handle_mouse_click(1040.0, 40.0, 10, 20);
         assert_eq!(app.active, 1);
 
         // A click above the window cannot switch tabs.
@@ -4183,7 +4462,7 @@ mod layout_fit_tests {
         );
         zero_rail.tabs.push(make_test_tab());
         zero_rail.active = 1;
-        zero_rail.handle_mouse_click(30.0, 0.0, 10, 20);
+        zero_rail.handle_mouse_click(30.0, 40.0, 10, 20);
         assert_eq!(zero_rail.active, 0);
     }
 
@@ -4199,19 +4478,19 @@ mod layout_fit_tests {
         app.focus = super::Focus::Terminal;
         app.rail_sel = 0;
 
-        app.handle_mouse_click(10.0, 80.0, 10, 20);
+        app.handle_mouse_click(10.0, 120.0, 10, 20);
         assert_eq!(app.focus, super::Focus::Rail);
         assert_eq!(app.rail_sel, 0);
         assert_eq!(app.active, 0);
 
-        app.handle_mouse_click(10.0, 160.0, 10, 20);
+        app.handle_mouse_click(10.0, 200.0, 10, 20);
         assert_eq!(app.rail_sel, 1);
         assert_eq!(app.active, 0);
 
-        app.handle_mouse_click(10.0, 20.0, 10, 20);
+        app.handle_mouse_click(10.0, 60.0, 10, 20);
         assert_eq!(app.rail_sel, 1);
 
-        app.handle_mouse_click(10.0, 200.0, 10, 20);
+        app.handle_mouse_click(10.0, 240.0, 10, 20);
         assert_eq!(app.rail_sel, 1);
 
         app.handle_mouse_click(-1.0, 100.0, 10, 20);
@@ -4513,14 +4792,14 @@ mod layout_fit_tests {
             crate::window::layout::LayoutMode::MissionControl.layout(),
         );
         app.refresh_inspector();
-        app.handle_mouse_click(900.0, 25.0, 10, 20);
+        app.handle_mouse_click(900.0, 65.0, 10, 20);
         assert_eq!(app.focus, super::Focus::Inspector);
         assert_eq!(app.inspector_sel, None);
-        app.handle_mouse_click(900.0, 45.0, 10, 20);
+        app.handle_mouse_click(900.0, 85.0, 10, 20);
         assert_eq!(app.inspector_sel, Some(0));
-        app.handle_mouse_click(900.0, 105.0, 10, 20);
+        app.handle_mouse_click(900.0, 145.0, 10, 20);
         assert_eq!(app.inspector_sel, Some(3));
-        app.handle_mouse_click(900.0, 200.0, 10, 20);
+        app.handle_mouse_click(900.0, 240.0, 10, 20);
         assert_eq!(app.focus, super::Focus::Inspector);
     }
 

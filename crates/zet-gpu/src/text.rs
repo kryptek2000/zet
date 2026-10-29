@@ -1,13 +1,26 @@
 // CPU text shaping via cosmic-text: layout monospace lines and rasterize
 // glyph coverage masks. The renderer uploads these into the atlas texture.
 
-use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache};
+use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache, Weight};
+
+use crate::presentation::UiFontFamily;
 
 #[derive(Debug, Clone)]
 pub struct ShapedGlyph {
     pub advance: f32,
     /// (x, y, alpha) coverage pixels relative to the pen origin.
     pub pixels: Vec<(i32, i32, u8)>,
+}
+
+/// A variable-size native UI glyph rasterized independently of terminal cells.
+#[derive(Debug, Clone)]
+pub struct UiGlyphRaster {
+    pub pixels: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub offset_x: i32,
+    pub offset_y: i32,
+    pub advance: f32,
 }
 
 pub struct Shaper {
@@ -141,6 +154,88 @@ impl Shaper {
             }
         }
         out
+    }
+
+    /// Rasterize one native presentation glyph at its requested size and
+    /// weight. Terminal shaping continues to use the fixed probe metrics;
+    /// this method deliberately creates independent metrics for chrome text.
+    pub fn rasterize_ui_glyph(
+        &mut self,
+        c: char,
+        font_px: f32,
+        line_height_px: f32,
+        weight: u16,
+        family: UiFontFamily,
+    ) -> UiGlyphRaster {
+        let metrics = Metrics::new(font_px.max(1.0), line_height_px.max(font_px));
+        let mut buffer = Buffer::new(&mut self.font_system, metrics);
+        buffer.set_size(Some(256.0), Some(metrics.line_height));
+        let family = match family {
+            UiFontFamily::SansSerif => Family::SansSerif,
+            UiFontFamily::Monospace => Family::Monospace,
+        };
+        let attrs = Attrs::new().family(family).weight(Weight(weight));
+        let text = c.to_string();
+        buffer.set_text(&text, &attrs, Shaping::Advanced, None);
+        buffer.shape_until_scroll(&mut self.font_system, false);
+
+        let mut advance = font_px * 0.6;
+        let mut points: Vec<(i32, i32, u8)> = Vec::new();
+        if let Some(run) = buffer.layout_runs().next() {
+            if let Some(glyph) = run.glyphs.first() {
+                advance = glyph.w.max(0.0);
+                let physical = glyph.physical((0.0, 0.0), 1.0);
+                self.cache.with_pixels(
+                    &mut self.font_system,
+                    physical.cache_key,
+                    cosmic_text::Color::rgb(0xFF, 0xFF, 0xFF),
+                    |x, y, color| {
+                        let alpha = (color.0 >> 24) as u8;
+                        if alpha > 0 {
+                            points.push((x, y, alpha));
+                        }
+                    },
+                );
+            }
+        }
+
+        if points.is_empty() {
+            return UiGlyphRaster {
+                pixels: Vec::new(),
+                width: 0,
+                height: 0,
+                offset_x: 0,
+                offset_y: 0,
+                advance,
+            };
+        }
+
+        let min_x = points.iter().map(|(x, _, _)| *x).min().unwrap_or(0);
+        let max_x = points.iter().map(|(x, _, _)| *x).max().unwrap_or(0);
+        let min_y = points.iter().map(|(_, y, _)| *y).min().unwrap_or(0);
+        let max_y = points.iter().map(|(_, y, _)| *y).max().unwrap_or(0);
+        let padding = 1i32;
+        let width = (max_x - min_x + 1 + padding * 2).max(1) as u32;
+        let height = (max_y - min_y + 1 + padding * 2).max(1) as u32;
+        let mut pixels = vec![0u8; width as usize * height as usize * 4];
+        for (x, y, alpha) in points {
+            let x = (x - min_x + padding) as u32;
+            let y = (y - min_y + padding) as u32;
+            let index = ((y * width + x) * 4) as usize;
+            pixels[index] = 255;
+            pixels[index + 1] = 255;
+            pixels[index + 2] = 255;
+            pixels[index + 3] = pixels[index + 3].max(alpha);
+        }
+
+        UiGlyphRaster {
+            pixels,
+            width,
+            height,
+            offset_x: min_x - padding,
+            offset_y: min_y - padding,
+            advance,
+        }
     }
 }
 

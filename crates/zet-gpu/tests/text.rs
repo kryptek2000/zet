@@ -1,6 +1,31 @@
 use zet_gpu::text::Shaper;
 
 #[test]
+fn native_ui_glyphs_have_independent_size_and_family_roles() {
+    use zet_gpu::presentation::{UiFontFamily, UI_BODY, UI_BRAND};
+
+    let mut shaper = Shaper::new(16.0);
+    let body = shaper.rasterize_ui_glyph(
+        'A',
+        UI_BODY.size_px,
+        UI_BODY.line_height_px,
+        UI_BODY.weight,
+        UI_BODY.family,
+    );
+    let brand = shaper.rasterize_ui_glyph(
+        'A',
+        UI_BRAND.size_px,
+        UI_BRAND.line_height_px,
+        UI_BRAND.weight,
+        UiFontFamily::SansSerif,
+    );
+    assert!(!body.pixels.is_empty());
+    assert!(!brand.pixels.is_empty());
+    assert!(brand.height > body.height);
+    assert_ne!(brand.advance, body.advance);
+}
+
+#[test]
 fn monospace_advances_are_uniform_and_positive() {
     let mut shaper = Shaper::new(16.0);
     let glyphs = shaper.shape_line("hello");
