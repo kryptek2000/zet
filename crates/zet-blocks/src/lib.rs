@@ -227,17 +227,25 @@ impl Store {
         // NUL cannot terminate retrieval. The fetch size is bounded before
         // display processing; SQLite does not need length(output).
         let mut stmt = self.conn.prepare(
-            "SELECT substr(CAST(output AS BLOB), 1, ?2) FROM blocks WHERE id = ?1 AND session = ?3",
+            "SELECT CASE
+                WHEN output IS NULL THEN NULL
+                ELSE COALESCE(substr(CAST(output AS BLOB), 1, ?2), zeroblob(0))
+             END
+             FROM blocks WHERE id = ?1 AND session = ?3",
         )?;
-        let raw: Option<Vec<u8>> = stmt
+        // The outer Option is the row-presence contract. The inner Option
+        // preserves a genuine SQL NULL (possible in legacy/corrupt stores)
+        // as unavailable, while COALESCE above turns SQLite's NULL result for
+        // a valid zero-length output into an empty blob.
+        let raw: Option<Option<Vec<u8>>> = stmt
             .query_row(
                 rusqlite::params![id, fetch_with_sentinel as i64, session],
                 |row| row.get(0),
             )
             .optional()?;
         let raw = match raw {
-            Some(value) => value,
-            None => return Ok(None),
+            Some(Some(value)) => value,
+            Some(None) | None => return Ok(None),
         };
         let more_data = raw.len() == fetch_with_sentinel;
         let bytes = if raw.len() > fetch {

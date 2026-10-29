@@ -5352,6 +5352,40 @@ mod layout_fit_tests {
     }
 
     #[test]
+    fn inspector_selected_silent_command_exposes_empty_recorded_output() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let id = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "false".to_string(),
+                output: String::new(),
+                exit_code: 1,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        app.refresh_inspector();
+        app.focus = super::Focus::Inspector;
+        app.inspector_sel = Some(4);
+        app.inspector_sel_id = Some(id);
+        let later = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        app.refresh_inspector_at(later);
+
+        assert_eq!(app.inspector_output_id, Some(id));
+        assert_eq!(app.inspector_output.as_deref(), Some(""));
+        assert!(!app.inspector_output_truncated);
+    }
+
+    #[test]
     fn inspector_output_clears_on_session_replacement() {
         let mut app = make_test_app(
             120,
