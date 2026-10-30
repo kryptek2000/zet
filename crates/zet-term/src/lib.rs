@@ -14,6 +14,7 @@ pub struct Cell {
     pub fg: Color,
     pub bg: Color,
     pub bold: bool,
+    pub reverse: bool,
 }
 
 impl Cell {
@@ -23,6 +24,7 @@ impl Cell {
             fg: Color::Default,
             bg: Color::Default,
             bold: false,
+            reverse: false,
         }
     }
 }
@@ -32,6 +34,7 @@ struct Pen {
     fg: Color,
     bg: Color,
     bold: bool,
+    reverse: bool,
 }
 
 impl Pen {
@@ -40,6 +43,7 @@ impl Pen {
             fg: Color::Default,
             bg: Color::Default,
             bold: false,
+            reverse: false,
         };
     }
 
@@ -48,16 +52,49 @@ impl Pen {
             self.reset();
             return;
         }
-        for &p in params {
-            match p {
+        let mut i = 0;
+        while i < params.len() {
+            match params[i] {
                 0 => self.reset(),
                 1 => self.bold = true,
-                30..=37 => self.fg = Color::Indexed((p - 30) as u8),
-                40..=47 => self.bg = Color::Indexed((p - 40) as u8),
-                90..=97 => self.fg = Color::Indexed((p - 90 + 8) as u8),
-                100..=107 => self.bg = Color::Indexed((p - 100 + 8) as u8),
+                7 => self.reverse = true,
+                22 => self.bold = false,
+                27 => self.reverse = false,
+                30..=37 => self.fg = Color::Indexed((params[i] - 30) as u8),
+                38 => {
+                    if i + 2 < params.len() && params[i + 1] == 5 {
+                        self.fg = Color::Indexed(params[i + 2] as u8);
+                        i += 2;
+                    } else if i + 4 < params.len() && params[i + 1] == 2 {
+                        self.fg = Color::Rgb(
+                            params[i + 2] as u8,
+                            params[i + 3] as u8,
+                            params[i + 4] as u8,
+                        );
+                        i += 4;
+                    }
+                }
+                39 => self.fg = Color::Default,
+                40..=47 => self.bg = Color::Indexed((params[i] - 40) as u8),
+                48 => {
+                    if i + 2 < params.len() && params[i + 1] == 5 {
+                        self.bg = Color::Indexed(params[i + 2] as u8);
+                        i += 2;
+                    } else if i + 4 < params.len() && params[i + 1] == 2 {
+                        self.bg = Color::Rgb(
+                            params[i + 2] as u8,
+                            params[i + 3] as u8,
+                            params[i + 4] as u8,
+                        );
+                        i += 4;
+                    }
+                }
+                49 => self.bg = Color::Default,
+                90..=97 => self.fg = Color::Indexed((params[i] - 90 + 8) as u8),
+                100..=107 => self.bg = Color::Indexed((params[i] - 100 + 8) as u8),
                 _ => {}
             }
+            i += 1;
         }
     }
 }
@@ -188,6 +225,7 @@ impl Terminal {
                 fg: Color::Default,
                 bg: Color::Default,
                 bold: false,
+                reverse: false,
             },
             state: State::Ground,
             osc_buf: Vec::new(),
@@ -633,6 +671,7 @@ impl Terminal {
             fg: self.pen.fg,
             bg: self.pen.bg,
             bold: self.pen.bold,
+            reverse: self.pen.reverse,
         };
         self.cx += 1;
         if self.cx >= self.cols {
