@@ -774,6 +774,20 @@ impl Renderer {
         (pen_x - start_x).max(0.0).round() as u32
     }
 
+    /// Measure a native UI text run in pixels without staging quads.
+    pub fn measure_ui_text_px(&mut self, text: &str, style: UiTextStyle) -> u32 {
+        let mut pen_x = 0.0f32;
+        let start_x = 0.0f32;
+        for character in text.chars() {
+            if character == '\n' || character == '\r' || character == '\t' {
+                continue;
+            }
+            let glyph = self.ui_glyph(character, style);
+            pen_x += glyph.advance.max(0.0) + style.tracking_px;
+        }
+        (pen_x - start_x).max(0.0).round() as u32
+    }
+
     /// Stage terminal grid cells as textured quads for the next render().
     /// M0: one glyph per cell; CJK/combining alignment is a follow-up.
     /// The cursor cell is drawn inverted (block cursor); mouse-selected
