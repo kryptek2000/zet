@@ -2834,7 +2834,7 @@ impl App {
         );
         r.draw_ui_text_px(
             brand_x as f32,
-            34.0 + UI_HEADER.baseline_offset(),
+            24.0 + UI_HEADER.baseline_offset(),
             "APERTURE / OUTCOME-AWARE TERMINAL",
             UI_HEADER,
             PANEL_VIOLET,
