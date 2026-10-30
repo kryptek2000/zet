@@ -250,7 +250,25 @@ pub fn term_color(color: zet_term::Color, bold: bool) -> Rgba {
         zet_term::Color::Default => Rgba::WHITE,
         zet_term::Color::Indexed(i) => {
             let i = if bold && i < 8 { i + 8 } else { i };
-            let (r, g, b) = PALETTE[(i % 16) as usize];
+            let (r, g, b) = if i < 16 {
+                PALETTE[i as usize]
+            } else if i < 232 {
+                let cube = i - 16;
+                let b = cube % 6;
+                let g = (cube / 6) % 6;
+                let r = cube / 36;
+                let level = |v: u8| {
+                    if v == 0 {
+                        0.0
+                    } else {
+                        (95.0 + f32::from(v - 1) * 40.0) / 255.0
+                    }
+                };
+                (level(r), level(g), level(b))
+            } else {
+                let gray = (8.0 + f32::from(i - 232) * 10.0) / 255.0;
+                (gray, gray, gray)
+            };
             Rgba::srgb(r, g, b)
         }
         zet_term::Color::Rgb(r, g, b) => {
