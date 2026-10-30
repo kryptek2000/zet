@@ -5525,4 +5525,3 @@ fn aperture_header_descriptor_is_measured_and_clear_of_mode_control() {
     // The descriptor is constrained before the mode control.
     assert!(descriptor_x + descriptor_max_width + 18 <= mode_x);
 }
-
