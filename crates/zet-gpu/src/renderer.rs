@@ -832,9 +832,10 @@ impl Renderer {
                 let fg = cell.map(|cell| cell.fg).unwrap_or_default();
                 let bg = cell.map(|cell| cell.bg).unwrap_or_default();
                 let bold = cell.map(|cell| cell.bold).unwrap_or(false);
+                let reverse = cell.map(|cell| cell.reverse).unwrap_or(false);
                 let cursor_here = show_cursor && vx == cur_x && vy == cur_y;
                 let selected = sel.as_ref().is_some_and(|s| s.contains(vx, sb + vy));
-                if bg != zet_term::Color::Default || cursor_here || selected {
+                if bg != zet_term::Color::Default || cursor_here || selected || reverse {
                     let fill = if cursor_here {
                         match fg {
                             zet_term::Color::Default => Rgba::WHITE,
@@ -842,6 +843,8 @@ impl Renderer {
                         }
                     } else if selected {
                         SEL_RGBA
+                    } else if reverse {
+                        term_color(fg, bold)
                     } else {
                         term_color(bg, false)
                     };
@@ -869,6 +872,11 @@ impl Renderer {
                     }
                 } else if selected {
                     Rgba::WHITE
+                } else if reverse {
+                    match bg {
+                        zet_term::Color::Default => Rgba::rgb(0.0, 0.0, 0.0),
+                        _ => term_color(bg, false),
+                    }
                 } else {
                     term_color(fg, bold)
                 };

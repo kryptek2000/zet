@@ -545,3 +545,44 @@ fn search_matches_multibyte_without_panicking() {
     assert_eq!(m2.len(), 1, "{m2:?}");
     assert_eq!(m2[0].1, 1, "{m2:?}");
 }
+
+#[test]
+fn sgr_reverse_video_sets_reverse_attribute() {
+    let mut t = Terminal::new(10, 4);
+    t.feed(b"\x1b[7mrev\x1b[0m");
+    let cell = t.visible_cell(0, 0).unwrap();
+    assert!(cell.reverse);
+    assert_eq!(cell.c, 'r');
+    let reset = t.visible_cell(3, 0).unwrap();
+    assert!(!reset.reverse);
+}
+
+#[test]
+fn sgr_reverse_off_preserves_other_attributes() {
+    let mut t = Terminal::new(10, 4);
+    t.feed(b"\x1b[1;7mboldrev\x1b[27mafter");
+    let cell = t.visible_cell(0, 0).unwrap();
+    assert!(cell.bold);
+    assert!(cell.reverse);
+    let after = t.visible_cell(7, 0).unwrap();
+    assert!(after.bold);
+    assert!(!after.reverse);
+}
+
+#[test]
+fn sgr_truecolor_foreground_and_background() {
+    let mut t = Terminal::new(10, 4);
+    t.feed(b"\x1b[38;2;1;2;3;48;5;7mX");
+    let cell = t.visible_cell(0, 0).unwrap();
+    assert_eq!(cell.fg, zet_term::Color::Rgb(1, 2, 3));
+    assert_eq!(cell.bg, zet_term::Color::Indexed(7));
+}
+
+#[test]
+fn sgr_256_and_bright_colors() {
+    let mut t = Terminal::new(10, 4);
+    t.feed(b"\x1b[91;102mX");
+    let cell = t.visible_cell(0, 0).unwrap();
+    assert_eq!(cell.fg, zet_term::Color::Indexed(9));
+    assert_eq!(cell.bg, zet_term::Color::Indexed(10));
+}
