@@ -5525,3 +5525,100 @@ fn aperture_header_descriptor_is_measured_and_clear_of_mode_control() {
     // The descriptor is constrained before the mode control.
     assert!(descriptor_x + descriptor_max_width + 18 <= mode_x);
 }
+
+#[test]
+fn aperture_header_descriptor_uses_real_glyph_metrics() {
+    use zet_gpu::presentation::{UI_BRAND, UI_HEADER};
+    use zet_gpu::text::Shaper;
+
+    let mut shaper = Shaper::new(16.0);
+    let (_cw, ch) = shaper.cell_px();
+
+    let brand_width: u32 = "ZET"
+        .chars()
+        .map(|c| {
+            let glyph = shaper.rasterize_ui_glyph(
+                c,
+                UI_BRAND.size_px,
+                UI_BRAND.line_height_px,
+                UI_BRAND.weight,
+                UI_BRAND.family,
+            );
+            (glyph.advance.max(0.0) + UI_BRAND.tracking_px).round() as u32
+        })
+        .sum();
+    let mode_width = ("WORKSPACE".chars().count() as u32)
+        .saturating_mul(8)
+        .saturating_add(22);
+
+    for width_px in [440u32, 1320u32] {
+        let (descriptor_x, descriptor_max_width, mode_x) =
+            App::aperture_header_layout(width_px, ch, brand_width, mode_width);
+
+        // Brand ink extents.
+        let mut brand_left = u32::MAX;
+        let mut brand_right = 0u32;
+        let mut brand_top = u32::MAX;
+        let mut brand_bottom = 0u32;
+        let brand_x = 18u32 + ch.saturating_mul(2).saturating_sub(8).max(18) + 14;
+        let brand_baseline = 8.0 + UI_BRAND.baseline_offset();
+        let mut pen = 0.0f32;
+        for c in "ZET".chars() {
+            let glyph = shaper.rasterize_ui_glyph(
+                c,
+                UI_BRAND.size_px,
+                UI_BRAND.line_height_px,
+                UI_BRAND.weight,
+                UI_BRAND.family,
+            );
+            let left = brand_x as i32 + pen as i32 + glyph.offset_x;
+            let right = left + glyph.width as i32;
+            let top = (brand_baseline + glyph.offset_y as f32).round() as i32;
+            let bottom = top + glyph.height as i32;
+            brand_left = brand_left.min(left as u32);
+            brand_right = brand_right.max(right as u32);
+            brand_top = brand_top.min(top as u32);
+            brand_bottom = brand_bottom.max(bottom as u32);
+            pen += glyph.advance.max(0.0) + UI_BRAND.tracking_px;
+        }
+
+        // Descriptor ink extents, clipped to the allocated budget.
+        let mut descriptor_left = u32::MAX;
+        let mut descriptor_right = 0u32;
+        let mut descriptor_top = u32::MAX;
+        let mut descriptor_bottom = 0u32;
+        let descriptor_baseline = 8.0 + UI_BRAND.baseline_offset();
+        let mut pen = 0.0f32;
+        for c in "APERTURE / OUTCOME-AWARE TERMINAL".chars() {
+            if pen >= descriptor_max_width as f32 {
+                break;
+            }
+            let glyph = shaper.rasterize_ui_glyph(
+                c,
+                UI_HEADER.size_px,
+                UI_HEADER.line_height_px,
+                UI_HEADER.weight,
+                UI_HEADER.family,
+            );
+            let left = descriptor_x as i32 + pen as i32 + glyph.offset_x;
+            let right = left + glyph.width as i32;
+            let top = (descriptor_baseline + glyph.offset_y as f32).round() as i32;
+            let bottom = top + glyph.height as i32;
+            descriptor_left = descriptor_left.min(left as u32);
+            descriptor_right = descriptor_right.max(right as u32);
+            descriptor_top = descriptor_top.min(top as u32);
+            descriptor_bottom = descriptor_bottom.max(bottom as u32);
+            pen += glyph.advance.max(0.0) + UI_HEADER.tracking_px;
+        }
+
+        assert!(brand_right + 14 <= descriptor_left);
+        assert!(descriptor_bottom <= ch.saturating_mul(2));
+        assert!(descriptor_right < mode_x);
+        assert!(mode_x > descriptor_x);
+    }
+
+    // Zero-width budget is safe and produces no descriptor ink.
+    let (descriptor_x, descriptor_max_width, _) = App::aperture_header_layout(100, 22, 24, 102);
+    assert_eq!(descriptor_max_width, 0);
+    assert!(descriptor_x > 0);
+}
