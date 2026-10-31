@@ -4832,7 +4832,6 @@ mod tests {
 #[cfg(test)]
 mod layout_fit_tests {
     use super::App;
-    use super::panels;
     use super::Tab;
 
     fn make_test_tab() -> Tab {
