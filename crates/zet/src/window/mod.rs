@@ -1032,7 +1032,21 @@ impl App {
             tab_count,
             active_dead,
         );
+        // A command recorded in another session changes the cross-session
+        // timeline even when the active session is unchanged.
+        let latest_timeline_id = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.recorder.as_ref())
+            .and_then(|recorder| recorder.latest_block_id().ok())
+            .flatten();
+        let mut cheap_changed = cheap_changed;
+        if latest_timeline_id != self.inspector_cache.last_timeline_max_id {
+            cheap_changed = true;
+            self.inspector_cache.mark_dirty();
+        }
         if !cheap_changed && !self.inspector_cache.poll_due(now) {
+            self.inspector_cache.last_timeline_max_id = latest_timeline_id;
             return;
         }
         let session_id = self
@@ -1062,6 +1076,7 @@ impl App {
                 }
             }
             self.sync_inspector_output();
+            self.inspector_cache.last_timeline_max_id = latest_timeline_id;
             self.inspector_cache.mark_refreshed(now);
             return;
         }
@@ -1093,6 +1108,7 @@ impl App {
             now,
         );
         self.inspector_cache.last_blocks = block_count;
+        self.inspector_cache.last_timeline_max_id = latest_timeline_id;
         self.sync_inspector_output();
     }
 
@@ -1116,16 +1132,11 @@ impl App {
             let entry = displayed.iter().find(|command| command.id == id)?;
             let tab = self.tabs.get(self.active)?;
             let recorder = tab.recorder.as_ref()?;
-            let preview = recorder
+            recorder
                 .store()
                 .output_preview(entry.session.as_str(), id, 4096)
                 .ok()
-                .flatten()?;
-            let block = recorder.store().get(id).ok()?;
-            if block.session != entry.session {
-                return None;
-            }
-            Some(preview)
+                .flatten()
         });
         self.inspector_output_truncated = preview
             .as_ref()
@@ -2509,11 +2520,21 @@ impl App {
                     UI_META,
                     if selected { PANEL_CYAN } else { PANEL_MUTED },
                 );
+                let session_compact = panels::truncate_to_cells(&command.session, 4);
+                Self::draw_ui_row(
+                    r,
+                    vp,
+                    row,
+                    4,
+                    &session_compact,
+                    UI_META,
+                    if selected { PANEL_CYAN } else { PANEL_MUTED },
+                );
                 Self::draw_command_summary_row(
                     r,
                     vp,
                     row,
-                    6,
+                    8,
                     2,
                     command,
                     if selected {
@@ -2722,7 +2743,7 @@ impl App {
                 vp,
                 context_session,
                 10,
-                &snapshot.session,
+                &command.session,
                 UI_BODY,
                 PANEL_SECONDARY,
             );
@@ -5578,7 +5599,7 @@ mod layout_fit_tests {
             crate::window::layout::LayoutMode::MissionControl.layout(),
         );
         let store = zet_blocks::Store::open_in_memory().unwrap();
-        let first = store
+        let _first = store
             .append(&zet_blocks::Block {
                 id: 0,
                 session: "session-a".to_string(),
@@ -5609,7 +5630,7 @@ mod layout_fit_tests {
         let now = std::time::Instant::now();
         app.refresh_inspector_at(now);
         app.inspector_sel = Some(4);
-        app.inspector_sel_id = Some(first);
+        app.inspector_sel_id = Some(_first);
         app.inspector_output = None;
         app.inspector_output_id = None;
         app.sync_inspector_output();
@@ -5692,6 +5713,101 @@ mod layout_fit_tests {
         assert!(app.inspector_timeline);
         assert_eq!(app.inspector_sel, None);
         assert_eq!(app.inspector_output, None);
+    }
+
+    #[test]
+    fn inspector_timeline_output_uses_selected_entry_session() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let _first = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo a".to_string(),
+                output: "output a".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let second = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-b".to_string(),
+                command: "echo b".to_string(),
+                output: "output b".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        app.inspector_timeline = true;
+        app.refresh_inspector();
+        app.inspector_sel = Some(5);
+        app.inspector_sel_id = Some(second);
+        app.inspector_output = None;
+        app.inspector_output_id = None;
+        app.inspector_output_truncated = false;
+        app.sync_inspector_output();
+        assert_eq!(app.inspector_output.as_deref(), Some("output b"));
+    }
+
+    #[test]
+    fn inspector_background_timeline_change_marks_cache_dirty() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo a".to_string(),
+                output: "a".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        app.refresh_inspector();
+        assert_eq!(app.inspector_cache.last_timeline_max_id, Some(1));
+
+        app.tabs[0]
+            .recorder
+            .as_ref()
+            .unwrap()
+            .store()
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-b".to_string(),
+                command: "echo b".to_string(),
+                output: "b".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+
+        let later = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        app.refresh_inspector_at(later);
+        assert!(
+            app.inspector_cache.dirty
+                || app.inspector_cache.snapshot().unwrap().timeline.len() == 2
+        );
     }
 
     #[test]

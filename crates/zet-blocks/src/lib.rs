@@ -342,30 +342,6 @@ impl Store {
         self.timeline_impl(limit)
     }
 
-    pub fn observed_work(&self, limit: usize) -> Result<Vec<Block>> {
-        self.timeline_impl(limit)
-    }
-
-    pub fn cross_session_commands(&self, limit: usize) -> Result<Vec<Block>> {
-        self.timeline_impl(limit)
-    }
-
-    pub fn recent_commands_all(&self, limit: usize) -> Result<Vec<Block>> {
-        self.timeline_impl(limit)
-    }
-
-    pub fn all_recent_commands(&self, limit: usize) -> Result<Vec<Block>> {
-        self.timeline_impl(limit)
-    }
-
-    pub fn recent_metadata(&self, limit: usize) -> Result<Vec<Block>> {
-        self.timeline_impl(limit)
-    }
-
-    pub fn recent_timeline(&self, limit: usize) -> Result<Vec<Block>> {
-        self.timeline_impl(limit)
-    }
-
     fn timeline_impl(&self, limit: usize) -> Result<Vec<Block>> {
         const MAX_TIMELINE: usize = 1000;
         let limit = limit.min(MAX_TIMELINE);
@@ -399,6 +375,25 @@ impl Store {
         let mut blocks: Vec<Block> = rows.collect::<Result<Vec<_>>>()?;
         blocks.reverse();
         Ok(blocks)
+    }
+
+    /// Highest block ID currently stored, if any. Used as a cheap
+    /// cross-session change signal.
+    pub fn latest_block_id(&self) -> Result<Option<i64>> {
+        self.conn
+            .query_row("SELECT MAX(id) FROM blocks", [], |row| row.get(0))
+            .map(Some)
+            .or_else(|err| {
+                if matches!(err, rusqlite::Error::QueryReturnedNoRows) {
+                    Ok(None)
+                } else {
+                    Err(err)
+                }
+            })
+    }
+
+    pub fn max_block_id(&self) -> Result<Option<i64>> {
+        self.latest_block_id()
     }
 
     /// Newest blocks across sessions, most recent last (display order).

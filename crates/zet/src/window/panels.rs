@@ -1250,6 +1250,7 @@ pub struct InspectorCache {
     pub last_tab_count: usize,
     pub last_active_dead: bool,
     pub last_blocks: usize,
+    pub last_timeline_max_id: Option<i64>,
     pub last_refresh: Option<Instant>,
     pub poll_interval: Duration,
 }
@@ -1266,6 +1267,7 @@ impl InspectorCache {
             last_tab_count: usize::MAX,
             last_active_dead: true,
             last_blocks: usize::MAX,
+            last_timeline_max_id: None,
             last_refresh: None,
             poll_interval: Duration::from_millis(250),
         }
