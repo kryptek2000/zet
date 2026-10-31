@@ -1,6 +1,6 @@
 # ZET — Delivery Roadmap
 
-**Updated:** 2026-10-25 · **Authority:** [Product Charter](ZET-PRODUCT-CHARTER.md)\
+**Updated:** 2026-10-30 · **Authority:** [Product Charter](ZET-PRODUCT-CHARTER.md)\
 **Product positioning:** ZET — The Outcome-Aware Terminal (provisional descriptor).  
 **No dates promised:** Release when correctness, usability, and measured performance meet gates.
 
@@ -86,6 +86,23 @@ to start UI work.
 
 ## P5 — Verification and usefulness
 
+### Approved terminal compatibility certification program
+
+**NVIM-1 — Full Neovim/TUI editor acceptance.** Revisit Neovim on the current ZET flagship after the fixed E1568 background-query defect (Issue #36 / PR #40). Test colors/truecolor, syntax, Normal/Insert modes, cursor and keyboard input, resizing, splits, redraws, Unicode/box drawing, alternate screen, clipboard, clean exit, and Neovim inside tmux. The previous focused E1568 fix is **not** comprehensive Neovim certification.
+
+**COMPAT-1 — Native Terminal Compatibility Certification.** Run reproducible protocol tests and supervised real-app smoke tests covering:
+- P0 critical: Bash/Zsh/Fish; Neovim/Vim/Nano/Helix; tmux/GNU Screen; OpenCode/Gemini CLI/Claude Code/Codex CLI where available; ANSI/VT SGR/CSI/OSC, default colors, reverse video, cursor and alternate screen; keyboard modifiers, paste, resize and core terminal input integrity.
+- P1 high: htop/btop/lazygit/fzf/less; Unicode/CJK/combining marks/emoji/box drawing; clipboard/OSC 52 and hyperlinks/OSC 8 where supported; SSH/remote tmux; Wayland/X11, display scaling and monitor changes.
+- P2 conditional: Sixel, Kitty graphics, other advanced image protocols or platform-specific integrations. Unsupported protocols must be documented, not silently claimed.
+
+**STAB-1 — Native stability and recovery.** Bounded multi-hour use with multiple tabs, editor/agent switching, repeated resize, heavy output, idle memory trends, terminal responsiveness, interrupted SSH/agent processes and process recovery. Safeguard sessions and user data; no uncontrolled stress or destructive operations.
+
+**SEC-1 — Terminal-input and data-integrity security.** Fuzz or regression-test malformed escape sequences, oversized/untrusted terminal data, OSC handling, bounded recording, secret redaction, session isolation, storage failures, and approval/enforcement truthfulness. No claim of comprehensive sandboxing without enforcement evidence.
+
+The certification matrix begins at **NOT RUN** for every unverified individual case; a historical targeted fix or a green unit suite is not certification of a full app. Use exact statuses **PASS / FAIL / BLOCKED / NOT RUN / NOT SUPPORTED**, linked to app/version, ZET SHA, environment, steps, and raw evidence. Distinguish unsupported-but-optional P2 capabilities from required P0 failures. Require independent audit and owner acceptance; do not claim full compatibility until supported by actual evidence.
+
+
+
 - Link local test output and GitHub CI checks to **exact commit identity**. Distinguish local test success, remote CI green, and mission-completion judgment.
 - Demonstrate failed command → investigated change → verified result as a complete provenance-backed trace.
 - User studies: compare conventional terminal vs ZET on CI triage and code-review tasks; record completion time, errors, context switches and trust.
@@ -98,6 +115,7 @@ to start UI work.
 - Native themes, keyboard customization, persistence, Wayland/X11 behavior, packaging, docs, onboarding and truthful telemetry.
 - Grow support for standards (graphics protocols, hyperlinks, terminal width/fallback) according to demonstrated demand and compatibility.
 - Security/red-team, release benchmarking, regression gates, documentation and packaging.
+- **P6 pre-release checkpoints:** complete and independently audit applicable NVIM-1, COMPAT-1, STAB-1 and SEC-1 P0 gates; explicitly classify P1 limitations and P2 conditional protocols, publish a compatibility matrix and obtain owner acceptance. Do not waive required gates silently.
 - Mac/Windows after Linux stability and explicit architecture review.
 
 **Exit:** release candidate accepted by owner after stable CI, cross-platform/compatibility evidence and documented limitations.
