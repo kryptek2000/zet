@@ -4886,14 +4886,14 @@ mod layout_fit_tests {
             layout,
             focus: super::Focus::Terminal,
             rail_sel: 0,
-            chrome: panels::ChromeCache::new(),
+            chrome: super::panels::ChromeCache::new(),
             inspector_sel: None,
             inspector_sel_id: None,
             inspector_timeline: false,
             inspector_output: None,
             inspector_output_id: None,
             inspector_output_truncated: false,
-            inspector_cache: panels::InspectorCache::new(),
+            inspector_cache: super::panels::InspectorCache::new(),
             #[cfg(test)]
             chrome_query_count: 0,
             #[cfg(test)]
@@ -5500,7 +5500,7 @@ mod layout_fit_tests {
 
         let snapshot = app.build_rail_snapshot();
         assert_eq!(snapshot.commands[0].command, command);
-        let row = panels::format_command_row(
+        let row = super::panels::format_command_row(
             &snapshot.commands[0].command,
             &snapshot.commands[0].exit,
             &snapshot.commands[0].duration,
@@ -5509,7 +5509,7 @@ mod layout_fit_tests {
         assert!(row.ends_with("0 14ms"), "{row:?}");
         assert!(row.contains('…'), "{row:?}");
         assert!(
-            panels::text_cells(&row) <= 24,
+            super::panels::text_cells(&row) <= 24,
             "{row:?} exceeds the 24-column rail"
         );
     }
@@ -6280,7 +6280,7 @@ mod layout_fit_tests {
                 duration: "1ms".to_string(),
                 cwd: "/tmp".to_string(),
                 git_branch: String::new(),
-                provenance: panels::Provenance::Observed,
+                provenance: super::panels::Provenance::Observed,
             },
             super::panels::CommandRow {
                 id: 2,
@@ -6290,7 +6290,7 @@ mod layout_fit_tests {
                 duration: "1ms".to_string(),
                 cwd: "/tmp".to_string(),
                 git_branch: String::new(),
-                provenance: panels::Provenance::Observed,
+                provenance: super::panels::Provenance::Observed,
             },
             super::panels::CommandRow {
                 id: 3,
