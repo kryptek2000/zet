@@ -47,6 +47,7 @@ pub struct Recorder {
     /// Last nonzero-exit block (command, cwd, output, exit), drained by
     /// the window for did-you-mean offers. Preview fuel only.
     last_failed: Option<(String, String, String, i32)>,
+    last_recorded: Option<(i64, String)>,
 }
 
 impl Recorder {
@@ -59,6 +60,7 @@ impl Recorder {
             t0: None,
             cmd_names: Vec::new(),
             last_failed: None,
+            last_recorded: None,
         }
     }
 
@@ -70,6 +72,13 @@ impl Recorder {
     /// Last failed block since the last call, for fix-it offers.
     pub fn drain_failed(&mut self) -> Option<(String, String, String, i32)> {
         self.last_failed.take()
+    }
+
+    /// Last recorded block since the last pump, if one settled. Used by
+    /// the agent-observation adapter; the block id is the persisted
+    /// identity and the command is the recorded command text.
+    pub fn drain_recorded(&mut self) -> Option<(i64, String)> {
+        self.last_recorded.take()
     }
 
     pub fn blocks(&self) -> rusqlite::Result<Vec<Block>> {
@@ -261,7 +270,9 @@ impl Recorder {
                 block.exit_code,
             ));
         }
-        let _ = self.store.append(&block);
+        if let Ok(id) = self.store.append(&block) {
+            self.last_recorded = Some((id, block.command.clone()));
+        }
     }
 }
 

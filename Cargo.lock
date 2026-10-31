@@ -4622,6 +4622,7 @@ dependencies = [
  "serde_json",
  "winit",
  "zet-agent",
+ "zet-agent-observe",
  "zet-blocks",
  "zet-context",
  "zet-gpu",
@@ -4648,6 +4649,7 @@ name = "zet-agent-observe"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]

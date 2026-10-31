@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 zet-agent = { path = "../zet-agent" }
+zet-agent-observe = { path = "../zet-agent-observe" }
 zet-models = { path = "../zet-models" }
 zet-blocks = { path = "../zet-blocks" }
 zet-pty = { path = "../zet-pty" }

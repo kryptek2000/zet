@@ -240,6 +240,7 @@ struct App {
     /// preview. Cleared whenever a different event becomes selected.
     inspector_expanded_id: Option<i64>,
     inspector_cache: panels::InspectorCache,
+    agent_observations: zet_agent_observe::AgentObservationStore,
     #[cfg(test)]
     pub chrome_query_count: usize,
     #[cfg(test)]
@@ -414,14 +415,36 @@ impl App {
         // Cwd owned before the recorder borrow; drains collected before
         // shared App state (known) is touched.
         let cwd = shell_cwd(&self.tabs[i].session);
+        let session_id = self.tabs[i]
+            .recorder
+            .as_ref()
+            .map(|rec| rec.session().to_string());
         let tab = &mut self.tabs[i];
-        let (names, failed) = match &mut tab.recorder {
+        let (names, failed, recorded) = match &mut tab.recorder {
             Some(rec) => {
                 rec.pump(&mut tab.term, &cwd);
-                (rec.drain_cmd_names(), rec.drain_failed())
+                (
+                    rec.drain_cmd_names(),
+                    rec.drain_failed(),
+                    rec.drain_recorded(),
+                )
             }
-            None => (Vec::new(), None),
+            None => (Vec::new(), None, None),
         };
+        if let Some((block_id, command)) = recorded {
+            if let Some(session) = session_id {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                self.agent_observations.observe_command(
+                    zet_agent_observe::SessionRef::new(session),
+                    &command,
+                    Some(zet_agent_observe::CommandRef(block_id)),
+                    now_ms,
+                );
+            }
+        }
         // Shell-reported aliases/functions feed the router.
         self.known.insert_names(names);
         // Failures become did-you-mean offers (preview only).
@@ -4793,6 +4816,7 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         inspector_output_truncated: false,
         inspector_expanded_id: None,
         inspector_cache: panels::InspectorCache::new(),
+        agent_observations: zet_agent_observe::AgentObservationStore::new(256),
         #[cfg(test)]
         chrome_query_count: 0,
         #[cfg(test)]
@@ -4990,6 +5014,7 @@ mod layout_fit_tests {
             inspector_output_truncated: false,
             inspector_expanded_id: None,
             inspector_cache: super::panels::InspectorCache::new(),
+            agent_observations: zet_agent_observe::AgentObservationStore::new(256),
             #[cfg(test)]
             chrome_query_count: 0,
             #[cfg(test)]

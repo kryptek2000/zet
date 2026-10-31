@@ -1,32 +1,48 @@
 //! Bounded, evidence-based observation of AI coding agents operating
 //! inside ZET.
 //!
-//! This crate is the P4-A1 foundation. It deliberately stores *typed
-//! evidence*, not conclusions: a known agent CLI being launched is a
-//! heuristic candidate, never proof that the agent is active, successful,
-//! authorized, or modifying files. Ordinary commands do not become agent
-//! events.
+//! P4-A1 foundation. A known agent CLI launch is a heuristic candidate,
+//! never proof of active execution, success, authorization, or file changes.
+//! Ordinary commands do not become agent observations.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 
-/// Stable local identity for one observation. Monotonic within a store.
+/// Absolute product-level bound for retained observations.
+pub const MAX_OBSERVATION_CAPACITY: usize = 1024;
+/// Absolute byte bound for session references.
+pub const MAX_SESSION_REF_BYTES: usize = 128;
+/// Absolute byte bound for unknown agent names.
+pub const MAX_AGENT_NAME_BYTES: usize = 64;
+/// Absolute byte bound for retained command names.
+pub const MAX_COMMAND_NAME_BYTES: usize = 64;
+/// Absolute bounds for a candidate's staleness window.
+pub const MIN_STALE_AFTER_MS: u64 = 1_000;
+pub const MAX_STALE_AFTER_MS: u64 = 86_400_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ObservationId(pub u64);
 
-/// Reference to the terminal session an observation belongs to. This is
-/// the same opaque session identity recorded by `zet-blocks`; this crate
-/// does not resolve or validate it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SessionRef(pub String);
+pub struct SessionRef(String);
 
-/// Optional reference to a genuinely recorded command block. `None` means
-/// the observation has no recorded command behind it.
+impl SessionRef {
+    pub fn new(value: impl Into<String>) -> Self {
+        let mut value = value.into();
+        if value.len() > MAX_SESSION_REF_BYTES {
+            value.truncate(MAX_SESSION_REF_BYTES);
+        }
+        Self(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandRef(pub i64);
 
-/// Agent kinds ZET can name from a launch command. Unknown strings are
-/// retained verbatim but are never treated as verified agent activity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AgentKind {
     OpenCode,
@@ -58,35 +74,31 @@ impl AgentKind {
             Self::Unknown(name) => name.as_str(),
         }
     }
+
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown(_))
+    }
 }
 
-/// Where an observation came from. Every observation has exactly one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EvidenceSource {
-    /// A command recorded by ZET's block store.
+    /// A command recorded by ZET's block store, with a validated block id.
     RecordedCommand,
-    /// Operating-system process table evidence. P4-A1 does not collect
-    /// this; the variant exists so future collectors have a typed slot.
+    /// Recognized command text that is not yet tied to a persisted block.
+    CommandText,
+    /// Process-table evidence. Not collected in P4-A1.
     ProcessTable,
-    /// An explicit, consented structured integration. P4-A1 does not
-    /// implement one.
+    /// Authenticated structured integration. Not implemented in P4-A1.
     StructuredIntegration,
 }
 
-/// What kind of evidence was observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EvidenceKind {
-    /// A known agent CLI was launched. Candidate only.
     CommandLaunchCandidate,
-    /// A process believed to be an agent was observed.
     ProcessPresent,
-    /// A structured event reported by an integration.
     StructuredEvent,
 }
 
-/// Fact vs. heuristic vs. unknown. This is intentionally separate from
-/// `EvidenceKind`: a launch command is observed text, but the conclusion
-/// "an agent is running" remains a heuristic candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ObservationClass {
     ObservedFact,
@@ -94,7 +106,6 @@ pub enum ObservationClass {
     Unknown,
 }
 
-/// Exact evidence strength. There is no percentage confidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EvidenceStrength {
     Verified,
@@ -103,7 +114,6 @@ pub enum EvidenceStrength {
     Unknown,
 }
 
-/// Availability/staleness of an observation or evidence stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EvidenceAvailability {
     Available,
@@ -112,28 +122,120 @@ pub enum EvidenceAvailability {
     Conflicting,
 }
 
-/// One bounded, typed observation record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConflictStatus {
+    /// P4-A1 cannot establish a real conflict from available evidence.
+    Unknown,
+    None,
+    Conflicting,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "AgentObservationWire")]
 pub struct AgentObservation {
-    pub id: ObservationId,
-    pub session: SessionRef,
-    pub source: EvidenceSource,
-    pub evidence_kind: EvidenceKind,
-    pub classification: ObservationClass,
-    pub strength: EvidenceStrength,
-    pub availability: EvidenceAvailability,
-    pub agent: AgentKind,
-    /// Recorded command block id, when the observation is tied to one.
-    pub command: Option<CommandRef>,
-    /// Bounded command name only. Full command text and output are never
-    /// retained by this crate.
-    pub command_name: Option<String>,
-    pub observed_at_ms: u64,
-    /// Age in milliseconds after which the observation is considered stale.
-    pub stale_after_ms: u64,
+    id: ObservationId,
+    session: SessionRef,
+    source: EvidenceSource,
+    evidence_kind: EvidenceKind,
+    classification: ObservationClass,
+    strength: EvidenceStrength,
+    availability: EvidenceAvailability,
+    agent: AgentKind,
+    command: Option<CommandRef>,
+    command_name: Option<String>,
+    observed_at_ms: u64,
+    stale_after_ms: u64,
+}
+
+#[derive(Deserialize)]
+struct AgentObservationWire {
+    id: ObservationId,
+    session: SessionRef,
+    source: EvidenceSource,
+    evidence_kind: EvidenceKind,
+    classification: ObservationClass,
+    strength: EvidenceStrength,
+    availability: EvidenceAvailability,
+    agent: AgentKind,
+    command: Option<CommandRef>,
+    command_name: Option<String>,
+    observed_at_ms: u64,
+    stale_after_ms: u64,
+}
+
+impl TryFrom<AgentObservationWire> for AgentObservation {
+    type Error = ObservationError;
+
+    fn try_from(wire: AgentObservationWire) -> Result<Self, Self::Error> {
+        let draft = ObservationDraft {
+            session: wire.session,
+            source: wire.source,
+            evidence_kind: wire.evidence_kind,
+            classification: wire.classification,
+            strength: wire.strength,
+            agent: wire.agent,
+            command: wire.command,
+            command_name: wire.command_name,
+            observed_at_ms: wire.observed_at_ms,
+            stale_after_ms: wire.stale_after_ms,
+            availability: wire.availability,
+        };
+        validate_draft(&draft)?;
+        Ok(AgentObservation {
+            id: wire.id,
+            session: draft.session,
+            source: draft.source,
+            evidence_kind: draft.evidence_kind,
+            classification: draft.classification,
+            strength: draft.strength,
+            availability: draft.availability,
+            agent: draft.agent,
+            command: draft.command,
+            command_name: draft.command_name,
+            observed_at_ms: draft.observed_at_ms,
+            stale_after_ms: draft.stale_after_ms,
+        })
+    }
 }
 
 impl AgentObservation {
+    pub fn id(&self) -> ObservationId {
+        self.id
+    }
+    pub fn session(&self) -> &SessionRef {
+        &self.session
+    }
+    pub fn source(&self) -> EvidenceSource {
+        self.source
+    }
+    pub fn evidence_kind(&self) -> EvidenceKind {
+        self.evidence_kind
+    }
+    pub fn classification(&self) -> ObservationClass {
+        self.classification
+    }
+    pub fn strength(&self) -> EvidenceStrength {
+        self.strength
+    }
+    pub fn availability(&self) -> EvidenceAvailability {
+        self.availability
+    }
+    pub fn agent(&self) -> &AgentKind {
+        &self.agent
+    }
+    pub fn command(&self) -> Option<CommandRef> {
+        self.command
+    }
+    pub fn command_name(&self) -> Option<&str> {
+        self.command_name.as_deref()
+    }
+    pub fn observed_at_ms(&self) -> u64 {
+        self.observed_at_ms
+    }
+    pub fn stale_after_ms(&self) -> u64 {
+        self.stale_after_ms
+    }
+
     pub fn is_stale(&self, now_ms: u64) -> bool {
         now_ms >= self.observed_at_ms.saturating_add(self.stale_after_ms)
     }
@@ -149,8 +251,6 @@ impl AgentObservation {
     }
 }
 
-/// Input for recording an observation from a future evidence collector.
-/// `command_name` is truncated by the store.
 #[derive(Debug, Clone)]
 pub struct ObservationDraft {
     pub session: SessionRef,
@@ -166,19 +266,38 @@ pub struct ObservationDraft {
     pub availability: EvidenceAvailability,
 }
 
-/// Read-only snapshot of the bounded observation history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentObservationSnapshot {
     pub observations: Vec<AgentObservation>,
     pub capacity: usize,
     pub len: usize,
     pub dropped: u64,
-    pub process_evidence_available: bool,
-    pub structured_events_available: bool,
-    pub conflicting_sessions: Vec<String>,
+    pub conflict_status: ConflictStatus,
 }
 
-/// Bounded in-memory history of agent observations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservationError {
+    UnsupportedSource,
+    InvalidEvidence,
+    OversizedInput,
+    InvalidTimestamp,
+    IdExhausted,
+}
+
+impl std::fmt::Display for ObservationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedSource => write!(f, "unsupported evidence source"),
+            Self::InvalidEvidence => write!(f, "invalid evidence combination"),
+            Self::OversizedInput => write!(f, "input exceeds hard bound"),
+            Self::InvalidTimestamp => write!(f, "invalid timestamp or staleness window"),
+            Self::IdExhausted => write!(f, "observation id space exhausted"),
+        }
+    }
+}
+
+impl std::error::Error for ObservationError {}
+
 #[derive(Debug)]
 pub struct AgentObservationStore {
     capacity: usize,
@@ -189,8 +308,9 @@ pub struct AgentObservationStore {
 
 impl AgentObservationStore {
     pub fn new(capacity: usize) -> Self {
+        let capacity = capacity.clamp(1, MAX_OBSERVATION_CAPACITY);
         Self {
-            capacity: capacity.max(1),
+            capacity,
             next_id: 1,
             observations: VecDeque::new(),
             dropped: 0,
@@ -213,44 +333,64 @@ impl AgentObservationStore {
         self.dropped
     }
 
-    /// Record a fully-typed observation. The store assigns the id and
-    /// enforces the bounded history. It does not validate the truth of
-    /// the evidence; callers are responsible for only recording evidence
-    /// they actually have.
-    pub fn record(&mut self, draft: ObservationDraft) -> AgentObservation {
-        let id = ObservationId(self.next_id);
-        self.next_id = self.next_id.saturating_add(1);
+    pub fn try_record(
+        &mut self,
+        draft: ObservationDraft,
+    ) -> Result<AgentObservation, ObservationError> {
+        validate_draft(&draft)?;
+        let id = if self.next_id == u64::MAX {
+            return Err(ObservationError::IdExhausted);
+        } else {
+            let id = self.next_id;
+            self.next_id += 1;
+            id
+        };
+
+        let session = if draft.session.as_str().len() > MAX_SESSION_REF_BYTES {
+            return Err(ObservationError::OversizedInput);
+        } else {
+            draft.session
+        };
+        let agent = match draft.agent {
+            AgentKind::Unknown(name) => {
+                if name.len() > MAX_AGENT_NAME_BYTES {
+                    return Err(ObservationError::OversizedInput);
+                }
+                AgentKind::Unknown(name)
+            }
+            other => other,
+        };
+        let command_name = draft.command_name.map(|name| {
+            let mut out: String = name.chars().take(MAX_COMMAND_NAME_BYTES).collect();
+            if let Some(idx) = out.find(char::is_whitespace) {
+                out.truncate(idx);
+            }
+            out
+        });
+
         let observation = AgentObservation {
-            id,
-            session: draft.session,
+            id: ObservationId(id),
+            session,
             source: draft.source,
             evidence_kind: draft.evidence_kind,
             classification: draft.classification,
             strength: draft.strength,
             availability: draft.availability,
-            agent: draft.agent,
+            agent,
             command: draft.command,
-            command_name: draft.command_name.map(|name| {
-                let mut out: String = name.chars().take(64).collect();
-                // Keep only the first token; never retain arguments.
-                if let Some(idx) = out.find(char::is_whitespace) {
-                    out.truncate(idx);
-                }
-                out
-            }),
+            command_name,
             observed_at_ms: draft.observed_at_ms,
             stale_after_ms: draft.stale_after_ms,
         };
+
         if self.observations.len() >= self.capacity {
             self.observations.pop_front();
             self.dropped = self.dropped.saturating_add(1);
         }
         self.observations.push_back(observation.clone());
-        observation
+        Ok(observation)
     }
 
-    /// Recognize a known agent CLI launch command as a *candidate* only.
-    /// An ordinary or unknown command yields `None`.
     pub fn observe_command(
         &mut self,
         session: SessionRef,
@@ -260,9 +400,15 @@ impl AgentObservationStore {
     ) -> Option<AgentObservation> {
         let name = first_command_token(command_line)?;
         let agent = known_agent(&name)?;
+        let session = SessionRef::new(session.as_str().to_string());
+        let source = if command_id.is_some() {
+            EvidenceSource::RecordedCommand
+        } else {
+            EvidenceSource::CommandText
+        };
         let draft = ObservationDraft {
             session,
-            source: EvidenceSource::RecordedCommand,
+            source,
             evidence_kind: EvidenceKind::CommandLaunchCandidate,
             classification: ObservationClass::HeuristicCandidate,
             strength: EvidenceStrength::Candidate,
@@ -273,7 +419,7 @@ impl AgentObservationStore {
             stale_after_ms: 300_000,
             availability: EvidenceAvailability::Available,
         };
-        Some(self.record(draft))
+        self.try_record(draft).ok()
     }
 
     pub fn observations(&self) -> impl Iterator<Item = &AgentObservation> {
@@ -288,31 +434,22 @@ impl AgentObservationStore {
             .collect()
     }
 
-    pub fn snapshot(&self, _now_ms: u64) -> AgentObservationSnapshot {
-        let observations: Vec<AgentObservation> = self.observations.iter().cloned().collect();
-        let mut by_session: HashMap<String, Vec<AgentKind>> = HashMap::new();
-        for obs in &observations {
-            by_session
-                .entry(obs.session.0.clone())
-                .or_default()
-                .push(obs.agent.clone());
-        }
-        let conflicting_sessions = by_session
-            .into_iter()
-            .filter(|(_, agents)| {
-                let first = agents.first();
-                agents.iter().any(|a| Some(a) != first)
+    pub fn snapshot(&self, now_ms: u64) -> AgentObservationSnapshot {
+        let observations: Vec<AgentObservation> = self
+            .observations
+            .iter()
+            .map(|obs| {
+                let mut obs = obs.clone();
+                obs.availability = obs.effective_availability(now_ms);
+                obs
             })
-            .map(|(session, _)| session)
             .collect();
         AgentObservationSnapshot {
             observations,
             capacity: self.capacity,
             len: self.observations.len(),
             dropped: self.dropped,
-            process_evidence_available: false,
-            structured_events_available: false,
-            conflicting_sessions,
+            conflict_status: ConflictStatus::Unknown,
         }
     }
 
@@ -326,12 +463,67 @@ impl AgentObservationStore {
     }
 }
 
+fn validate_draft(draft: &ObservationDraft) -> Result<(), ObservationError> {
+    if draft.stale_after_ms < MIN_STALE_AFTER_MS || draft.stale_after_ms > MAX_STALE_AFTER_MS {
+        return Err(ObservationError::InvalidTimestamp);
+    }
+    match draft.source {
+        EvidenceSource::RecordedCommand => {
+            if draft.command.is_none() {
+                return Err(ObservationError::InvalidEvidence);
+            }
+            if draft.evidence_kind != EvidenceKind::CommandLaunchCandidate
+                || draft.classification != ObservationClass::HeuristicCandidate
+                || draft.strength != EvidenceStrength::Candidate
+            {
+                return Err(ObservationError::InvalidEvidence);
+            }
+            if draft.agent.is_unknown() {
+                return Err(ObservationError::InvalidEvidence);
+            }
+        }
+        EvidenceSource::CommandText => {
+            if draft.command.is_some() {
+                return Err(ObservationError::InvalidEvidence);
+            }
+            if draft.evidence_kind != EvidenceKind::CommandLaunchCandidate
+                || draft.classification != ObservationClass::HeuristicCandidate
+                || draft.strength != EvidenceStrength::Candidate
+            {
+                return Err(ObservationError::InvalidEvidence);
+            }
+            if draft.agent.is_unknown() {
+                return Err(ObservationError::InvalidEvidence);
+            }
+        }
+        EvidenceSource::ProcessTable | EvidenceSource::StructuredIntegration => {
+            return Err(ObservationError::UnsupportedSource);
+        }
+    }
+    if draft.availability != EvidenceAvailability::Available {
+        return Err(ObservationError::InvalidEvidence);
+    }
+    if draft.session.as_str().len() > MAX_SESSION_REF_BYTES {
+        return Err(ObservationError::OversizedInput);
+    }
+    if let Some(name) = &draft.command_name {
+        if name.len() > MAX_COMMAND_NAME_BYTES {
+            return Err(ObservationError::OversizedInput);
+        }
+    }
+    if let AgentKind::Unknown(name) = &draft.agent {
+        if name.len() > MAX_AGENT_NAME_BYTES {
+            return Err(ObservationError::OversizedInput);
+        }
+    }
+    Ok(())
+}
+
 fn first_command_token(line: &str) -> Option<String> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return None;
     }
-    // Skip leading VAR=value assignments.
     let mut rest = trimmed;
     loop {
         let token = rest.split_whitespace().next()?;
@@ -349,25 +541,37 @@ fn first_command_token(line: &str) -> Option<String> {
         if token.is_empty() {
             return None;
         }
-        return Some(token.to_string());
+        // Bound before allocation.
+        let bounded: String = token.chars().take(MAX_COMMAND_NAME_BYTES).collect();
+        return Some(bounded);
     }
 }
 
 fn known_agent(name: &str) -> Option<AgentKind> {
     let base = name.rsplit('/').next().unwrap_or(name).to_lowercase();
     let base = base.trim_start_matches("./");
-    match base {
-        "opencode" => Some(AgentKind::OpenCode),
-        "gemini" => Some(AgentKind::GeminiCli),
-        "claude" => Some(AgentKind::ClaudeCode),
-        "codex" => Some(AgentKind::CodexCli),
-        "aider" => Some(AgentKind::Aider),
-        "cursor" => Some(AgentKind::Cursor),
-        "continue" | "cn" => Some(AgentKind::Continue),
-        "cline" => Some(AgentKind::Cline),
-        "copilot" => Some(AgentKind::Copilot),
-        "goose" => Some(AgentKind::Goose),
-        _ => None,
+    if base == "opencode" {
+        Some(AgentKind::OpenCode)
+    } else if base == "gemini" {
+        Some(AgentKind::GeminiCli)
+    } else if base == "claude" {
+        Some(AgentKind::ClaudeCode)
+    } else if base == "codex" {
+        Some(AgentKind::CodexCli)
+    } else if base == "aider" {
+        Some(AgentKind::Aider)
+    } else if base == "cursor" {
+        Some(AgentKind::Cursor)
+    } else if base == "continue" || base == "cn" {
+        Some(AgentKind::Continue)
+    } else if base == "cline" {
+        Some(AgentKind::Cline)
+    } else if base == "copilot" {
+        Some(AgentKind::Copilot)
+    } else if base == "goose" {
+        Some(AgentKind::Goose)
+    } else {
+        None
     }
 }
 
@@ -379,7 +583,7 @@ mod tests {
     fn ordinary_command_does_not_become_observation() {
         let mut store = AgentObservationStore::new(8);
         assert!(store
-            .observe_command(SessionRef("s1".into()), "cargo test", None, 1000)
+            .observe_command(SessionRef::new("s1"), "cargo test", None, 1000)
             .is_none());
         assert!(store.is_empty());
     }
@@ -388,78 +592,131 @@ mod tests {
     fn known_agent_command_is_candidate_only() {
         let mut store = AgentObservationStore::new(8);
         let obs = store
-            .observe_command(SessionRef("s1".into()), "opencode run foo", None, 1000)
+            .observe_command(
+                SessionRef::new("s1"),
+                "opencode run foo",
+                Some(CommandRef(7)),
+                1000,
+            )
             .expect("candidate");
-        assert_eq!(obs.classification, ObservationClass::HeuristicCandidate);
-        assert_eq!(obs.strength, EvidenceStrength::Candidate);
-        assert_eq!(obs.evidence_kind, EvidenceKind::CommandLaunchCandidate);
-        assert_eq!(obs.agent, AgentKind::OpenCode);
-        assert_eq!(obs.availability, EvidenceAvailability::Available);
-        assert!(!obs.is_stale(1000));
+        assert_eq!(obs.classification(), ObservationClass::HeuristicCandidate);
+        assert_eq!(obs.strength(), EvidenceStrength::Candidate);
+        assert_eq!(obs.evidence_kind(), EvidenceKind::CommandLaunchCandidate);
+        assert_eq!(obs.agent(), &AgentKind::OpenCode);
+        assert_eq!(obs.source(), EvidenceSource::RecordedCommand);
+        assert_eq!(obs.command(), Some(CommandRef(7)));
+        assert_eq!(obs.availability(), EvidenceAvailability::Available);
+    }
+
+    #[test]
+    fn unlinked_command_text_is_not_recorded_provenance() {
+        let mut store = AgentObservationStore::new(8);
+        let obs = store
+            .observe_command(SessionRef::new("s1"), "claude", None, 1000)
+            .expect("candidate");
+        assert_eq!(obs.source(), EvidenceSource::CommandText);
+        assert_eq!(obs.command(), None);
     }
 
     #[test]
     fn unknown_agent_cli_is_not_observed() {
         let mut store = AgentObservationStore::new(8);
         assert!(store
-            .observe_command(SessionRef("s1".into()), "my-agent-cli do work", None, 1000)
+            .observe_command(SessionRef::new("s1"), "my-agent-cli do work", None, 1000)
             .is_none());
     }
 
     #[test]
     fn multiple_sessions_stay_separate() {
         let mut store = AgentObservationStore::new(8);
-        store.observe_command(SessionRef("s1".into()), "claude", Some(CommandRef(1)), 1000);
-        store.observe_command(SessionRef("s2".into()), "codex", Some(CommandRef(2)), 1000);
-        assert_eq!(store.for_session(&SessionRef("s1".into())).len(), 1);
-        assert_eq!(store.for_session(&SessionRef("s2".into())).len(), 1);
-        assert_eq!(store.for_session(&SessionRef("s3".into())).len(), 0);
+        store.observe_command(SessionRef::new("s1"), "claude", Some(CommandRef(1)), 1000);
+        store.observe_command(SessionRef::new("s2"), "codex", Some(CommandRef(2)), 1000);
+        assert_eq!(store.for_session(&SessionRef::new("s1")).len(), 1);
+        assert_eq!(store.for_session(&SessionRef::new("s2")).len(), 1);
+        assert_eq!(store.for_session(&SessionRef::new("s3")).len(), 0);
     }
 
     #[test]
     fn bounded_history_drops_oldest() {
         let mut store = AgentObservationStore::new(2);
-        store.observe_command(SessionRef("s".into()), "opencode", None, 1);
-        store.observe_command(SessionRef("s".into()), "claude", None, 2);
-        store.observe_command(SessionRef("s".into()), "codex", None, 3);
+        store.observe_command(SessionRef::new("s"), "opencode", None, 1);
+        store.observe_command(SessionRef::new("s"), "claude", None, 2);
+        store.observe_command(SessionRef::new("s"), "codex", None, 3);
         assert_eq!(store.len(), 2);
         assert_eq!(store.dropped(), 1);
-        let ids: Vec<_> = store.observations().map(|o| o.id).collect();
-        assert!(ids[0] < ids[1]);
     }
 
     #[test]
-    fn stale_and_conflicting_evidence_are_reported() {
+    fn sequential_agent_launches_are_not_conflicts() {
         let mut store = AgentObservationStore::new(8);
-        store.observe_command(SessionRef("s".into()), "opencode", None, 1000);
-        store.observe_command(SessionRef("s".into()), "claude", None, 1001);
+        store.observe_command(SessionRef::new("s"), "opencode", None, 1000);
+        store.observe_command(SessionRef::new("s"), "gemini", None, 1001);
+        let snap = store.snapshot(1001);
+        assert_eq!(snap.conflict_status, ConflictStatus::Unknown);
+        assert_eq!(snap.observations.len(), 2);
+    }
+
+    #[test]
+    fn stale_candidates_do_not_imply_stopped_agent() {
+        let mut store = AgentObservationStore::new(8);
+        store.observe_command(SessionRef::new("s"), "opencode", None, 1000);
         let snap = store.snapshot(1000 + 400_000);
-        assert!(snap
-            .observations
-            .iter()
-            .all(|o| o.effective_availability(1000 + 400_000) == EvidenceAvailability::Stale));
-        assert!(snap.conflicting_sessions.contains(&"s".to_string()));
-        assert!(!snap.process_evidence_available);
-        assert!(!snap.structured_events_available);
+        assert_eq!(
+            snap.observations[0].availability(),
+            EvidenceAvailability::Stale
+        );
+        assert_eq!(snap.conflict_status, ConflictStatus::Unknown);
+    }
+
+    #[test]
+    fn snapshot_materializes_effective_availability() {
+        let mut store = AgentObservationStore::new(8);
+        store.observe_command(SessionRef::new("s"), "opencode", None, 1000);
+        let snap = store.snapshot(1000 + 400_000);
+        assert_eq!(
+            snap.observations[0].availability(),
+            EvidenceAvailability::Stale
+        );
+    }
+
+    #[test]
+    fn future_dated_observation_is_not_stale() {
+        let mut store = AgentObservationStore::new(8);
+        store.observe_command(SessionRef::new("s"), "opencode", None, 5000);
+        let snap = store.snapshot(1000);
+        assert_eq!(
+            snap.observations[0].availability(),
+            EvidenceAvailability::Available
+        );
+    }
+
+    #[test]
+    fn clock_boundary_is_safe() {
+        let mut store = AgentObservationStore::new(8);
+        store.observe_command(SessionRef::new("s"), "opencode", None, u64::MAX - 10);
+        let snap = store.snapshot(u64::MAX);
+        assert_eq!(
+            snap.observations[0].availability(),
+            EvidenceAvailability::Stale
+        );
+    }
+
+    #[test]
+    fn capacity_is_clamped() {
+        let store = AgentObservationStore::new(0);
+        assert_eq!(store.capacity(), 1);
+        let store = AgentObservationStore::new(usize::MAX);
+        assert_eq!(store.capacity(), MAX_OBSERVATION_CAPACITY);
     }
 
     #[test]
     fn clear_session_removes_only_that_session() {
         let mut store = AgentObservationStore::new(8);
-        store.observe_command(SessionRef("s1".into()), "opencode", None, 1);
-        store.observe_command(SessionRef("s2".into()), "claude", None, 2);
-        store.clear_session(&SessionRef("s1".into()));
-        assert!(store.for_session(&SessionRef("s1".into())).is_empty());
-        assert_eq!(store.for_session(&SessionRef("s2".into())).len(), 1);
-    }
-
-    #[test]
-    fn restart_session_identity_does_not_carry_over() {
-        // A new session id simply has no observations.
-        let store = AgentObservationStore::new(8);
-        assert!(store
-            .for_session(&SessionRef("new-session".into()))
-            .is_empty());
+        store.observe_command(SessionRef::new("s1"), "opencode", None, 1);
+        store.observe_command(SessionRef::new("s2"), "claude", None, 2);
+        store.clear_session(&SessionRef::new("s1"));
+        assert!(store.for_session(&SessionRef::new("s1")).is_empty());
+        assert_eq!(store.for_session(&SessionRef::new("s2")).len(), 1);
     }
 
     #[test]
@@ -467,32 +724,163 @@ mod tests {
         let mut store = AgentObservationStore::new(8);
         let obs = store
             .observe_command(
-                SessionRef("s".into()),
+                SessionRef::new("s"),
                 "opencode --secret-token=abc run",
                 None,
                 1,
             )
             .unwrap();
-        assert_eq!(obs.command_name.as_deref(), Some("opencode"));
+        assert_eq!(obs.command_name(), Some("opencode"));
     }
 
     #[test]
-    fn record_preserves_explicit_unknown_state() {
-        let mut store = AgentObservationStore::new(4);
-        let obs = store.record(ObservationDraft {
-            session: SessionRef("s".into()),
+    fn invalid_evidence_combinations_are_rejected() {
+        let mut store = AgentObservationStore::new(8);
+        // Process source unsupported.
+        let draft = ObservationDraft {
+            session: SessionRef::new("s"),
             source: EvidenceSource::ProcessTable,
             evidence_kind: EvidenceKind::ProcessPresent,
-            classification: ObservationClass::Unknown,
-            strength: EvidenceStrength::Unknown,
-            agent: AgentKind::Unknown("mystery".into()),
+            classification: ObservationClass::ObservedFact,
+            strength: EvidenceStrength::Verified,
+            agent: AgentKind::OpenCode,
             command: None,
             command_name: None,
-            observed_at_ms: 5,
-            stale_after_ms: 10,
-            availability: EvidenceAvailability::Unavailable,
-        });
-        assert_eq!(obs.classification, ObservationClass::Unknown);
-        assert_eq!(obs.availability, EvidenceAvailability::Unavailable);
+            observed_at_ms: 1,
+            stale_after_ms: 300_000,
+            availability: EvidenceAvailability::Available,
+        };
+        assert!(store.try_record(draft).is_err());
+
+        // RecordedCommand without block id.
+        let draft = ObservationDraft {
+            session: SessionRef::new("s"),
+            source: EvidenceSource::RecordedCommand,
+            evidence_kind: EvidenceKind::CommandLaunchCandidate,
+            classification: ObservationClass::HeuristicCandidate,
+            strength: EvidenceStrength::Candidate,
+            agent: AgentKind::OpenCode,
+            command: None,
+            command_name: Some("opencode".into()),
+            observed_at_ms: 1,
+            stale_after_ms: 300_000,
+            availability: EvidenceAvailability::Available,
+        };
+        assert!(store.try_record(draft).is_err());
+
+        // Candidate upgraded to verified.
+        let draft = ObservationDraft {
+            session: SessionRef::new("s"),
+            source: EvidenceSource::CommandText,
+            evidence_kind: EvidenceKind::CommandLaunchCandidate,
+            classification: ObservationClass::HeuristicCandidate,
+            strength: EvidenceStrength::Verified,
+            agent: AgentKind::OpenCode,
+            command: None,
+            command_name: Some("opencode".into()),
+            observed_at_ms: 1,
+            stale_after_ms: 300_000,
+            availability: EvidenceAvailability::Available,
+        };
+        assert!(store.try_record(draft).is_err());
+
+        // Unknown agent cannot be recorded as candidate.
+        let draft = ObservationDraft {
+            session: SessionRef::new("s"),
+            source: EvidenceSource::CommandText,
+            evidence_kind: EvidenceKind::CommandLaunchCandidate,
+            classification: ObservationClass::HeuristicCandidate,
+            strength: EvidenceStrength::Candidate,
+            agent: AgentKind::Unknown("mystery".into()),
+            command: None,
+            command_name: Some("mystery".into()),
+            observed_at_ms: 1,
+            stale_after_ms: 300_000,
+            availability: EvidenceAvailability::Available,
+        };
+        assert!(store.try_record(draft).is_err());
+    }
+
+    #[test]
+    fn deserialized_invalid_record_is_rejected() {
+        let json = r#"{
+            "id": 1,
+            "session": "s",
+            "source": "ProcessTable",
+            "evidence_kind": "ProcessPresent",
+            "classification": "ObservedFact",
+            "strength": "Verified",
+            "availability": "Available",
+            "agent": "OpenCode",
+            "command": null,
+            "command_name": null,
+            "observed_at_ms": 1,
+            "stale_after_ms": 300000
+        }"#;
+        let result: Result<AgentObservation, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn adversarial_command_syntax_does_not_upgrade() {
+        let mut store = AgentObservationStore::new(8);
+        // Wrapper should not be recognized as an agent.
+        assert!(store
+            .observe_command(SessionRef::new("s"), "sudo opencode", None, 1)
+            .is_none());
+        // Unknown near-match is not recognized.
+        assert!(store
+            .observe_command(SessionRef::new("s"), "opencodee", None, 1)
+            .is_none());
+    }
+
+    #[test]
+    fn oversized_inputs_are_bounded() {
+        let mut store = AgentObservationStore::new(8);
+        let long_session = "x".repeat(1000);
+        let obs = store
+            .observe_command(SessionRef::new(long_session), "opencode", None, 1)
+            .expect("candidate");
+        assert!(obs.session().as_str().len() <= MAX_SESSION_REF_BYTES);
+
+        let draft = ObservationDraft {
+            session: SessionRef::new("s"),
+            source: EvidenceSource::CommandText,
+            evidence_kind: EvidenceKind::CommandLaunchCandidate,
+            classification: ObservationClass::HeuristicCandidate,
+            strength: EvidenceStrength::Candidate,
+            agent: AgentKind::Unknown("y".repeat(1000)),
+            command: None,
+            command_name: Some("z".repeat(1000)),
+            observed_at_ms: 1,
+            stale_after_ms: 300_000,
+            availability: EvidenceAvailability::Available,
+        };
+        assert!(store.try_record(draft).is_err());
+    }
+
+    #[test]
+    fn id_exhaustion_is_safe() {
+        // Cannot allocate u64::MAX ids in a test. Instead, verify the
+        // checked increment path rejects an exhausted counter.
+        let mut store = AgentObservationStore::new(1);
+        store.next_id = u64::MAX;
+        let draft = ObservationDraft {
+            session: SessionRef::new("s"),
+            source: EvidenceSource::CommandText,
+            evidence_kind: EvidenceKind::CommandLaunchCandidate,
+            classification: ObservationClass::HeuristicCandidate,
+            strength: EvidenceStrength::Candidate,
+            agent: AgentKind::OpenCode,
+            command: None,
+            command_name: Some("opencode".into()),
+            observed_at_ms: 1,
+            stale_after_ms: 300_000,
+            availability: EvidenceAvailability::Available,
+        };
+        assert!(matches!(
+            store.try_record(draft),
+            Err(ObservationError::IdExhausted)
+        ));
     }
 }
