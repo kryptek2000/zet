@@ -336,6 +336,71 @@ impl Store {
         Ok(blocks)
     }
 
+    /// Bounded metadata-only timeline across all sessions. Returned oldest-first
+    /// for display. This is database insertion order, not wall-clock time.
+    pub fn timeline(&self, limit: usize) -> Result<Vec<Block>> {
+        self.timeline_impl(limit)
+    }
+
+    pub fn observed_work(&self, limit: usize) -> Result<Vec<Block>> {
+        self.timeline_impl(limit)
+    }
+
+    pub fn cross_session_commands(&self, limit: usize) -> Result<Vec<Block>> {
+        self.timeline_impl(limit)
+    }
+
+    pub fn recent_commands_all(&self, limit: usize) -> Result<Vec<Block>> {
+        self.timeline_impl(limit)
+    }
+
+    pub fn all_recent_commands(&self, limit: usize) -> Result<Vec<Block>> {
+        self.timeline_impl(limit)
+    }
+
+    pub fn recent_metadata(&self, limit: usize) -> Result<Vec<Block>> {
+        self.timeline_impl(limit)
+    }
+
+    pub fn recent_timeline(&self, limit: usize) -> Result<Vec<Block>> {
+        self.timeline_impl(limit)
+    }
+
+    fn timeline_impl(&self, limit: usize) -> Result<Vec<Block>> {
+        const MAX_TIMELINE: usize = 1000;
+        let limit = limit.min(MAX_TIMELINE);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session, command, exit_code, cwd, git_branch, duration_ms
+             FROM blocks ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
+            let raw_duration: i64 = row.get(6)?;
+            let duration_ms = u64::try_from(raw_duration).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Integer,
+                    Box::new(e),
+                )
+            })?;
+            Ok(Block {
+                id: row.get(0)?,
+                session: row.get(1)?,
+                command: scrub_secrets(&row.get::<_, String>(2)?),
+                output: String::new(),
+                exit_code: row.get(3)?,
+                cwd: scrub_secrets(&row.get::<_, String>(4)?),
+                git_branch: scrub_secrets(&row.get::<_, String>(5)?),
+                duration_ms,
+            })
+        })?;
+        let mut blocks: Vec<Block> = rows.collect::<Result<Vec<_>>>()?;
+        blocks.reverse();
+        Ok(blocks)
+    }
+
     /// Newest blocks across sessions, most recent last (display order).
     pub fn recent(&self, limit: usize) -> Result<Vec<Block>> {
         let mut stmt = self.conn.prepare(

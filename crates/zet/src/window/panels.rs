@@ -51,6 +51,7 @@ pub struct SessionRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandRow {
     pub id: i64,
+    pub session: String,
     pub command: String,
     pub exit: String,
     pub duration: String,
@@ -1234,6 +1235,7 @@ pub struct InspectorSnapshot {
     pub state: String,
     pub exit: String,
     pub commands: Vec<CommandRow>,
+    pub timeline: Vec<CommandRow>,
 }
 
 /// Dirty-flagged cache for Inspector snapshots.
@@ -1371,6 +1373,7 @@ mod inspector_cache_tests {
             state: "prompt".to_string(),
             exit: "—".to_string(),
             commands: Vec::new(),
+            timeline: Vec::new(),
         };
         cache.commit_refresh(
             1,
@@ -1396,6 +1399,7 @@ mod inspector_cache_tests {
             state: "prompt".to_string(),
             exit: "—".to_string(),
             commands: Vec::new(),
+            timeline: Vec::new(),
         };
         cache.commit_refresh(
             1,
@@ -1420,6 +1424,7 @@ mod inspector_cache_tests {
             state: "prompt".to_string(),
             exit: "—".to_string(),
             commands: Vec::new(),
+            timeline: Vec::new(),
         };
         cache.commit_refresh(
             1,

@@ -228,6 +228,9 @@ struct App {
     /// the active session/store. Visual row indices remain in
     /// `inspector_sel`.
     inspector_sel_id: Option<i64>,
+    /// Whether the Inspector is showing the cross-session observed work
+    /// timeline instead of the active session's commands.
+    inspector_timeline: bool,
     /// Bounded, sanitized output for the currently selected recorded
     /// command, if available.
     inspector_output: Option<String>,
@@ -1064,11 +1067,12 @@ impl App {
         }
         let snapshot = self.build_inspector_snapshot();
         if let Some(id) = self.inspector_sel_id {
-            if let Some(pos) = snapshot
-                .commands
-                .iter()
-                .position(|command| command.id == id)
-            {
+            let displayed = if self.inspector_timeline {
+                &snapshot.timeline
+            } else {
+                &snapshot.commands
+            };
+            if let Some(pos) = displayed.iter().position(|command| command.id == id) {
                 self.inspector_sel = Some(panels::INSPECTOR_CONTEXT_ROWS + pos);
             } else {
                 self.inspector_sel = None;
@@ -1097,14 +1101,31 @@ impl App {
         if selected_id == self.inspector_output_id {
             if selected_id.is_none() {
                 self.inspector_output = None;
+                self.inspector_output_truncated = false;
             }
             return;
         }
         self.inspector_output_id = selected_id;
         let preview = selected_id.and_then(|id| {
+            let snapshot = self.inspector_cache.snapshot()?;
+            let displayed = if self.inspector_timeline {
+                &snapshot.timeline
+            } else {
+                &snapshot.commands
+            };
+            let entry = displayed.iter().find(|command| command.id == id)?;
             let tab = self.tabs.get(self.active)?;
             let recorder = tab.recorder.as_ref()?;
-            recorder.output_preview(id, 4096).ok().flatten()
+            let preview = recorder
+                .store()
+                .output_preview(entry.session.as_str(), id, 4096)
+                .ok()
+                .flatten()?;
+            let block = recorder.store().get(id).ok()?;
+            if block.session != entry.session {
+                return None;
+            }
+            Some(preview)
         });
         self.inspector_output_truncated = preview
             .as_ref()
@@ -1154,6 +1175,7 @@ impl App {
                     .into_iter()
                     .map(|block| panels::CommandRow {
                         id: block.id,
+                        session: block.session.clone(),
                         command: zet_blocks::scrub_secrets(&block.command),
                         exit: block.exit_code.to_string(),
                         duration: format!("{}ms", block.duration_ms),
@@ -1177,6 +1199,30 @@ impl App {
                 row
             })
             .collect();
+
+        // Bounded cross-session observed work timeline. This uses metadata
+        // only; full output is retrieved separately by block identity.
+        let timeline = tab
+            .and_then(|tab| tab.recorder.as_ref())
+            .map(|recorder| recorder.store().timeline(8).unwrap_or_default())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|block| panels::CommandRow {
+                id: block.id,
+                session: block.session.clone(),
+                command: zet_blocks::scrub_secrets(&block.command),
+                exit: block.exit_code.to_string(),
+                duration: format!("{}ms", block.duration_ms),
+                cwd: if zet_blocks::scrub_secrets(&block.cwd).is_empty() {
+                    "—".to_string()
+                } else {
+                    panels::sanitize_inspector_text(&zet_blocks::scrub_secrets(&block.cwd), 64)
+                },
+                git_branch: zet_blocks::scrub_secrets(&block.git_branch),
+                provenance: panels::Provenance::Observed,
+            })
+            .collect();
+
         panels::InspectorSnapshot {
             active: self.active,
             session,
@@ -1184,6 +1230,7 @@ impl App {
             state,
             exit,
             commands,
+            timeline,
         }
     }
 
@@ -1308,6 +1355,7 @@ impl App {
                     .into_iter()
                     .map(|block| panels::CommandRow {
                         id: block.id,
+                        session: block.session.clone(),
                         command: block.command,
                         exit: block.exit_code.to_string(),
                         duration: format!("{}ms", block.duration_ms),
@@ -1463,7 +1511,13 @@ impl App {
                 let cmd_count = self
                     .inspector_cache
                     .snapshot()
-                    .map(|s| s.commands.len())
+                    .map(|s| {
+                        if self.inspector_timeline {
+                            s.timeline.len()
+                        } else {
+                            s.commands.len()
+                        }
+                    })
                     .unwrap_or(0);
                 let new_sel =
                     panels::inspector_selection_at_row(row as u32, cmd_count, insp_vp.rows);
@@ -2173,6 +2227,7 @@ impl App {
         output_truncated: bool,
         hovered_row: Option<u32>,
         focused: bool,
+        timeline: bool,
     ) {
         use zet_gpu::renderer::{
             PANEL_AMBER, PANEL_BG, PANEL_BORDER, PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_INSET,
@@ -2211,7 +2266,19 @@ impl App {
             ch.saturating_sub(8),
             PANEL_CYAN,
         );
-        Self::draw_ui_row(r, vp, 0, 4, "CONTEXTUAL INSPECTOR", UI_HEADER, PANEL_TEXT);
+        Self::draw_ui_row(
+            r,
+            vp,
+            0,
+            4,
+            if timeline {
+                "OBSERVED WORK TIMELINE"
+            } else {
+                "CONTEXTUAL INSPECTOR"
+            },
+            UI_HEADER,
+            PANEL_TEXT,
+        );
         if vp.cols > 31 {
             Self::draw_ui_row(
                 r,
@@ -2276,6 +2343,12 @@ impl App {
             return;
         };
 
+        let displayed_commands = if timeline {
+            &snapshot.timeline
+        } else {
+            &snapshot.commands
+        };
+
         // Session overview: real state only, kept separate from the command
         // ledger so the Inspector has a different job from the Mission Rail.
         if vp.rows > 5 {
@@ -2335,7 +2408,7 @@ impl App {
             Self::draw_ui_row(r, vp, 5, 2, "EVIDENCE / OBSERVED", UI_SECTION, PANEL_MUTED);
         }
 
-        let detail_start = panels::inspector_detail_start(snapshot.commands.len());
+        let detail_start = panels::inspector_detail_start(displayed_commands.len());
         let activity_header = panels::INSPECTOR_ACTIVITY_START.saturating_sub(1);
         if activity_header < vp.rows {
             Self::draw_ui_row(
@@ -2347,7 +2420,7 @@ impl App {
                 UI_SECTION,
                 PANEL_VIOLET,
             );
-            let count = snapshot.commands.len().to_string();
+            let count = displayed_commands.len().to_string();
             let count_col = vp
                 .cols
                 .saturating_sub(panels::text_cells(&count) as u32 + 2);
@@ -2379,20 +2452,24 @@ impl App {
             }
         }
 
-        if snapshot.commands.is_empty() {
+        if displayed_commands.is_empty() {
             if panels::INSPECTOR_ACTIVITY_START < vp.rows {
                 Self::draw_ui_row(
                     r,
                     vp,
                     panels::INSPECTOR_ACTIVITY_START,
                     2,
-                    "NO RECORDED COMMANDS",
+                    if timeline {
+                        "NO OBSERVED WORK"
+                    } else {
+                        "NO RECORDED COMMANDS"
+                    },
                     UI_BODY,
                     PANEL_MUTED,
                 );
             }
         } else {
-            for (index, command) in snapshot.commands.iter().enumerate() {
+            for (index, command) in displayed_commands.iter().enumerate() {
                 let row = panels::inspector_command_row(index);
                 if row >= vp.rows {
                     break;
@@ -2467,7 +2544,8 @@ impl App {
         if card_rows == 0 {
             return;
         }
-        let selected = selected_id.and_then(|id| snapshot.commands.iter().find(|cmd| cmd.id == id));
+        let selected =
+            selected_id.and_then(|id| displayed_commands.iter().find(|cmd| cmd.id == id));
         let failed = selected.is_some_and(|command| !matches!(command.exit.as_str(), "0" | "—"));
         Self::draw_instrument_surface(
             r,
@@ -3396,6 +3474,18 @@ impl App {
                     self.inspector_output_id = None;
                     self.inspector_output_truncated = false;
                 }
+                Key::Character(ch)
+                    if self.focus == Focus::Inspector && (ch == "t" || ch == "T") =>
+                {
+                    self.inspector_timeline = !self.inspector_timeline;
+                    self.inspector_sel = None;
+                    self.inspector_sel_id = None;
+                    self.inspector_output = None;
+                    self.inspector_output_id = None;
+                    self.inspector_output_truncated = false;
+                    self.inspector_cache.mark_dirty();
+                    self.needs_draw = true;
+                }
                 Key::Named(NamedKey::ArrowUp) => {
                     if self.focus == Focus::Rail && !self.tabs.is_empty() {
                         self.rail_sel = self.rail_sel.saturating_sub(1);
@@ -3405,7 +3495,13 @@ impl App {
                             + self
                                 .inspector_cache
                                 .snapshot()
-                                .map(|s| s.commands.len())
+                                .map(|s| {
+                                    if self.inspector_timeline {
+                                        s.timeline.len()
+                                    } else {
+                                        s.commands.len()
+                                    }
+                                })
                                 .unwrap_or(0);
                         if n > 0 {
                             self.inspector_sel = match self.inspector_sel {
@@ -3440,7 +3536,13 @@ impl App {
                             + self
                                 .inspector_cache
                                 .snapshot()
-                                .map(|s| s.commands.len())
+                                .map(|s| {
+                                    if self.inspector_timeline {
+                                        s.timeline.len()
+                                    } else {
+                                        s.commands.len()
+                                    }
+                                })
                                 .unwrap_or(0);
                         if n > 0 {
                             self.inspector_sel = match self.inspector_sel {
@@ -4011,6 +4113,7 @@ impl ApplicationHandler for App {
                                 self.inspector_output_truncated,
                                 inspector_hover_row,
                                 self.focus == Focus::Inspector,
+                                self.inspector_timeline,
                             );
                         }
                     }
@@ -4175,6 +4278,7 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         chrome: panels::ChromeCache::new(),
         inspector_sel: None,
         inspector_sel_id: None,
+        inspector_timeline: false,
         inspector_output: None,
         inspector_output_id: None,
         inspector_output_truncated: false,
@@ -4370,6 +4474,7 @@ mod layout_fit_tests {
             chrome: super::panels::ChromeCache::new(),
             inspector_sel: None,
             inspector_sel_id: None,
+            inspector_timeline: false,
             inspector_output: None,
             inspector_output_id: None,
             inspector_output_truncated: false,
@@ -5518,6 +5623,75 @@ mod layout_fit_tests {
         app.sync_inspector_output();
         assert_eq!(app.inspector_output.as_deref(), Some("second output"));
         assert_ne!(app.inspector_output.as_deref(), Some("first output"));
+    }
+
+    #[test]
+    fn inspector_timeline_shows_cross_session_observed_work() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo a".to_string(),
+                output: "a".to_string(),
+                exit_code: 1,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 2,
+            })
+            .unwrap();
+        store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-b".to_string(),
+                command: "echo b".to_string(),
+                output: "b".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 3,
+            })
+            .unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        app.refresh_inspector();
+        let snapshot = app.inspector_cache.snapshot().unwrap();
+        assert_eq!(snapshot.timeline.len(), 2);
+        assert_eq!(snapshot.timeline[0].session, "session-a");
+        assert_eq!(snapshot.timeline[1].session, "session-b");
+        assert_eq!(snapshot.timeline[0].exit, "1");
+        assert_eq!(snapshot.timeline[1].exit, "0");
+    }
+
+    #[test]
+    fn inspector_timeline_toggle_clears_selection_and_output() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.inspector_timeline = false;
+        app.inspector_sel = Some(4);
+        app.inspector_sel_id = Some(1);
+        app.inspector_output = Some("old".to_string());
+        app.inspector_output_id = Some(1);
+        app.inspector_output_truncated = true;
+
+        app.inspector_timeline = true;
+        app.inspector_sel = None;
+        app.inspector_sel_id = None;
+        app.inspector_output = None;
+        app.inspector_output_id = None;
+        app.inspector_output_truncated = false;
+
+        assert!(app.inspector_timeline);
+        assert_eq!(app.inspector_sel, None);
+        assert_eq!(app.inspector_output, None);
     }
 
     #[test]
