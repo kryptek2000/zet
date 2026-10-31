@@ -1527,6 +1527,32 @@ impl App {
             if x >= left && x < right && y >= top && y < bottom {
                 self.focus = Focus::Inspector;
                 let row = ((y - top) / ch as f64).floor() as usize;
+                let col = ((x - left) / cw as f64).floor() as usize;
+                // Clickable Inspector view switch.
+                if row == 1 {
+                    if (8..16).contains(&col) {
+                        self.inspector_timeline = false;
+                        self.inspector_sel = None;
+                        self.inspector_sel_id = None;
+                        self.inspector_output = None;
+                        self.inspector_output_id = None;
+                        self.inspector_output_truncated = false;
+                        self.inspector_cache.mark_dirty();
+                        self.needs_draw = true;
+                        return;
+                    }
+                    if (16..25).contains(&col) {
+                        self.inspector_timeline = true;
+                        self.inspector_sel = None;
+                        self.inspector_sel_id = None;
+                        self.inspector_output = None;
+                        self.inspector_output_id = None;
+                        self.inspector_output_truncated = false;
+                        self.inspector_cache.mark_dirty();
+                        self.needs_draw = true;
+                        return;
+                    }
+                }
                 let cmd_count = self
                     .inspector_cache
                     .snapshot()
@@ -1548,7 +1574,14 @@ impl App {
                     if index >= panels::INSPECTOR_CONTEXT_ROWS {
                         self.inspector_cache
                             .snapshot()
-                            .and_then(|s| s.commands.get(index - panels::INSPECTOR_CONTEXT_ROWS))
+                            .and_then(|s| {
+                                let displayed = if self.inspector_timeline {
+                                    &s.timeline
+                                } else {
+                                    &s.commands
+                                };
+                                displayed.get(index - panels::INSPECTOR_CONTEXT_ROWS)
+                            })
                             .map(|command| command.id)
                     } else {
                         None
@@ -2297,6 +2330,25 @@ impl App {
             },
             UI_HEADER,
             PANEL_TEXT,
+        );
+        Self::draw_ui_row(r, vp, 1, 2, "VIEW", UI_META, PANEL_MUTED);
+        Self::draw_ui_row(
+            r,
+            vp,
+            1,
+            8,
+            "SESSION",
+            UI_META,
+            if timeline { PANEL_MUTED } else { PANEL_CYAN },
+        );
+        Self::draw_ui_row(
+            r,
+            vp,
+            1,
+            16,
+            "TIMELINE",
+            UI_META,
+            if timeline { PANEL_CYAN } else { PANEL_MUTED },
         );
         if vp.cols > 31 {
             Self::draw_ui_row(
