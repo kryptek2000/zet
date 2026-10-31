@@ -2278,8 +2278,8 @@ impl App {
         focused: bool,
     ) {
         use zet_gpu::renderer::{
-            PANEL_BG, PANEL_BORDER, PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_MUTED,
-            PANEL_RAISED, PANEL_RED, PANEL_SECONDARY, PANEL_TEAL, PANEL_TEXT, PANEL_VIOLET,
+            PANEL_BG, PANEL_BORDER, PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_MUTED, PANEL_RAISED,
+            PANEL_RED, PANEL_SECONDARY, PANEL_TEAL, PANEL_TEXT, PANEL_VIOLET,
         };
         let _ = focused;
         let (cw, ch) = r.cell_px();
