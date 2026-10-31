@@ -1032,8 +1032,13 @@ impl App {
             tab_count,
             active_dead,
         );
+        if !cheap_changed && !self.inspector_cache.poll_due(now) {
+            return;
+        }
         // A command recorded in another session changes the cross-session
-        // timeline even when the active session is unchanged.
+        // timeline even when the active session is unchanged. This query is
+        // only performed when a refresh is already due, avoiding per-frame
+        // database work.
         let latest_timeline_id = self
             .tabs
             .get(self.active)
@@ -1044,10 +1049,6 @@ impl App {
         if latest_timeline_id != self.inspector_cache.last_timeline_max_id {
             cheap_changed = true;
             self.inspector_cache.mark_dirty();
-        }
-        if !cheap_changed && !self.inspector_cache.poll_due(now) {
-            self.inspector_cache.last_timeline_max_id = latest_timeline_id;
-            return;
         }
         let session_id = self
             .tabs
@@ -1065,7 +1066,14 @@ impl App {
                 if !self
                     .inspector_cache
                     .snapshot()
-                    .map(|snapshot| snapshot.commands.iter().any(|command| command.id == id))
+                    .map(|snapshot| {
+                        let displayed = if self.inspector_timeline {
+                            &snapshot.timeline
+                        } else {
+                            &snapshot.commands
+                        };
+                        displayed.iter().any(|command| command.id == id)
+                    })
                     .unwrap_or(false)
                 {
                     self.inspector_sel = None;
@@ -2855,7 +2863,9 @@ impl App {
             );
             Self::draw_evidence_divider(r, vp, provenance_row, PANEL_BORDER);
             Self::draw_ui_row(r, vp, provenance_row, 2, "PROVENANCE", UI_META, PANEL_MUTED);
-            let provenance = format!("RECORDED / SESSION {}", snapshot.session);
+            let provenance = selected
+                .map(|command| format!("RECORDED / SESSION {}", command.session))
+                .unwrap_or_else(|| "NO RECORDED COMMAND SELECTED".to_string());
             Self::draw_ui_row(
                 r,
                 vp,
@@ -5808,6 +5818,71 @@ mod layout_fit_tests {
             app.inspector_cache.dirty
                 || app.inspector_cache.snapshot().unwrap().timeline.len() == 2
         );
+    }
+
+    #[test]
+    fn inspector_timeline_selection_survives_unchanged_refresh() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let id = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo a".to_string(),
+                output: "a".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        app.inspector_timeline = true;
+        app.refresh_inspector();
+        app.inspector_sel = Some(4);
+        app.inspector_sel_id = Some(id);
+        app.inspector_output = Some("a".to_string());
+        app.inspector_output_id = Some(id);
+
+        let now = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        app.refresh_inspector_at(now);
+        assert_eq!(app.inspector_sel, Some(4));
+        assert_eq!(app.inspector_sel_id, Some(id));
+        assert_eq!(app.inspector_output.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn inspector_timeline_toggle_changes_view_and_clears_stale_state() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.inspector_timeline = false;
+        app.inspector_sel = Some(4);
+        app.inspector_sel_id = Some(7);
+        app.inspector_output = Some("old".to_string());
+        app.inspector_output_id = Some(7);
+        app.inspector_output_truncated = true;
+
+        // Simulate the production toggle path.
+        app.inspector_timeline = true;
+        app.inspector_sel = None;
+        app.inspector_sel_id = None;
+        app.inspector_output = None;
+        app.inspector_output_id = None;
+        app.inspector_output_truncated = false;
+        app.inspector_cache.mark_dirty();
+
+        assert!(app.inspector_timeline);
+        assert_eq!(app.inspector_sel, None);
+        assert_eq!(app.inspector_output, None);
+        assert_eq!(app.inspector_output_id, None);
     }
 
     #[test]
