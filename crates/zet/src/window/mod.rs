@@ -2265,11 +2265,27 @@ impl App {
         Self::draw_evidence_divider(r, vp, row + 1, zet_gpu::renderer::PANEL_BORDER);
     }
 
+    fn timeline_session_badges(commands: &[panels::CommandRow]) -> Vec<String> {
+        let mut sessions: Vec<&str> = Vec::new();
+        commands
+            .iter()
+            .map(|command| {
+                let index = sessions
+                    .iter()
+                    .position(|session| *session == command.session)
+                    .unwrap_or_else(|| {
+                        sessions.push(command.session.as_str());
+                        sessions.len() - 1
+                    });
+                format!("S{}", index + 1)
+            })
+            .collect()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn draw_timeline_inspector(
         r: &mut Renderer,
         vp: zet_gpu::renderer::Viewport,
-        snapshot: &panels::InspectorSnapshot,
         displayed_commands: &[panels::CommandRow],
         selected_id: Option<i64>,
         output: Option<&str>,
@@ -2285,37 +2301,36 @@ impl App {
         let (cw, ch) = r.cell_px();
         let origin_x = vp.x.saturating_mul(cw);
         let origin_y = vp.y.saturating_mul(ch);
-        r.draw_fill(vp, PANEL_BG);
-
-        // Scope facts: compact and subordinate to the event list.
-        if vp.rows > 3 {
-            Self::draw_ui_row(r, vp, 1, 2, "SOURCE", UI_META, PANEL_MUTED);
-            Self::draw_ui_row(
-                r,
-                vp,
-                1,
-                12.min(vp.cols.saturating_sub(1)),
-                "RECORDED BLOCKS",
-                UI_BODY,
-                PANEL_SECONDARY,
+        if vp.rows > 2 {
+            r.draw_fill(
+                zet_gpu::renderer::Viewport {
+                    x: vp.x,
+                    y: vp.y.saturating_add(2),
+                    cols: vp.cols,
+                    rows: vp.rows.saturating_sub(2),
+                },
+                PANEL_BG,
             );
-            Self::draw_ui_row(r, vp, 2, 2, "ORDER", UI_META, PANEL_MUTED);
+        }
+
+        if vp.rows > 4 {
+            Self::draw_ui_row(r, vp, 2, 2, "SOURCE", UI_META, PANEL_MUTED);
             Self::draw_ui_row(
                 r,
                 vp,
                 2,
                 12.min(vp.cols.saturating_sub(1)),
-                "DATABASE INSERTION",
+                "RECORDED BLOCKS",
                 UI_BODY,
                 PANEL_SECONDARY,
             );
-            Self::draw_ui_row(r, vp, 3, 2, "ACTIVE", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(r, vp, 3, 2, "ORDER", UI_META, PANEL_MUTED);
             Self::draw_ui_row(
                 r,
                 vp,
                 3,
                 12.min(vp.cols.saturating_sub(1)),
-                &panels::truncate_to_cells(&snapshot.session, vp.cols.saturating_sub(13) as usize),
+                "DATABASE INSERTION",
                 UI_BODY,
                 PANEL_SECONDARY,
             );
@@ -2364,6 +2379,8 @@ impl App {
             .rows
             .saturating_sub(preview_height.saturating_add(1))
             .max(activity_header.saturating_add(1));
+        let session_badges = Self::timeline_session_badges(displayed_commands);
+
         for (index, command) in displayed_commands.iter().enumerate() {
             let row = panels::INSPECTOR_ACTIVITY_START + index as u32;
             if row >= list_end || row >= vp.rows {
@@ -2404,13 +2421,16 @@ impl App {
                 UI_META,
                 if selected { PANEL_CYAN } else { PANEL_MUTED },
             );
-            let session_badge = panels::truncate_to_cells(&command.session, 6);
+            let session_badge = session_badges
+                .get(index)
+                .map(String::as_str)
+                .unwrap_or("S?");
             Self::draw_ui_row(
                 r,
                 vp,
                 row,
                 5,
-                &session_badge,
+                session_badge,
                 UI_META,
                 if selected { PANEL_CYAN } else { PANEL_MUTED },
             );
@@ -2722,7 +2742,6 @@ impl App {
             Self::draw_timeline_inspector(
                 r,
                 vp,
-                snapshot.as_ref(),
                 displayed_commands,
                 selected_id,
                 output,
@@ -4813,6 +4832,7 @@ mod tests {
 #[cfg(test)]
 mod layout_fit_tests {
     use super::App;
+    use super::panels;
     use super::Tab;
 
     fn make_test_tab() -> Tab {
@@ -4867,14 +4887,14 @@ mod layout_fit_tests {
             layout,
             focus: super::Focus::Terminal,
             rail_sel: 0,
-            chrome: super::panels::ChromeCache::new(),
+            chrome: panels::ChromeCache::new(),
             inspector_sel: None,
             inspector_sel_id: None,
             inspector_timeline: false,
             inspector_output: None,
             inspector_output_id: None,
             inspector_output_truncated: false,
-            inspector_cache: super::panels::InspectorCache::new(),
+            inspector_cache: panels::InspectorCache::new(),
             #[cfg(test)]
             chrome_query_count: 0,
             #[cfg(test)]
@@ -5481,7 +5501,7 @@ mod layout_fit_tests {
 
         let snapshot = app.build_rail_snapshot();
         assert_eq!(snapshot.commands[0].command, command);
-        let row = super::panels::format_command_row(
+        let row = panels::format_command_row(
             &snapshot.commands[0].command,
             &snapshot.commands[0].exit,
             &snapshot.commands[0].duration,
@@ -5490,7 +5510,7 @@ mod layout_fit_tests {
         assert!(row.ends_with("0 14ms"), "{row:?}");
         assert!(row.contains('…'), "{row:?}");
         assert!(
-            super::panels::text_cells(&row) <= 24,
+            panels::text_cells(&row) <= 24,
             "{row:?} exceeds the 24-column rail"
         );
     }
@@ -6248,6 +6268,44 @@ mod layout_fit_tests {
         assert_eq!(app.inspector_sel, None);
         assert_eq!(app.inspector_output, None);
         assert_eq!(app.inspector_output_id, None);
+    }
+
+    #[test]
+    fn timeline_session_badges_are_collision_resistant() {
+        let rows = vec![
+            super::panels::CommandRow {
+                id: 1,
+                session: "shared-prefix-a".to_string(),
+                command: "echo a".to_string(),
+                exit: "0".to_string(),
+                duration: "1ms".to_string(),
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                provenance: panels::Provenance::Observed,
+            },
+            super::panels::CommandRow {
+                id: 2,
+                session: "shared-prefix-b".to_string(),
+                command: "echo b".to_string(),
+                exit: "0".to_string(),
+                duration: "1ms".to_string(),
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                provenance: panels::Provenance::Observed,
+            },
+            super::panels::CommandRow {
+                id: 3,
+                session: "shared-prefix-a".to_string(),
+                command: "echo c".to_string(),
+                exit: "0".to_string(),
+                duration: "1ms".to_string(),
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                provenance: super::panels::Provenance::Observed,
+            },
+        ];
+        let badges = App::timeline_session_badges(&rows);
+        assert_eq!(badges, vec!["S1", "S2", "S1"]);
     }
 
     #[test]
