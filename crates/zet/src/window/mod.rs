@@ -3332,20 +3332,20 @@ impl App {
         if self.perf_frames == 1 {
             zet_gpu::perf_mark("first_frame");
             eprintln!("perf: first_frame_ms={}", t0.elapsed().as_millis());
-            if let Some(first_output) = self.tabs[self.active].term.take_first_output_time() {
-                if first_output >= t0 {
-                    eprintln!(
-                        "perf: first_output_from_origin_ms={}",
-                        first_output.duration_since(t0).as_millis()
-                    );
-                } else {
-                    eprintln!("perf: first_output_before_origin=true");
-                }
+        }
+        if let Some(first_output) = self.tabs[self.active].term.take_first_output_time() {
+            if first_output >= t0 {
                 eprintln!(
-                    "perf: first_output_to_frame_ms={}",
-                    first_output.elapsed().as_millis()
+                    "perf: first_output_from_origin_ms={}",
+                    first_output.duration_since(t0).as_millis()
                 );
+            } else {
+                eprintln!("perf: first_output_before_origin=true");
             }
+            eprintln!(
+                "perf: first_output_to_frame_ms={}",
+                first_output.elapsed().as_millis()
+            );
         }
         if let Some(tin) = self.perf_input.take() {
             eprintln!("perf: input_latency_us={}", tin.elapsed().as_micros());

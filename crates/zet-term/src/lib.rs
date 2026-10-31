@@ -276,10 +276,7 @@ impl Terminal {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
-        if self.first_output.is_none()
-            && !bytes.is_empty()
-            && std::env::var_os("ZET_PERF").is_some()
-        {
+        if self.perf_enabled && self.first_output.is_none() && !bytes.is_empty() {
             self.first_output = Some(std::time::Instant::now());
         }
         for &b in bytes {
@@ -940,10 +937,13 @@ impl Terminal {
 
     pub fn take_first_output_time(&mut self) -> Option<std::time::Instant> {
         if self.first_output_reported {
-            None
-        } else {
+            return None;
+        }
+        if let Some(first_output) = self.first_output {
             self.first_output_reported = true;
-            self.first_output
+            Some(first_output)
+        } else {
+            None
         }
     }
 
