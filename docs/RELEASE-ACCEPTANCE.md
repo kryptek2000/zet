@@ -1,6 +1,6 @@
 # ZET — Release Acceptance Status
 
-**Updated:** 2026-10-28  
+**Updated:** 2026-10-30  
 **Authority:** [Product Charter](ZET-PRODUCT-CHARTER.md), [Roadmap](ROADMAP.md), [AGENTS.md](../AGENTS.md)
 
 This document separates four conditions that must not be treated as equivalent:
@@ -12,10 +12,10 @@ This document separates four conditions that must not be treated as equivalent:
 
 ## Current baseline
 
-- GitHub master: `91d409bd521a5127c2c14d22bd9ecc1513d2ba7b`
+- GitHub master: `11fa52c36bbd9b4b431f9e34d7cae59f283ff482`
 - Exact-head CI: success for run `40495565730` on master.
-- Merged PRs: #35, #39, #40, #42, #43.
-- Closed issue: #36.
+- Merged PRs: #35, #39, #40, #42, #43, #45, #46, #47, #49, #51.
+- Closed issues: #36, #47, #49, #51.
 - Open issue: #37 (startup performance on Intel HD 620).
 
 ## Acceptance matrix
@@ -42,7 +42,7 @@ These are internal measurements with observed run-to-run variability. They are n
 ## Safe A/B acceptance procedure
 
 Baseline source: `7ce2709d09a686638ed35144c9b37d1e2918d740`  
-Integrated candidate source: `91d409bd521a5127c2c14d22bd9ecc1513d2ba7b`
+Integrated candidate source: `11fa52c36bbd9b4b431f9e34d7cae59f283ff482`
 
 1. Confirm both source identities before any comparison.
 2. Prefer existing valid release artifacts; otherwise build sequentially with `CARGO_BUILD_JOBS=2`.
@@ -63,4 +63,4 @@ This procedure can establish cold-start timing and idle RSS when measured correc
 - Idle RSS < 100 MB: UNVERIFIED for release.
 - `cat 100k lines` < 0.9 s: UNVERIFIED.
 - Owner visual acceptance and final release approval remain open.
-- P3 implementation is not part of this release checkpoint.
+- P3-A1 recorded command history and bounded output inspection are integrated into master.

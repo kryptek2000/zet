@@ -1,12 +1,12 @@
 # ZET — Current Development State
 
-**Updated:** 2026-10-28  
+**Updated:** 2026-10-30  
 **Authority:** [Product Charter](ZET-PRODUCT-CHARTER.md), [Roadmap](ROADMAP.md)
 
 ## Verified Git state
 
-- Remote master: `91d409bd521a5127c2c14d22bd9ecc1513d2ba7b`
-- Local master: `91d409bd521a5127c2c14d22bd9ecc1513d2ba7b`
+- Remote master: `11fa52c36bbd9b4b431f9e34d7cae59f283ff482`
+- Local master: `11fa52c36bbd9b4b431f9e34d7cae59f283ff482`
 - Canonical installed ZET source: `79a46069607f7b04bca0f8fb7d7d5f9ef98e6248`
 - Installed binary: `/home/bandit/.local/bin/zet`
 - Installed binary SHA-256: `812bb118a5bd050bb3370482b2cda950640913fbc1c2cb0dce587e0561be65a5`
@@ -19,7 +19,7 @@
 - Native Mission Rail with P2-B1 visual improvements.
 - Contextual Inspector foundation with independent visibility, selection and session identity.
 - Three-panel native layout with independent rail/Inspector toggles.
-- Existing recorded-command functionality.
+- Recorded-command Inspector and bounded output inspection (P3-A1).
 - Additive performance instrumentation.
 - Wayland clipboard paste support.
 - Neovim background-color query repair.
@@ -41,11 +41,12 @@ See [RELEASE-ACCEPTANCE.md](RELEASE-ACCEPTANCE.md) for the separated source/audi
 
 P3 — Evidence-linked commands and mission timeline.
 
-Begin with an architect-approved bounded contract using existing command recording and provenance. No implementation is authorized by this documentation sync.
+P3-A1 observed command history and bounded output inspection are integrated into master. Further P3 work requires an architect-approved contract.
 
 ## Open work
 
 - Owner visual acceptance.
 - Release-mode performance acceptance.
-- Issue #36 is closed; full editor compatibility claims remain bounded by tested cases.
+- Issues #36, #47, #49 and #51 are closed.
+- Issue #37 remains open.
 - P2-B ASCII identity remains planned, not implemented.
