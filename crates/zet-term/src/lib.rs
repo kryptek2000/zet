@@ -244,7 +244,10 @@ impl Terminal {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
-        if self.first_output.is_none() && !bytes.is_empty() {
+        if self.first_output.is_none()
+            && !bytes.is_empty()
+            && std::env::var_os("ZET_PERF").is_some()
+        {
             self.first_output = Some(std::time::Instant::now());
         }
         for &b in bytes {

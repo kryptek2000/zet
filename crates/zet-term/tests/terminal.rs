@@ -586,3 +586,32 @@ fn sgr_256_and_bright_colors() {
     assert_eq!(cell.fg, zet_term::Color::Indexed(9));
     assert_eq!(cell.bg, zet_term::Color::Indexed(10));
 }
+
+#[test]
+fn first_output_time_is_recorded_when_perf_enabled() {
+    std::env::set_var("ZET_PERF", "1");
+    let mut t = Terminal::new(10, 4);
+    assert!(t.first_output_time().is_none());
+    t.feed(b"hello");
+    assert!(t.first_output_time().is_some());
+    std::env::remove_var("ZET_PERF");
+}
+
+#[test]
+fn first_output_time_ignores_empty_feed() {
+    std::env::set_var("ZET_PERF", "1");
+    let mut t = Terminal::new(10, 4);
+    t.feed(b"");
+    assert!(t.first_output_time().is_none());
+    t.feed(b"x");
+    assert!(t.first_output_time().is_some());
+    std::env::remove_var("ZET_PERF");
+}
+
+#[test]
+fn first_output_time_is_not_collected_when_disabled() {
+    std::env::remove_var("ZET_PERF");
+    let mut t = Terminal::new(10, 4);
+    t.feed(b"hello");
+    assert!(t.first_output_time().is_none());
+}
