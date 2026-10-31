@@ -4644,6 +4644,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "zet-agent-observe"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "zet-blocks"
 version = "0.1.0"
 dependencies = [
