@@ -3332,6 +3332,12 @@ impl App {
         if self.perf_frames == 1 {
             zet_gpu::perf_mark("first_frame");
             eprintln!("perf: first_frame_ms={}", t0.elapsed().as_millis());
+            if let Some(first_output) = self.tabs[self.active].term.first_output_time() {
+                eprintln!(
+                    "perf: first_output_ms={}",
+                    first_output.elapsed().as_millis()
+                );
+            }
         }
         if let Some(tin) = self.perf_input.take() {
             eprintln!("perf: input_latency_us={}", tin.elapsed().as_micros());
@@ -4011,7 +4017,11 @@ impl ApplicationHandler for App {
                     if let Some((hits, cur)) = &search {
                         r.draw_search(&self.tabs[self.active].term, hits, *cur, gpu_vp);
                     }
+                    let render_t0 = std::time::Instant::now();
                     r.render();
+                    if self.perf_t0.is_some() {
+                        eprintln!("perf: render_submit_ms={}", render_t0.elapsed().as_millis());
+                    }
                     self.last_frame = std::time::Instant::now();
                     self.needs_draw = false;
                     self.note_frame();

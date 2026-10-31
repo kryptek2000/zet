@@ -188,6 +188,8 @@ pub struct Terminal {
     markers: Vec<Marker>,
     /// Pending terminal responses to write back to the PTY.
     responses: Vec<Vec<u8>>,
+    /// First time bytes were fed to this terminal (perf instrumentation).
+    first_output: Option<std::time::Instant>,
     /// Configured default foreground/background colors used for OSC 10/11
     /// color queries. These are RGB triples, not palette indices.
     default_fg: (u8, u8, u8),
@@ -232,6 +234,7 @@ impl Terminal {
             events: Vec::new(),
             markers: Vec::new(),
             responses: Vec::new(),
+            first_output: None,
             default_fg: (255, 255, 255),
             default_bg: (0, 0, 0),
             utf8_buf: [0; 4],
@@ -241,6 +244,9 @@ impl Terminal {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
+        if self.first_output.is_none() && !bytes.is_empty() {
+            self.first_output = Some(std::time::Instant::now());
+        }
         for &b in bytes {
             match self.state {
                 State::Ground => self.ground(b),
@@ -887,6 +893,11 @@ impl Terminal {
     /// Absolute-row base for the wheel-shifted view (selection math).
     pub fn visible_base(&self) -> usize {
         self.abs_base().saturating_sub(self.view_offset)
+    }
+
+    /// First time bytes were fed, if any.
+    pub fn first_output_time(&self) -> Option<std::time::Instant> {
+        self.first_output
     }
 
     /// Alt screen active (vim/helix): the visible grid is NOT the main
