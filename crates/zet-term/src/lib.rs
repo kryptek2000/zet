@@ -190,6 +190,8 @@ pub struct Terminal {
     responses: Vec<Vec<u8>>,
     /// First time bytes were fed to this terminal (perf instrumentation).
     first_output: Option<std::time::Instant>,
+    first_output_reported: bool,
+    perf_enabled: bool,
     /// Configured default foreground/background colors used for OSC 10/11
     /// color queries. These are RGB triples, not palette indices.
     default_fg: (u8, u8, u8),
@@ -202,6 +204,34 @@ pub struct Terminal {
 impl Terminal {
     pub fn new(cols: usize, rows: usize) -> Self {
         Self::with_scrollback(cols, rows, 10_000)
+    }
+
+    pub fn with_perf(cols: usize, rows: usize, perf_enabled: bool) -> Self {
+        Self::with_scrollback_and_perf(cols, rows, 10_000, perf_enabled)
+    }
+
+    pub fn with_scrollback_and_perf(
+        cols: usize,
+        rows: usize,
+        scrollback_cap: usize,
+        perf_enabled: bool,
+    ) -> Self {
+        let mut terminal = Self::with_scrollback(cols, rows, scrollback_cap);
+        terminal.perf_enabled = perf_enabled;
+        terminal
+    }
+
+    pub fn new_with_perf(cols: usize, rows: usize, perf_enabled: bool) -> Self {
+        Self::with_perf(cols, rows, perf_enabled)
+    }
+
+    pub fn with_perf_scrollback(
+        cols: usize,
+        rows: usize,
+        scrollback_cap: usize,
+        perf_enabled: bool,
+    ) -> Self {
+        Self::with_scrollback_and_perf(cols, rows, scrollback_cap, perf_enabled)
     }
 
     pub fn with_scrollback(cols: usize, rows: usize, scrollback_cap: usize) -> Self {
@@ -235,6 +265,8 @@ impl Terminal {
             markers: Vec::new(),
             responses: Vec::new(),
             first_output: None,
+            first_output_reported: false,
+            perf_enabled: false,
             default_fg: (255, 255, 255),
             default_bg: (0, 0, 0),
             utf8_buf: [0; 4],
@@ -901,6 +933,22 @@ impl Terminal {
     /// First time bytes were fed, if any.
     pub fn first_output_time(&self) -> Option<std::time::Instant> {
         self.first_output
+    }
+    pub fn set_perf_enabled(&mut self, enabled: bool) {
+        self.perf_enabled = enabled;
+    }
+
+    pub fn take_first_output_time(&mut self) -> Option<std::time::Instant> {
+        if self.first_output_reported {
+            None
+        } else {
+            self.first_output_reported = true;
+            self.first_output
+        }
+    }
+
+    pub fn first_output_reported(&self) -> bool {
+        self.first_output_reported
     }
 
     /// Alt screen active (vim/helix): the visible grid is NOT the main
