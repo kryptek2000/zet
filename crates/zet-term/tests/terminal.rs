@@ -586,3 +586,58 @@ fn sgr_256_and_bright_colors() {
     assert_eq!(cell.fg, zet_term::Color::Indexed(9));
     assert_eq!(cell.bg, zet_term::Color::Indexed(10));
 }
+#[test]
+fn first_output_time_is_recorded_when_perf_enabled() {
+    let mut t = Terminal::with_perf(10, 4, true);
+    assert!(t.first_output_time().is_none());
+    t.feed(b"hello");
+    assert!(t.first_output_time().is_some());
+}
+
+#[test]
+fn first_output_time_ignores_empty_feed() {
+    let mut t = Terminal::with_perf(10, 4, true);
+    t.feed(b"");
+    assert!(t.first_output_time().is_none());
+    t.feed(b"x");
+    assert!(t.first_output_time().is_some());
+}
+
+#[test]
+fn first_output_time_is_not_collected_when_disabled() {
+    let mut t = Terminal::with_perf(10, 4, false);
+    t.feed(b"hello");
+    assert!(t.first_output_time().is_none());
+    assert!(t.take_first_output_time().is_none());
+}
+
+#[test]
+fn first_output_time_is_recorded_once_for_repeated_feeds() {
+    let mut t = Terminal::with_perf(10, 4, true);
+    t.feed(b"first");
+    let first = t.first_output_time();
+    t.feed(b"second");
+    assert_eq!(t.first_output_time(), first);
+    assert!(t.take_first_output_time().is_some());
+    assert!(t.take_first_output_time().is_none());
+}
+
+#[test]
+fn first_output_time_handles_very_early_output() {
+    let mut t = Terminal::with_perf(10, 4, true);
+    t.feed(b"x");
+    assert!(t.first_output_time().is_some());
+    assert!(t.take_first_output_time().is_some());
+    assert!(t.take_first_output_time().is_none());
+}
+
+#[test]
+fn absent_first_output_time_is_not_consumed() {
+    let mut t = Terminal::with_perf(10, 4, true);
+    assert!(t.take_first_output_time().is_none());
+    t.feed(b"");
+    assert!(t.take_first_output_time().is_none());
+    t.feed(b"x");
+    assert!(t.take_first_output_time().is_some());
+    assert!(t.take_first_output_time().is_none());
+}

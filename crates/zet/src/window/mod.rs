@@ -3333,6 +3333,20 @@ impl App {
             zet_gpu::perf_mark("first_frame");
             eprintln!("perf: first_frame_ms={}", t0.elapsed().as_millis());
         }
+        if let Some(first_output) = self.tabs[self.active].term.take_first_output_time() {
+            if first_output >= t0 {
+                eprintln!(
+                    "perf: first_output_from_origin_ms={}",
+                    first_output.duration_since(t0).as_millis()
+                );
+            } else {
+                eprintln!("perf: first_output_before_origin=true");
+            }
+            eprintln!(
+                "perf: first_output_to_frame_ms={}",
+                first_output.elapsed().as_millis()
+            );
+        }
         if let Some(tin) = self.perf_input.take() {
             eprintln!("perf: input_latency_us={}", tin.elapsed().as_micros());
         }
@@ -4011,7 +4025,13 @@ impl ApplicationHandler for App {
                     if let Some((hits, cur)) = &search {
                         r.draw_search(&self.tabs[self.active].term, hits, *cur, gpu_vp);
                     }
-                    r.render();
+                    if self.perf_t0.is_some() {
+                        let render_t0 = std::time::Instant::now();
+                        r.render();
+                        eprintln!("perf: render_submit_us={}", render_t0.elapsed().as_micros());
+                    } else {
+                        r.render();
+                    }
                     self.last_frame = std::time::Instant::now();
                     self.needs_draw = false;
                     self.note_frame();
@@ -4113,11 +4133,20 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
     zet_gpu::perf_mark("main");
     let (prog, hook) = shell_program();
     let shell_name = prog.clone();
+    // Establish the instrumentation origin before shell/session startup.
+    // ZET_PERF is read once here; terminal instances receive the resulting
+    // enabled flag explicitly.
+    let perf_enabled = std::env::var_os("ZET_PERF").is_some();
+    let perf_t0 = perf_enabled.then(|| {
+        zet_gpu::perf_mark("perf_t0_init");
+        std::time::Instant::now()
+    });
     let event_loop = EventLoop::new().map_err(io_error)?;
     // Wake the loop the moment PTY bytes land: output renders instantly
     // instead of waiting for the heartbeat.
     let proxy = event_loop.create_proxy();
-    let tab = Tab::spawn(&prog, hook.clone(), proxy.clone());
+    let mut tab = Tab::spawn(&prog, hook.clone(), proxy.clone());
+    tab.term.set_perf_enabled(perf_enabled);
     // Model for plain-language input: explicit ZET_INLINE_SPEC (launch config)
     // wins; else the persisted `zet inline` choice re-read per request;
     // else zero-config local when ollama serves a preferred model.
@@ -4128,10 +4157,6 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
             zet_models::keys::autodetect_local().inspect(|s| eprintln!("zet: inline model {s}"))
         }
     };
-    let perf_t0 = std::env::var("ZET_PERF").ok().map(|_| {
-        zet_gpu::perf_mark("perf_t0_init");
-        std::time::Instant::now()
-    });
     let mut app = App {
         window: None,
         renderer: None,

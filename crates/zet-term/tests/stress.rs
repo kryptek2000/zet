@@ -56,3 +56,22 @@ fn vt_sequences_feed_without_panic() {
     }
     assert!(t.cell(0, 0).is_some());
 }
+
+#[test]
+fn bench_100k_lines_feed_timing() {
+    let rows = 10usize;
+    let cols = 12usize;
+    let cap = 100_000usize;
+    let mut t = zet_term::Terminal::with_scrollback(cols, rows, cap);
+
+    let mut input = String::with_capacity(100_000 * 8);
+    for i in 0..cap {
+        use std::fmt::Write as _;
+        let _ = writeln!(input, "line {i}");
+    }
+    let start = std::time::Instant::now();
+    t.feed(input.as_bytes());
+    let elapsed = start.elapsed();
+    eprintln!("bench: 100k_lines_feed_ms={}", elapsed.as_millis());
+    assert_eq!(t.scrollback_len() + rows, 100_001);
+}
