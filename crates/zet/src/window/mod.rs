@@ -2265,6 +2265,304 @@ impl App {
         Self::draw_evidence_divider(r, vp, row + 1, zet_gpu::renderer::PANEL_BORDER);
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn draw_timeline_inspector(
+        r: &mut Renderer,
+        vp: zet_gpu::renderer::Viewport,
+        snapshot: &panels::InspectorSnapshot,
+        displayed_commands: &[panels::CommandRow],
+        selected_id: Option<i64>,
+        output: Option<&str>,
+        output_truncated: bool,
+        hovered_row: Option<u32>,
+        focused: bool,
+    ) {
+        use zet_gpu::renderer::{
+            PANEL_BG, PANEL_BORDER, PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_MUTED,
+            PANEL_RAISED, PANEL_RED, PANEL_SECONDARY, PANEL_TEAL, PANEL_TEXT, PANEL_VIOLET,
+        };
+        let _ = focused;
+        let (cw, ch) = r.cell_px();
+        let origin_x = vp.x.saturating_mul(cw);
+        let origin_y = vp.y.saturating_mul(ch);
+        r.draw_fill(vp, PANEL_BG);
+
+        // Scope facts: compact and subordinate to the event list.
+        if vp.rows > 3 {
+            Self::draw_ui_row(r, vp, 1, 2, "SOURCE", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(
+                r,
+                vp,
+                1,
+                12.min(vp.cols.saturating_sub(1)),
+                "RECORDED BLOCKS",
+                UI_BODY,
+                PANEL_SECONDARY,
+            );
+            Self::draw_ui_row(r, vp, 2, 2, "ORDER", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(
+                r,
+                vp,
+                2,
+                12.min(vp.cols.saturating_sub(1)),
+                "DATABASE INSERTION",
+                UI_BODY,
+                PANEL_SECONDARY,
+            );
+            Self::draw_ui_row(r, vp, 3, 2, "ACTIVE", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(
+                r,
+                vp,
+                3,
+                12.min(vp.cols.saturating_sub(1)),
+                &panels::truncate_to_cells(&snapshot.session, vp.cols.saturating_sub(13) as usize),
+                UI_BODY,
+                PANEL_SECONDARY,
+            );
+        }
+
+        let activity_header = 4u32;
+        if activity_header < vp.rows {
+            Self::draw_ui_row(
+                r,
+                vp,
+                activity_header,
+                2,
+                "OBSERVED WORK",
+                UI_SECTION,
+                PANEL_VIOLET,
+            );
+            let count = displayed_commands.len().to_string();
+            let count_col = vp
+                .cols
+                .saturating_sub(panels::text_cells(&count) as u32 + 2);
+            if count_col > 2 {
+                Self::draw_ui_row(
+                    r,
+                    vp,
+                    activity_header,
+                    count_col,
+                    &count,
+                    UI_META,
+                    PANEL_MUTED,
+                );
+            }
+        }
+
+        // Most vertical space is given to timeline rows.
+        let selected =
+            selected_id.and_then(|id| displayed_commands.iter().find(|cmd| cmd.id == id));
+
+        let preview_height: u32 = if vp.rows >= 12 {
+            6
+        } else if vp.rows >= 9 {
+            4
+        } else {
+            0
+        };
+        let list_end = vp
+            .rows
+            .saturating_sub(preview_height.saturating_add(1))
+            .max(activity_header.saturating_add(1));
+        for (index, command) in displayed_commands.iter().enumerate() {
+            let row = panels::INSPECTOR_ACTIVITY_START + index as u32;
+            if row >= list_end || row >= vp.rows {
+                break;
+            }
+            let failed = !matches!(command.exit.as_str(), "0" | "—");
+            let selected = selected_id == Some(command.id);
+            let hovered = hovered_row == Some(row);
+            if selected || hovered {
+                Self::draw_panel_card(r, vp, row, 1, PANEL_RAISED, PANEL_BORDER_STRONG);
+            }
+            r.draw_status_dot_px(
+                origin_x.saturating_add(14),
+                origin_y
+                    .saturating_add(row.saturating_mul(ch))
+                    .saturating_add(ch / 2),
+                if selected { 4 } else { 2 },
+                if failed { PANEL_RED } else { PANEL_TEAL },
+                None,
+            );
+            if selected {
+                r.draw_rect_px(
+                    origin_x.saturating_add(5),
+                    origin_y
+                        .saturating_add(row.saturating_mul(ch))
+                        .saturating_add(5),
+                    2,
+                    ch.saturating_sub(10),
+                    if failed { PANEL_RED } else { PANEL_CYAN },
+                );
+            }
+            Self::draw_ui_row(
+                r,
+                vp,
+                row,
+                2,
+                &format!("{:02}", index + 1),
+                UI_META,
+                if selected { PANEL_CYAN } else { PANEL_MUTED },
+            );
+            let session_badge = panels::truncate_to_cells(&command.session, 6);
+            Self::draw_ui_row(
+                r,
+                vp,
+                row,
+                5,
+                &session_badge,
+                UI_META,
+                if selected { PANEL_CYAN } else { PANEL_MUTED },
+            );
+            let status = format!("exit {}  {}", command.exit, command.duration);
+            let status_cells = panels::text_cells(&status) as u32;
+            let status_col = vp.cols.saturating_sub(2).saturating_sub(status_cells);
+            let text_budget = status_col.saturating_sub(10);
+            let command_text = panels::truncate_to_cells(&command.command, text_budget as usize);
+            if !command_text.is_empty() {
+                Self::draw_ui_row(
+                    r,
+                    vp,
+                    row,
+                    10,
+                    &command_text,
+                    UI_BODY,
+                    if selected {
+                        PANEL_TEXT
+                    } else {
+                        PANEL_SECONDARY
+                    },
+                );
+            }
+            if status_col > 10 {
+                Self::draw_ui_row(
+                    r,
+                    vp,
+                    row,
+                    status_col,
+                    &status,
+                    UI_META,
+                    if failed { PANEL_RED } else { PANEL_TEAL },
+                );
+            }
+        }
+
+        // Compact selected-event preview.
+        if preview_height > 0 {
+            let preview_header = vp.rows.saturating_sub(preview_height);
+            if preview_header < vp.rows {
+                Self::draw_ui_row(
+                    r,
+                    vp,
+                    preview_header,
+                    2,
+                    "SELECTED OBSERVED COMMAND",
+                    UI_SECTION,
+                    PANEL_VIOLET,
+                );
+                let card_row = preview_header.saturating_add(1);
+                if card_row < vp.rows {
+                    if let Some(command) = selected {
+                        Self::draw_ui_row(
+                            r,
+                            vp,
+                            card_row,
+                            2,
+                            &panels::truncate_to_cells(
+                                &command.command,
+                                vp.cols.saturating_sub(4) as usize,
+                            ),
+                            UI_COMMAND,
+                            PANEL_TEXT,
+                        );
+                        if card_row + 1 < vp.rows {
+                            Self::draw_ui_row(
+                                r,
+                                vp,
+                                card_row + 1,
+                                2,
+                                &format!("SESSION {}", command.session),
+                                UI_META,
+                                PANEL_SECONDARY,
+                            );
+                        }
+                        if card_row + 2 < vp.rows {
+                            Self::draw_ui_row(
+                                r,
+                                vp,
+                                card_row + 2,
+                                2,
+                                &format!("EXIT {}  {}", command.exit, command.duration),
+                                UI_META,
+                                if command.exit == "0" || command.exit == "—" {
+                                    PANEL_TEAL
+                                } else {
+                                    PANEL_RED
+                                },
+                            );
+                        }
+                    } else if card_row < vp.rows {
+                        Self::draw_ui_row(
+                            r,
+                            vp,
+                            card_row,
+                            2,
+                            "SELECT AN OBSERVED COMMAND",
+                            UI_COMMAND,
+                            PANEL_SECONDARY,
+                        );
+                    }
+                }
+                if let Some(text) = output {
+                    let output_row = card_row.saturating_add(3);
+                    if output_row < vp.rows && !text.is_empty() {
+                        Self::draw_ui_row(
+                            r,
+                            vp,
+                            output_row,
+                            2,
+                            &panels::truncate_to_cells(
+                                text.lines().next().unwrap_or(""),
+                                vp.cols.saturating_sub(4) as usize,
+                            ),
+                            UI_BODY,
+                            PANEL_SECONDARY,
+                        );
+                    }
+                }
+                if output_truncated && card_row.saturating_add(4) < vp.rows {
+                    Self::draw_ui_row(
+                        r,
+                        vp,
+                        card_row.saturating_add(4),
+                        2,
+                        "... PREVIEW TRUNCATED",
+                        UI_META,
+                        PANEL_MUTED,
+                    );
+                }
+            }
+        }
+
+        let provenance_row = vp.rows.saturating_sub(1);
+        if provenance_row >= activity_header && provenance_row < vp.rows {
+            Self::draw_evidence_divider(r, vp, provenance_row, PANEL_BORDER);
+            Self::draw_ui_row(r, vp, provenance_row, 2, "PROVENANCE", UI_META, PANEL_MUTED);
+            let provenance = selected
+                .map(|command| format!("RECORDED / SESSION {}", command.session))
+                .unwrap_or_else(|| "NO RECORDED COMMAND SELECTED".to_string());
+            Self::draw_ui_row(
+                r,
+                vp,
+                provenance_row,
+                13,
+                &panels::truncate_to_cells(&provenance, vp.cols.saturating_sub(14) as usize),
+                UI_META,
+                PANEL_SECONDARY,
+            );
+        }
+    }
+
     /// Render the Inspector as an evidence detail surface. The command index
     /// remains a compact navigation aid for the existing P3-A1 keyboard and
     /// mouse contract, while the selected command and bounded output own the
@@ -2419,6 +2717,21 @@ impl App {
         } else {
             &snapshot.commands
         };
+
+        if timeline {
+            Self::draw_timeline_inspector(
+                r,
+                vp,
+                snapshot.as_ref(),
+                displayed_commands,
+                selected_id,
+                output,
+                output_truncated,
+                hovered_row,
+                focused,
+            );
+            return;
+        }
 
         // Session overview: real state only, kept separate from the command
         // ledger so the Inspector has a different job from the Mission Rail.
