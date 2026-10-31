@@ -60,6 +60,25 @@ pub struct CommandRow {
     pub provenance: Provenance,
 }
 
+/// Whether the cross-session timeline was actually readable from the
+/// recorder. `Recorded` with zero rows is an honest empty history;
+/// `Unavailable` means the application could not read the store (or no
+/// recorder exists) and must not present the absence as an empty history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimelineAvailability {
+    Recorded,
+    Unavailable,
+}
+
+impl TimelineAvailability {
+    pub fn empty_message(self) -> &'static str {
+        match self {
+            Self::Recorded => "NO OBSERVED WORK",
+            Self::Unavailable => "RECORDING UNAVAILABLE",
+        }
+    }
+}
+
 /// Immutable snapshot rendered by the rail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RailSnapshot {
@@ -801,33 +820,280 @@ mod rail_row_tests {
 #[cfg(test)]
 mod inspector_layout_tests {
     use super::{
-        inspector_command_row, inspector_detail_start, inspector_selection_at_row,
-        INSPECTOR_CONTEXT_ROWS,
+        inspector_command_position, inspector_command_row, inspector_detail_start,
+        inspector_header_descriptor_col, inspector_selection_at_row,
+        inspector_selection_for_command, inspector_session_command_at_row,
+        inspector_visible_commands, text_cells, timeline_display_rows, timeline_empty_row,
+        timeline_layout, timeline_preview_heading, timeline_row_layout, timeline_session_badges,
+        CommandRow, InspectorView, Provenance, TimelineAvailability, INSPECTOR_ACTIVITY_START,
+        TIMELINE_BADGE_COL, TIMELINE_COMMAND_COL, TIMELINE_INDEX_COL,
     };
 
+    fn command(id: i64, session: &str, text: &str, exit: &str, duration: &str) -> CommandRow {
+        CommandRow {
+            id,
+            session: session.to_string(),
+            command: text.to_string(),
+            exit: exit.to_string(),
+            duration: duration.to_string(),
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            provenance: Provenance::Observed,
+        }
+    }
+
     #[test]
-    fn inspector_context_and_activity_rows_are_stable() {
+    fn session_and_command_rows_are_stable_and_measured() {
         assert_eq!(inspector_command_row(0), 7);
         assert_eq!(inspector_command_row(3), 10);
-        assert_eq!(inspector_selection_at_row(1, 2, 30), Some(0));
-        assert_eq!(inspector_selection_at_row(4, 2, 30), Some(3));
+        assert_eq!(inspector_selection_for_command(0), 4);
+        assert_eq!(inspector_command_position(4), Some(0));
+        assert_eq!(inspector_command_position(3), None);
+        assert_eq!(inspector_detail_start(2), 10);
+    }
+
+    #[test]
+    fn only_visible_command_rows_are_click_targets() {
         assert_eq!(
-            inspector_selection_at_row(7, 2, 30),
-            Some(INSPECTOR_CONTEXT_ROWS)
+            inspector_selection_at_row(InspectorView::Session, 6, 2, 30, false),
+            None
         );
         assert_eq!(
-            inspector_selection_at_row(8, 2, 30),
-            Some(INSPECTOR_CONTEXT_ROWS + 1)
+            inspector_selection_at_row(InspectorView::Session, 1, 2, 30, false),
+            None
+        );
+        assert_eq!(
+            inspector_selection_at_row(InspectorView::Session, 7, 2, 30, false),
+            Some(4)
+        );
+        assert_eq!(
+            inspector_selection_at_row(InspectorView::Session, 8, 2, 30, false),
+            Some(5)
+        );
+        assert_eq!(
+            inspector_selection_at_row(InspectorView::Session, 9, 2, 30, false),
+            None
+        );
+        assert_eq!(inspector_session_command_at_row(7, 2, 8), Some(0));
+        assert_eq!(inspector_session_command_at_row(8, 2, 8), None);
+    }
+
+    #[test]
+    fn timeline_hit_testing_matches_only_drawn_rows() {
+        let layout = timeline_layout(30, 20, false);
+        // Footer is row 29; the preview starts at row 24.
+        assert_eq!(layout.list_start, INSPECTOR_ACTIVITY_START);
+        assert_eq!(layout.list_end, 24);
+        assert_eq!(layout.preview_start, Some(24));
+        assert_eq!(layout.command_at_row(6), None);
+        assert_eq!(layout.command_at_row(7), Some(0));
+        assert_eq!(layout.command_at_row(23), Some(16));
+        assert_eq!(layout.command_at_row(24), None); // preview header
+        assert_eq!(layout.command_at_row(29), None); // provenance
+        assert_eq!(
+            inspector_selection_at_row(InspectorView::Timeline, 7, 20, 30, false),
+            Some(4)
+        );
+        assert_eq!(
+            inspector_selection_at_row(InspectorView::Timeline, 24, 20, 30, false),
+            None
+        );
+        assert_eq!(
+            inspector_selection_at_row(InspectorView::Timeline, 29, 20, 30, false),
+            None
         );
     }
 
     #[test]
-    fn inspector_sections_and_detail_surface_are_not_click_targets() {
-        assert_eq!(inspector_selection_at_row(0, 2, 30), None);
-        assert_eq!(inspector_selection_at_row(6, 2, 30), None);
-        assert_eq!(inspector_selection_at_row(9, 2, 30), None);
-        assert_eq!(inspector_selection_at_row(20, 2, 12), None);
-        assert_eq!(inspector_detail_start(2), 10);
+    fn short_inspector_heights_never_select_hidden_commands() {
+        for rows in 0u32..=40 {
+            for count in 0usize..=12 {
+                for expanded in [false, true] {
+                    let layout = timeline_layout(rows, count, expanded);
+                    assert!(
+                        layout.visible_commands <= count,
+                        "rows={rows} count={count} visible={}",
+                        layout.visible_commands
+                    );
+                    assert!(layout.list_end <= layout.footer_row);
+                    assert!(layout
+                        .preview_start
+                        .is_none_or(|start| start <= layout.footer_row));
+                    for row in 0..=rows.saturating_add(2) {
+                        if let Some(position) = layout.command_at_row(row) {
+                            assert!(position < layout.visible_commands);
+                            assert!(
+                                row >= layout.list_start && row < layout.list_end && row < rows,
+                                "row {row} escaped the visible list"
+                            );
+                        }
+                    }
+                    let via_hit = (0..rows)
+                        .filter(|row| {
+                            inspector_selection_at_row(
+                                InspectorView::Timeline,
+                                *row,
+                                count,
+                                rows,
+                                expanded,
+                            )
+                            .is_some()
+                        })
+                        .count();
+                    assert_eq!(via_hit, layout.visible_commands);
+                }
+            }
+        }
+        assert_eq!(timeline_empty_row(0), None);
+        assert!(timeline_empty_row(3).unwrap() < 3);
+        assert!(timeline_empty_row(12).unwrap() < 12);
+    }
+
+    #[test]
+    fn keyboard_and_mouse_share_the_visible_command_count() {
+        for rows in 0u32..=40 {
+            for count in 0usize..=8 {
+                assert_eq!(
+                    inspector_visible_commands(InspectorView::Timeline, rows, count, false),
+                    timeline_layout(rows, count, false).visible_commands
+                );
+                assert_eq!(
+                    inspector_visible_commands(InspectorView::Session, rows, count, false),
+                    (0..rows)
+                        .filter(|row| {
+                            inspector_selection_at_row(
+                                InspectorView::Session,
+                                *row,
+                                count,
+                                rows,
+                                false,
+                            )
+                            .is_some()
+                        })
+                        .count()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn expanded_layout_trades_list_rows_for_a_bounded_preview() {
+        let compact = timeline_layout(30, 8, false);
+        let expanded = timeline_layout(30, 8, true);
+        assert!(!compact.preview_start.is_none());
+        assert!(!expanded.preview_start.is_none());
+        assert!(expanded.preview_rows > compact.preview_rows);
+        assert!(expanded.visible_commands <= compact.visible_commands);
+        assert!(expanded.preview_rows <= 10);
+        assert!(expanded.list_end <= expanded.footer_row);
+    }
+
+    #[test]
+    fn thirty_two_column_rows_keep_a_readable_command_summary() {
+        let layout = timeline_row_layout(32, "0", "14ms");
+        assert_eq!(layout.command_col, TIMELINE_COMMAND_COL);
+        assert_eq!(
+            layout.status_col, None,
+            "metadata must yield to the command"
+        );
+        assert!(
+            layout.command_budget >= 21,
+            "32-column command budget was {}",
+            layout.command_budget
+        );
+        let sample = "cargo test --release";
+        let text = layout.command_text(sample);
+        assert_eq!(text, sample, "a typical command must stay intact");
+        assert!(text_cells(&text) <= 32);
+        assert_eq!(TIMELINE_INDEX_COL, 2);
+        assert_eq!(TIMELINE_BADGE_COL, 6);
+
+        let rows = timeline_display_rows(
+            &[command(1, "session-a", sample, "0", "14ms")],
+            24,
+            false,
+            32,
+        );
+        assert_eq!(rows[0].index_label, "01");
+        assert_eq!(rows[0].session_badge, "S1");
+        assert_eq!(rows[0].command_text, sample);
+        assert_eq!(rows[0].status_text, None);
+        assert!(rows[0].command_col >= 8);
+    }
+
+    #[test]
+    fn long_commands_degrade_with_a_visible_ellipsis_inside_the_cell_budget() {
+        let layout = timeline_row_layout(32, "127", "812ms");
+        let command = "git push origin feat/p3a2-observed-work-timeline";
+        let text = layout.command_text(command);
+        assert!(text.ends_with('…'), "{text:?}");
+        assert!(text_cells(&text) <= layout.command_budget);
+        assert!(layout.command_budget <= 23);
+        assert!(!text.contains("812ms"), "detail belongs in the preview");
+        assert!(!text.is_empty());
+    }
+
+    #[test]
+    fn wider_rows_only_show_metadata_when_the_command_stays_readable() {
+        let hidden = timeline_row_layout(39, "0", "14ms");
+        assert_eq!(hidden.status_col, None);
+        let shown = timeline_row_layout(40, "0", "14ms");
+        assert_eq!(shown.status, "0 14ms");
+        assert!(shown.status_col.is_some());
+        assert!(shown.command_budget >= 16);
+        let crowded = timeline_row_layout(40, "127", "123456789ms");
+        assert_eq!(crowded.status_col, None);
+        assert!(crowded.command_budget > 16);
+    }
+
+    #[test]
+    fn session_badges_are_distinct_and_stable_for_the_displayed_window() {
+        let rows = vec![
+            command(1, "shared-prefix-a", "echo a", "0", "1ms"),
+            command(2, "shared-prefix-b", "echo b", "0", "1ms"),
+            command(3, "shared-prefix-a", "echo c", "0", "1ms"),
+        ];
+        assert_eq!(timeline_session_badges(&rows), vec!["S1", "S2", "S1"]);
+        let models = timeline_display_rows(&rows, 24, false, 32);
+        assert_eq!(models[0].session_badge, "S1");
+        assert_eq!(models[1].session_badge, "S2");
+        assert_ne!(models[0].session_badge, models[1].session_badge);
+        assert_eq!(models[2].session_badge, models[0].session_badge);
+    }
+
+    #[test]
+    fn empty_and_unavailable_states_are_honest_and_distinct() {
+        assert_eq!(
+            TimelineAvailability::Recorded.empty_message(),
+            "NO OBSERVED WORK"
+        );
+        assert_eq!(
+            TimelineAvailability::Unavailable.empty_message(),
+            "RECORDING UNAVAILABLE"
+        );
+        assert_ne!(
+            TimelineAvailability::Recorded.empty_message(),
+            TimelineAvailability::Unavailable.empty_message()
+        );
+    }
+
+    #[test]
+    fn header_descriptor_and_preview_hints_never_overlap_at_32_columns() {
+        let title = "OBSERVED WORK TIMELINE";
+        let descriptor = "OBSERVED / SESSION-SCOPED";
+        assert_eq!(inspector_header_descriptor_col(32, title, descriptor), None);
+        let wide = inspector_header_descriptor_col(80, title, descriptor).unwrap();
+        assert!(wide > 4 + text_cells(title) as u32);
+        assert!(wide + text_cells(descriptor) as u32 <= 78);
+
+        let (label, hint) = timeline_preview_heading(32, false);
+        let (hint, col) = hint.unwrap();
+        assert!(2 + text_cells(label) as u32 <= col);
+        assert!(col + text_cells(hint) as u32 <= 30);
+        let (label, hint) = timeline_preview_heading(32, true);
+        let (hint, col) = hint.unwrap();
+        assert!(2 + text_cells(label) as u32 <= col);
+        assert!(col + text_cells(hint) as u32 <= 30);
     }
 }
 
@@ -1193,37 +1459,345 @@ pub fn sanitize_inspector_output(text: &str, max_chars: usize) -> String {
     out
 }
 
-/// Four context rows remain keyboard-selectable for compatibility with the
-/// P3-A1 focus contract. Activity rows start below a dedicated section label.
+/// Inspector selection values retain the historical P3-A1 offset: values
+/// below this constant were never command selections, so navigation starts
+/// at the first real displayed entry instead.
 pub const INSPECTOR_CONTEXT_ROWS: usize = 4;
+/// `INSPECTOR_CONTEXT_ROWS` is the stable selection offset; the name is kept
+/// for compatibility with the P3-A1 focus contract.
+pub const INSPECTOR_SELECTION_BASE: usize = INSPECTOR_CONTEXT_ROWS;
 pub const INSPECTOR_ACTIVITY_START: u32 = 7;
+
+/// Which Inspector surface owns the displayed list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InspectorView {
+    Session,
+    Timeline,
+}
 
 pub fn inspector_command_row(index: usize) -> u32 {
     INSPECTOR_ACTIVITY_START + index as u32
 }
 
-/// Translate an Inspector click into the stable selection index used by App.
-/// Section labels, empty space, and the detail surface are not selectable.
-pub fn inspector_selection_at_row(
-    row: u32,
-    command_count: usize,
-    viewport_rows: u32,
-) -> Option<usize> {
-    if (1..=INSPECTOR_CONTEXT_ROWS as u32).contains(&row) {
-        return Some(row as usize - 1);
-    }
-    let start = INSPECTOR_ACTIVITY_START;
-    let end = start.saturating_add(command_count as u32);
-    if row >= start && row < end && row < viewport_rows {
-        return Some(INSPECTOR_CONTEXT_ROWS + (row - start) as usize);
-    }
-    None
+/// Selection value stored by App for a zero-based displayed command.
+pub fn inspector_selection_for_command(index: usize) -> usize {
+    INSPECTOR_SELECTION_BASE + index
+}
+
+/// Zero-based displayed command for a stored selection value.
+pub fn inspector_command_position(selection: usize) -> Option<usize> {
+    selection.checked_sub(INSPECTOR_SELECTION_BASE)
 }
 
 pub fn inspector_detail_start(command_count: usize) -> u32 {
     INSPECTOR_ACTIVITY_START
         .saturating_add(command_count as u32)
         .saturating_add(1)
+}
+
+/// Session-mode command rows are contiguous from the activity start and
+/// clipped by the viewport. The detail card never shares those rows.
+pub fn inspector_session_visible_commands(viewport_rows: u32, command_count: usize) -> usize {
+    command_count.min(viewport_rows.saturating_sub(INSPECTOR_ACTIVITY_START) as usize)
+}
+
+/// Command index for a session-mode row. Header rows, the section label,
+/// the selected-command card, and rows beyond the viewport are not targets.
+pub fn inspector_session_command_at_row(
+    row: u32,
+    command_count: usize,
+    viewport_rows: u32,
+) -> Option<usize> {
+    if row < INSPECTOR_ACTIVITY_START {
+        return None;
+    }
+    let index = (row - INSPECTOR_ACTIVITY_START) as usize;
+    (index < inspector_session_visible_commands(viewport_rows, command_count)).then_some(index)
+}
+
+/// Fixed geometry for a Timeline event row at the 32-column Inspector.
+///
+/// The status dot lives in the pixel gutter before the index. Index, badge,
+/// and command are measured in terminal cells; the command owns the
+/// remainder of the row. Exit/duration metadata is only painted when it
+/// leaves a genuinely readable command budget, so narrow rows spend their
+/// cells on the command and the selected-event preview carries the detail.
+pub const TIMELINE_INDEX_COL: u32 = 2;
+pub const TIMELINE_BADGE_COL: u32 = 6;
+pub const TIMELINE_COMMAND_COL: u32 = 9;
+pub const TIMELINE_RIGHT_INSET: u32 = 2;
+pub const TIMELINE_MIN_COMMAND_CELLS: usize = 16;
+pub const TIMELINE_METADATA_MIN_COLS: u32 = 40;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineRowLayout {
+    pub command_col: u32,
+    pub command_budget: usize,
+    pub status_col: Option<u32>,
+    pub status: String,
+}
+
+impl TimelineRowLayout {
+    pub fn command_text(&self, command: &str) -> String {
+        truncate_to_cells(&single_line(command), self.command_budget)
+    }
+}
+
+/// Lay out the command/status fields for one Timeline row in `cols` cells.
+/// The returned budgets include the ellipsis, so every painted field fits.
+pub fn timeline_row_layout(cols: u32, exit: &str, duration: &str) -> TimelineRowLayout {
+    let command_col = TIMELINE_COMMAND_COL;
+    let base_budget = cols.saturating_sub(TIMELINE_RIGHT_INSET.saturating_add(command_col));
+    let status = format!(
+        "{} {}",
+        single_line(exit).trim(),
+        single_line(duration).trim()
+    )
+    .trim()
+    .to_string();
+    let status_cells = text_cells(&status) as u32;
+    if status_cells == 0 || cols <= command_col {
+        return TimelineRowLayout {
+            command_col,
+            command_budget: base_budget as usize,
+            status_col: None,
+            status,
+        };
+    }
+    let status_col = cols.saturating_sub(TIMELINE_RIGHT_INSET.saturating_add(status_cells));
+    let readable = cols >= TIMELINE_METADATA_MIN_COLS
+        && status_col >= command_col.saturating_add(TIMELINE_MIN_COMMAND_CELLS as u32 + 1);
+    if readable {
+        TimelineRowLayout {
+            command_col,
+            command_budget: status_col.saturating_sub(command_col).saturating_sub(1) as usize,
+            status_col: Some(status_col),
+            status,
+        }
+    } else {
+        TimelineRowLayout {
+            command_col,
+            command_budget: base_budget as usize,
+            status_col: None,
+            status,
+        }
+    }
+}
+
+/// One rendered Timeline row, composed once so rendering and tests consume
+/// the same measurement and truncation decisions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineRowModel {
+    pub row: u32,
+    pub position: usize,
+    pub index_label: String,
+    pub session_badge: String,
+    pub command_text: String,
+    pub command_col: u32,
+    pub status_text: Option<String>,
+    pub status_col: Option<u32>,
+    pub failed: bool,
+}
+
+/// Stable view-local session badges in first-seen order. The badge is a
+/// display alias; the selected preview and provenance always keep the full
+/// recorded session identity.
+pub fn timeline_session_badges(commands: &[CommandRow]) -> Vec<String> {
+    let mut sessions: Vec<&str> = Vec::new();
+    commands
+        .iter()
+        .map(|command| {
+            let index = sessions
+                .iter()
+                .position(|session| *session == command.session)
+                .unwrap_or_else(|| {
+                    sessions.push(command.session.as_str());
+                    sessions.len() - 1
+                });
+            format!("S{}", index + 1)
+        })
+        .collect()
+}
+
+/// Build the visible Timeline rows for the current layout. Hidden entries
+/// are never composed, rendered, or selectable.
+pub fn timeline_display_rows(
+    commands: &[CommandRow],
+    viewport_rows: u32,
+    expanded: bool,
+    cols: u32,
+) -> Vec<TimelineRowModel> {
+    let layout = timeline_layout(viewport_rows, commands.len(), expanded);
+    let badges = timeline_session_badges(commands);
+    commands
+        .iter()
+        .take(layout.visible_commands)
+        .enumerate()
+        .map(|(position, command)| {
+            let row_layout = timeline_row_layout(cols, &command.exit, &command.duration);
+            let status_text = row_layout
+                .status_col
+                .map(|_| row_layout.status.clone())
+                .filter(|status| !status.is_empty());
+            TimelineRowModel {
+                row: layout.list_start.saturating_add(position as u32),
+                position,
+                index_label: format!("{:02}", position + 1),
+                session_badge: badges
+                    .get(position)
+                    .cloned()
+                    .unwrap_or_else(|| "S?".to_string()),
+                command_text: row_layout.command_text(&command.command),
+                command_col: row_layout.command_col,
+                status_text,
+                status_col: row_layout.status_col,
+                failed: !matches!(command.exit.as_str(), "0" | "—"),
+            }
+        })
+        .collect()
+}
+
+/// Vertical allocation for Timeline mode. The list is primary; the compact
+/// selected-event preview is only reserved when there is room left after a
+/// useful list, and the provenance row always wins the final row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineLayout {
+    pub list_start: u32,
+    pub list_end: u32,
+    pub visible_commands: usize,
+    pub preview_start: Option<u32>,
+    pub preview_rows: u32,
+    pub footer_row: u32,
+}
+
+impl TimelineLayout {
+    pub fn command_at_row(&self, row: u32) -> Option<usize> {
+        if row < self.list_start || row >= self.list_end {
+            return None;
+        }
+        let position = (row - self.list_start) as usize;
+        (position < self.visible_commands).then_some(position)
+    }
+}
+
+pub fn timeline_layout(viewport_rows: u32, command_count: usize, expanded: bool) -> TimelineLayout {
+    if viewport_rows == 0 {
+        return TimelineLayout {
+            list_start: 0,
+            list_end: 0,
+            visible_commands: 0,
+            preview_start: None,
+            preview_rows: 0,
+            footer_row: 0,
+        };
+    }
+    let footer_row = viewport_rows - 1;
+    let list_start = INSPECTOR_ACTIVITY_START.min(footer_row);
+    let available = footer_row.saturating_sub(list_start);
+    // Keep at least two real event rows before spending space on a preview.
+    let (preview_rows, list_rows) = if available >= 7 {
+        let preview = if expanded {
+            available.saturating_sub(2).min(10)
+        } else {
+            5.min(available.saturating_sub(2))
+        };
+        (preview, available - preview)
+    } else {
+        (0, available)
+    };
+    let list_end = list_start.saturating_add(list_rows);
+    let preview_start = (preview_rows > 0).then_some(list_end);
+    TimelineLayout {
+        list_start,
+        list_end,
+        visible_commands: command_count.min(list_rows as usize),
+        preview_start,
+        preview_rows,
+        footer_row,
+    }
+}
+
+/// Row for the honest empty/unavailable message. It stays inside the
+/// viewport and never shares the provenance row.
+pub fn timeline_empty_row(viewport_rows: u32) -> Option<u32> {
+    if viewport_rows < 3 {
+        return None;
+    }
+    let footer = viewport_rows - 1;
+    Some(INSPECTOR_ACTIVITY_START.min(footer.saturating_sub(1)))
+}
+
+/// Visible command count for the active Inspector view. Navigation and hit
+/// testing both consume this, so hidden entries cannot be selected.
+pub fn inspector_visible_commands(
+    view: InspectorView,
+    viewport_rows: u32,
+    command_count: usize,
+    expanded: bool,
+) -> usize {
+    match view {
+        InspectorView::Session => inspector_session_visible_commands(viewport_rows, command_count),
+        InspectorView::Timeline => {
+            timeline_layout(viewport_rows, command_count, expanded).visible_commands
+        }
+    }
+}
+
+/// Translate an Inspector click into the stable selection index used by App.
+/// Only visible command rows are targets; section labels, the preview,
+/// provenance, and hidden entries are not selectable.
+pub fn inspector_selection_at_row(
+    view: InspectorView,
+    row: u32,
+    command_count: usize,
+    viewport_rows: u32,
+    expanded: bool,
+) -> Option<usize> {
+    let position = match view {
+        InspectorView::Session => {
+            inspector_session_command_at_row(row, command_count, viewport_rows)
+        }
+        InspectorView::Timeline => {
+            timeline_layout(viewport_rows, command_count, expanded).command_at_row(row)
+        }
+    };
+    position.map(inspector_selection_for_command)
+}
+
+/// Right-aligned Timeline header descriptor column, if it can sit clear of
+/// the measured title with at least one empty cell between them.
+pub fn inspector_header_descriptor_col(cols: u32, title: &str, descriptor: &str) -> Option<u32> {
+    let title_end = 4u32.saturating_add(text_cells(title) as u32);
+    let descriptor_cells = text_cells(descriptor) as u32;
+    if descriptor_cells == 0 {
+        return None;
+    }
+    let col = cols
+        .saturating_sub(TIMELINE_RIGHT_INSET)
+        .saturating_sub(descriptor_cells);
+    (col > title_end).then_some(col)
+}
+
+/// Preview heading plus a truthful Enter affordance when it fits.
+pub fn timeline_preview_heading(
+    cols: u32,
+    expanded: bool,
+) -> (&'static str, Option<(&'static str, u32)>) {
+    let label = "SELECTED EVENT";
+    let hint = if expanded {
+        "ENTER COLLAPSE"
+    } else {
+        "ENTER EXPAND"
+    };
+    let hint_col = cols
+        .saturating_sub(TIMELINE_RIGHT_INSET)
+        .saturating_sub(text_cells(hint) as u32);
+    let label_end = 2u32.saturating_add(text_cells(label) as u32);
+    if hint_col >= label_end {
+        (label, Some((hint, hint_col)))
+    } else {
+        (label, None)
+    }
 }
 
 /// Read-only snapshot for the first Contextual Inspector slice.
@@ -1236,6 +1810,7 @@ pub struct InspectorSnapshot {
     pub exit: String,
     pub commands: Vec<CommandRow>,
     pub timeline: Vec<CommandRow>,
+    pub timeline_availability: TimelineAvailability,
 }
 
 /// Dirty-flagged cache for Inspector snapshots.
@@ -1376,6 +1951,7 @@ mod inspector_cache_tests {
             exit: "—".to_string(),
             commands: Vec::new(),
             timeline: Vec::new(),
+            timeline_availability: TimelineAvailability::Recorded,
         };
         cache.commit_refresh(
             1,
@@ -1402,6 +1978,7 @@ mod inspector_cache_tests {
             exit: "—".to_string(),
             commands: Vec::new(),
             timeline: Vec::new(),
+            timeline_availability: TimelineAvailability::Recorded,
         };
         cache.commit_refresh(
             1,
@@ -1427,6 +2004,7 @@ mod inspector_cache_tests {
             exit: "—".to_string(),
             commands: Vec::new(),
             timeline: Vec::new(),
+            timeline_availability: TimelineAvailability::Recorded,
         };
         cache.commit_refresh(
             1,
