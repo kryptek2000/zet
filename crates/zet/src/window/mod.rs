@@ -16,6 +16,9 @@ use zet_gpu::input::{
     is_agent_toggle, is_close_tab, is_copy, is_cycle_tab, is_inspector_toggle, is_new_tab,
     is_paste, is_rail_toggle, is_search, is_select_all, translate,
 };
+use zet_gpu::presentation::{
+    UI_BODY, UI_BRAND, UI_COMMAND, UI_HEADER, UI_META, UI_OUTPUT, UI_SECTION, UI_SESSION, UI_VALUE,
+};
 use zet_gpu::selection::Selection;
 use zet_gpu::Renderer;
 use zet_pty::shell::ShellState;
@@ -29,6 +32,10 @@ const HOOKS: [(&str, &str); 2] = [
     ("bash", "zet-integration.bash"),
     ("zsh", "zet-integration.zsh"),
 ];
+
+/// Three compact pixel rows reserve enough vertical room for Aperture's
+/// identity/header band while leaving Terminal Focus completely untouched.
+const APP_CHROME_ROWS: usize = 3;
 
 fn shell_program() -> (String, Option<String>) {
     let prog = std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string());
@@ -217,6 +224,15 @@ struct App {
     rail_sel: usize,
     chrome: panels::ChromeCache,
     inspector_sel: Option<usize>,
+    /// Recorded block id backing the current command selection, scoped to
+    /// the active session/store. Visual row indices remain in
+    /// `inspector_sel`.
+    inspector_sel_id: Option<i64>,
+    /// Bounded, sanitized output for the currently selected recorded
+    /// command, if available.
+    inspector_output: Option<String>,
+    inspector_output_id: Option<i64>,
+    inspector_output_truncated: bool,
     inspector_cache: panels::InspectorCache,
     #[cfg(test)]
     pub chrome_query_count: usize,
@@ -889,10 +905,15 @@ impl App {
         }
     }
 
-    /// Tab bar owns row 0 whenever more than one tab exists; the
-    /// terminal grid shrinks by that row (all mappings offset).
+    /// Aperture's integrated chrome owns a compact pixel-oriented band
+    /// whenever tabs need a tab bar or a contextual panel is visible.
+    /// Terminal Focus with one tab remains a full-height terminal.
     fn bar_rows(&self) -> usize {
-        (self.tabs.len() > 1) as usize
+        if self.tabs.len() > 1 || self.layout.rail || self.layout.inspector {
+            APP_CHROME_ROWS
+        } else {
+            0
+        }
     }
 
     /// Width of the currently resolved rail, in columns. Zero in the
@@ -900,6 +921,35 @@ impl App {
     /// unchanged until a rail is actually enabled.
     fn rail_cols(&self) -> usize {
         self.frame_layout().rail.map_or(0, |vp| vp.cols as usize)
+    }
+
+    fn hovered_rail_row(&self) -> Option<u32> {
+        let rail_cols = self.rail_cols();
+        let (x, y) = self.mouse_px?;
+        let renderer = self.renderer.as_ref()?;
+        let (cw, ch) = renderer.cell_px();
+        let rail_width = rail_cols as f64 * cw.max(1) as f64;
+        let top = self.bar_rows() as f64 * ch.max(1) as f64;
+        if x < 0.0 || x >= rail_width || y < top {
+            return None;
+        }
+        let row = ((y - top) / ch.max(1) as f64).floor() as u32;
+        (row < self.rows.saturating_sub(self.bar_rows()) as u32).then_some(row)
+    }
+
+    fn hovered_inspector_row(&self) -> Option<u32> {
+        let vp = self.frame_layout().inspector?;
+        let (x, y) = self.mouse_px?;
+        let renderer = self.renderer.as_ref()?;
+        let (cw, ch) = renderer.cell_px();
+        let left = vp.x as f64 * cw.max(1) as f64;
+        let right = (vp.x + vp.cols) as f64 * cw.max(1) as f64;
+        let top = vp.y as f64 * ch.max(1) as f64;
+        let bottom = (vp.y + vp.rows) as f64 * ch.max(1) as f64;
+        if x < left || x >= right || y < top || y >= bottom {
+            return None;
+        }
+        Some(((y - top) / ch.max(1) as f64).floor() as u32)
     }
 
     #[allow(dead_code)]
@@ -928,11 +978,19 @@ impl App {
             if self.focus == Focus::Inspector {
                 self.focus = Focus::Terminal;
                 self.inspector_sel = None;
+                self.inspector_sel_id = None;
+                self.inspector_output = None;
+                self.inspector_output_id = None;
+                self.inspector_output_truncated = false;
             }
             return;
         }
         if self.inspector_cache.last_active != self.active {
             self.inspector_sel = None;
+            self.inspector_sel_id = None;
+            self.inspector_output = None;
+            self.inspector_output_id = None;
+            self.inspector_output_truncated = false;
         }
         let phase = self
             .tabs
@@ -958,6 +1016,10 @@ impl App {
             // Same session: retain the existing selection.
         } else if self.inspector_cache.last_session_id.is_some() {
             self.inspector_sel = None;
+            self.inspector_sel_id = None;
+            self.inspector_output = None;
+            self.inspector_output_id = None;
+            self.inspector_output_truncated = false;
         }
         let cheap_changed = self.inspector_cache.cheap_changed(
             session_id,
@@ -970,33 +1032,93 @@ impl App {
         if !cheap_changed && !self.inspector_cache.poll_due(now) {
             return;
         }
-        #[cfg(test)]
-        {
-            // Keep test builds quiet; no counters are required for the
-            // first Inspector slice.
-        }
         let session_id = self
             .tabs
             .get(self.active)
             .map(|tab| tab.session_id)
             .unwrap_or(0);
+        let block_count = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.recorder.as_ref())
+            .map(|recorder| recorder.block_count())
+            .unwrap_or(0);
+        if !cheap_changed && block_count == self.inspector_cache.last_blocks {
+            if let Some(id) = self.inspector_sel_id {
+                if !self
+                    .inspector_cache
+                    .snapshot()
+                    .map(|snapshot| snapshot.commands.iter().any(|command| command.id == id))
+                    .unwrap_or(false)
+                {
+                    self.inspector_sel = None;
+                    self.inspector_sel_id = None;
+                    self.inspector_output = None;
+                    self.inspector_output_id = None;
+                    self.inspector_output_truncated = false;
+                }
+            }
+            self.sync_inspector_output();
+            self.inspector_cache.mark_refreshed(now);
+            return;
+        }
         let snapshot = self.build_inspector_snapshot();
+        if let Some(id) = self.inspector_sel_id {
+            if let Some(pos) = snapshot
+                .commands
+                .iter()
+                .position(|command| command.id == id)
+            {
+                self.inspector_sel = Some(panels::INSPECTOR_CONTEXT_ROWS + pos);
+            } else {
+                self.inspector_sel = None;
+                self.inspector_sel_id = None;
+                self.inspector_output = None;
+                self.inspector_output_id = None;
+                self.inspector_output_truncated = false;
+            }
+        }
         self.inspector_cache.commit_refresh(
             session_id,
             self.active,
             phase,
-            cwd,
+            cwd.clone(),
             tab_count,
             active_dead,
             snapshot,
             now,
         );
+        self.inspector_cache.last_blocks = block_count;
+        self.sync_inspector_output();
+    }
+
+    fn sync_inspector_output(&mut self) {
+        let selected_id = self.inspector_sel_id;
+        if selected_id == self.inspector_output_id {
+            if selected_id.is_none() {
+                self.inspector_output = None;
+            }
+            return;
+        }
+        self.inspector_output_id = selected_id;
+        let preview = selected_id.and_then(|id| {
+            let tab = self.tabs.get(self.active)?;
+            let recorder = tab.recorder.as_ref()?;
+            recorder.output_preview(id, 4096).ok().flatten()
+        });
+        self.inspector_output_truncated = preview
+            .as_ref()
+            .map(|preview| preview.truncated)
+            .unwrap_or(false);
+        self.inspector_output = preview.map(|preview| {
+            panels::sanitize_inspector_output(&zet_blocks::scrub_secrets(&preview.text), 4096)
+        });
     }
 
     fn build_inspector_snapshot(&self) -> panels::InspectorSnapshot {
         let tab = self.tabs.get(self.active);
         let raw_cwd = tab.map(|tab| shell_cwd(&tab.session)).unwrap_or_default();
-        let cwd = panels::sanitize_inspector_text(&raw_cwd, 64);
+        let cwd = panels::sanitize_inspector_text(&zet_blocks::scrub_secrets(&raw_cwd), 64);
         let state = tab
             .map(|tab| {
                 if tab.dead {
@@ -1020,12 +1142,48 @@ impl App {
         } else {
             cwd
         };
+        // Real recorded commands for the active session. Bounded to 8 and
+        // without output blobs (recent_commands). Scrub secrets at display
+        // time too, so legacy unsanitized rows cannot leak.
+        let commands: Vec<panels::CommandRow> = tab
+            .and_then(|tab| tab.recorder.as_ref())
+            .map(|recorder| {
+                recorder
+                    .recent_commands(8)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|block| panels::CommandRow {
+                        id: block.id,
+                        command: zet_blocks::scrub_secrets(&block.command),
+                        exit: block.exit_code.to_string(),
+                        duration: format!("{}ms", block.duration_ms),
+                        cwd: panels::sanitize_inspector_text(
+                            &zet_blocks::scrub_secrets(&block.cwd),
+                            64,
+                        ),
+                        git_branch: zet_blocks::scrub_secrets(&block.git_branch),
+                        provenance: panels::Provenance::Observed,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Normalise empty cwd to "—".
+        let commands = commands
+            .into_iter()
+            .map(|mut row| {
+                if row.cwd.is_empty() {
+                    row.cwd = "—".to_string();
+                }
+                row
+            })
+            .collect();
         panels::InspectorSnapshot {
             active: self.active,
             session,
             cwd,
             state,
             exit,
+            commands,
         }
     }
 
@@ -1149,13 +1307,12 @@ impl App {
                     .unwrap_or_default()
                     .into_iter()
                     .map(|block| panels::CommandRow {
+                        id: block.id,
                         command: block.command,
                         exit: block.exit_code.to_string(),
-                        duration: if block.duration_ms == 0 {
-                            "—".to_string()
-                        } else {
-                            format!("{}ms", block.duration_ms)
-                        },
+                        duration: format!("{}ms", block.duration_ms),
+                        cwd: block.cwd,
+                        git_branch: block.git_branch,
                         provenance: panels::Provenance::Observed,
                     })
                     .collect()
@@ -1215,6 +1372,10 @@ impl App {
         if !self.layout.inspector {
             self.focus = Focus::Terminal;
             self.inspector_sel = None;
+            self.inspector_sel_id = None;
+            self.inspector_output = None;
+            self.inspector_output_id = None;
+            self.inspector_output_truncated = false;
         }
         self.inspector_cache.mark_dirty();
         self.fit_all();
@@ -1223,11 +1384,12 @@ impl App {
 
     fn handle_mouse_click(&mut self, x: f64, y: f64, cw: u32, ch: u32) {
         self.needs_draw = true;
-        // Tab bar owns pixel row 0: clicks switch tabs.
+        // The bottom row of Aperture's compact header owns tab switching;
+        // identity/header pixels above it are not ghost controls.
         if self.bar_rows() > 0
             && x >= 0.0
             && y >= 0.0
-            && (y / ch.max(1) as f64).floor() as usize == 0
+            && (y / ch.max(1) as f64).floor() as usize == self.bar_rows() - 1
         {
             let col = (x / cw.max(1) as f64).floor() as usize;
             if col >= self.cols {
@@ -1243,6 +1405,10 @@ impl App {
                 self.rail_sel = seg;
                 self.inspector_cache.mark_dirty();
                 self.inspector_sel = None;
+                self.inspector_sel_id = None;
+                self.inspector_output = None;
+                self.inspector_output_id = None;
+                self.inspector_output_truncated = false;
                 self.focus = Focus::Terminal;
                 self.needs_draw = true;
                 self.retitle();
@@ -1260,6 +1426,24 @@ impl App {
                 let row = ((y - top) / ch as f64).floor() as usize as u32;
                 if let Some(session) = panels::rail_row_target(row, self.tabs.len(), vp.rows) {
                     self.rail_sel = session;
+                } else if let Some(command_index) = self.chrome.snapshot().and_then(|snapshot| {
+                    panels::rail_command_at_row(
+                        row,
+                        snapshot.sessions.len(),
+                        snapshot.commands.len(),
+                        vp.rows,
+                    )
+                }) {
+                    self.inspector_sel = Some(panels::INSPECTOR_CONTEXT_ROWS + command_index);
+                    self.inspector_sel_id = self
+                        .chrome
+                        .snapshot()
+                        .and_then(|snapshot| snapshot.commands.get(command_index))
+                        .map(|command| command.id);
+                    self.inspector_output = None;
+                    self.inspector_output_id = None;
+                    self.inspector_output_truncated = false;
+                    self.sync_inspector_output();
                 }
                 self.focus = Focus::Rail;
                 self.needs_draw = true;
@@ -1276,11 +1460,28 @@ impl App {
             if x >= left && x < right && y >= top && y < bottom {
                 self.focus = Focus::Inspector;
                 let row = ((y - top) / ch as f64).floor() as usize;
-                self.inspector_sel = if (1..=4).contains(&row) && (row as u32) < insp_vp.rows {
-                    Some(row - 1)
-                } else {
-                    None
-                };
+                let cmd_count = self
+                    .inspector_cache
+                    .snapshot()
+                    .map(|s| s.commands.len())
+                    .unwrap_or(0);
+                let new_sel =
+                    panels::inspector_selection_at_row(row as u32, cmd_count, insp_vp.rows);
+                self.inspector_sel = new_sel;
+                self.inspector_output = None;
+                self.inspector_output_id = None;
+                self.inspector_output_truncated = false;
+                self.inspector_sel_id = new_sel.and_then(|index| {
+                    if index >= panels::INSPECTOR_CONTEXT_ROWS {
+                        self.inspector_cache
+                            .snapshot()
+                            .and_then(|s| s.commands.get(index - panels::INSPECTOR_CONTEXT_ROWS))
+                            .map(|command| command.id)
+                    } else {
+                        None
+                    }
+                });
+                self.sync_inspector_output();
                 self.needs_draw = true;
                 return;
             }
@@ -1307,20 +1508,209 @@ impl App {
         }
     }
 
+    fn draw_panel_card(
+        r: &mut Renderer,
+        vp: zet_gpu::renderer::Viewport,
+        row: u32,
+        rows: u32,
+        fill: zet_gpu::quad::Rgba,
+        border: zet_gpu::quad::Rgba,
+    ) {
+        let (cw, ch) = r.cell_px();
+        let x = vp.x.saturating_mul(cw).saturating_add(4);
+        let y =
+            vp.y.saturating_add(row)
+                .saturating_mul(ch)
+                .saturating_add(2);
+        let width = vp.cols.saturating_mul(cw).saturating_sub(8);
+        let height = rows.saturating_mul(ch).saturating_sub(4);
+        if width < 4 || height < 4 {
+            return;
+        }
+        r.draw_chamfered_panel_px(x, y, width, height, 5, fill, border);
+    }
+
+    /// Cell-addressed callers can still express panel rows in the existing
+    /// layout model, but their text is placed in pixel space with an explicit
+    /// presentation role. This keeps mouse/layout contracts cell-safe while
+    /// removing chrome typography from the terminal glyph grid.
+    fn draw_ui_row(
+        r: &mut Renderer,
+        vp: zet_gpu::renderer::Viewport,
+        row: u32,
+        col: u32,
+        text: &str,
+        style: zet_gpu::presentation::UiTextStyle,
+        ink: zet_gpu::quad::Rgba,
+    ) {
+        if row >= vp.rows || col >= vp.cols {
+            return;
+        }
+        let (cw, ch) = r.cell_px();
+        let x = (vp.x.saturating_add(col)).saturating_mul(cw) as f32;
+        let row_top = (vp.y.saturating_add(row)).saturating_mul(ch) as f32;
+        let baseline =
+            row_top + ((ch as f32 - style.line_height_px).max(0.0) * 0.5) + style.baseline_offset();
+        let max_width = vp.cols.saturating_sub(col).saturating_mul(cw);
+        r.draw_ui_text_px(x, baseline, text, style, ink, Some(max_width));
+    }
+
+    /// Draw one indexed rail heading with a quiet datum line. The line gives
+    /// each section a visual home without turning every row into a bordered
+    /// card.
+    fn draw_indexed_section(
+        r: &mut Renderer,
+        vp: zet_gpu::renderer::Viewport,
+        row: u32,
+        index: &str,
+        title: &str,
+        index_ink: zet_gpu::quad::Rgba,
+        title_ink: zet_gpu::quad::Rgba,
+    ) {
+        use zet_gpu::renderer::PANEL_BORDER;
+
+        if row >= vp.rows {
+            return;
+        }
+        Self::draw_ui_row(r, vp, row, 1, index, UI_SECTION, index_ink);
+        Self::draw_ui_row(r, vp, row, 4, title, UI_SECTION, title_ink);
+
+        let (cw, ch) = r.cell_px();
+        let title_end =
+            vp.x.saturating_add(4)
+                .saturating_add(panels::text_cells(title) as u32 + 1)
+                .saturating_mul(cw);
+        let right =
+            vp.x.saturating_add(vp.cols)
+                .saturating_mul(cw)
+                .saturating_sub(10);
+        if right > title_end {
+            r.draw_rect_px(
+                title_end,
+                vp.y.saturating_add(row)
+                    .saturating_mul(ch)
+                    .saturating_add(ch.saturating_sub(4)),
+                right.saturating_sub(title_end),
+                1,
+                PANEL_BORDER,
+            );
+        }
+    }
+
+    /// Paint a command as two aligned information fields: the command owns
+    /// the left hierarchy, while the observed exit and duration stay legible
+    /// at the right edge. This prevents long commands from visually colliding
+    /// with their evidence metadata.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_command_summary_row(
+        r: &mut Renderer,
+        vp: zet_gpu::renderer::Viewport,
+        row: u32,
+        text_col: u32,
+        right_inset: u32,
+        command: &panels::CommandRow,
+        command_ink: zet_gpu::quad::Rgba,
+        status_ink: zet_gpu::quad::Rgba,
+    ) {
+        if row >= vp.rows || text_col >= vp.cols {
+            return;
+        }
+        let status = format!("exit {}  {}", command.exit, command.duration);
+        let status_cells = panels::text_cells(&status) as u32;
+        let status_col = vp
+            .cols
+            .saturating_sub(right_inset)
+            .saturating_sub(status_cells);
+        let text_budget = status_col.saturating_sub(text_col.saturating_add(1));
+        let command_text = panels::truncate_to_cells(&command.command, text_budget as usize);
+        if !command_text.is_empty() {
+            Self::draw_ui_row(r, vp, row, text_col, &command_text, UI_BODY, command_ink);
+        }
+        if status_col > text_col {
+            Self::draw_ui_row(r, vp, row, status_col, &status, UI_META, status_ink);
+        }
+    }
+
     fn draw_rail(
         r: &mut Renderer,
         vp: zet_gpu::renderer::Viewport,
         snapshot: &panels::RailSnapshot,
         selected: usize,
+        selected_command: Option<i64>,
+        hovered_row: Option<u32>,
         focused: bool,
     ) {
         use zet_gpu::renderer::{
-            RAIL_ACCENT, RAIL_ACTIVE_BG, RAIL_BAD, RAIL_BORDER, RAIL_DIM_INK, RAIL_FOCUS,
-            RAIL_FOOTER_BG, RAIL_FOOTER_INK, RAIL_HEADER_INK, RAIL_OK, RAIL_SECTION_INK,
-            RAIL_SELECTED_BG, RAIL_TEXT_INK,
+            PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_DANGER, PANEL_INSET, PANEL_RED, PANEL_SECONDARY,
+            PANEL_TEAL, PANEL_TEXT, PANEL_VIOLET, RAIL_ACCENT, RAIL_ACTIVE_BG, RAIL_BORDER,
+            RAIL_DIM_INK, RAIL_FOCUS, RAIL_FOOTER_BG, RAIL_FOOTER_INK, RAIL_HEADER_INK,
+            RAIL_HOVER_BG, RAIL_SECTION_INK, RAIL_SELECTED_BG, RAIL_TEXT_INK,
         };
-        // The rightmost rail cell is the panel rule, so content uses the
-        // remaining columns. This keeps text out of the terminal grid.
+        let (cw, ch) = r.cell_px();
+        let origin_x = vp.x.saturating_mul(cw);
+        let origin_y = vp.y.saturating_mul(ch);
+        let rail_w = vp.cols.saturating_mul(cw);
+        let rail_h = vp.rows.saturating_mul(ch);
+
+        // Architectural chamfered frame for Mission Rail (cut top-left and cut bottom-left)
+        r.draw_chamfered_panel_px(
+            origin_x.saturating_add(2),
+            origin_y.saturating_add(2),
+            rail_w.saturating_sub(4),
+            rail_h.saturating_sub(4),
+            10,
+            zet_gpu::renderer::RAIL_BG,
+            RAIL_BORDER,
+        );
+        r.draw_rect_px(
+            origin_x,
+            origin_y,
+            if focused { 2 } else { 1 },
+            rail_h,
+            if focused {
+                RAIL_FOCUS
+            } else {
+                PANEL_BORDER_STRONG
+            },
+        );
+
+        // Precision corner brackets on the chamfered cuts
+        r.draw_line_px(
+            origin_x as f32 + 2.0,
+            origin_y as f32 + 12.0,
+            origin_x as f32 + 12.0,
+            origin_y as f32 + 2.0,
+            2.0,
+            if focused {
+                PANEL_CYAN
+            } else {
+                PANEL_BORDER_STRONG
+            },
+        );
+        r.draw_line_px(
+            origin_x as f32 + 2.0,
+            origin_y as f32 + rail_h as f32 - 12.0,
+            origin_x as f32 + 12.0,
+            origin_y as f32 + rail_h as f32 - 2.0,
+            2.0,
+            if focused {
+                PANEL_CYAN
+            } else {
+                PANEL_BORDER_STRONG
+            },
+        );
+
+        // Vertical indexed spine connecting sections 01..04
+        let spine_x = origin_x.saturating_add(14);
+        r.draw_rect_px(
+            spine_x,
+            origin_y.saturating_add(ch),
+            1,
+            rail_h.saturating_sub(ch * 2),
+            PANEL_BORDER_STRONG,
+        );
+
+        // Content viewport (leaving 1 column for border)
         let content_cols = vp.cols.saturating_sub(1).max(1);
         let content = zet_gpu::renderer::Viewport {
             x: vp.x,
@@ -1336,30 +1726,75 @@ impl App {
         );
 
         let rows = panels::rail_rows(vp.rows, snapshot.sessions.len(), snapshot.commands.len());
+        let footer_row = vp.rows.saturating_sub(1);
+        let resources_row = rows
+            .iter()
+            .enumerate()
+            .take(footer_row as usize)
+            .rev()
+            .find_map(|(row, kind)| {
+                (row >= 4 && matches!(kind, panels::RailRow::Empty)).then_some(row as u32)
+            });
+
         for (row, kind) in rows.into_iter().enumerate() {
             let row = row as u32;
+            let node_y = origin_y + row * ch + ch / 2;
             match kind {
                 panels::RailRow::Header => {
-                    r.draw_fill(
-                        zet_gpu::renderer::Viewport {
-                            x: vp.x,
-                            y: vp.y + row,
-                            cols: 1,
-                            rows: 1,
-                        },
+                    r.draw_status_dot_px(spine_x, node_y, 3, RAIL_ACCENT, None);
+                    Self::draw_indexed_section(
+                        r,
+                        content,
+                        row,
+                        "01",
+                        "WORKSPACE",
                         RAIL_ACCENT,
+                        RAIL_HEADER_INK,
                     );
-                    r.draw_text_row(content, row, 2, "ZET", RAIL_HEADER_INK);
                 }
                 panels::RailRow::Mode => {
-                    r.draw_text_row(content, row, 1, "WORKSPACE", RAIL_SECTION_INK);
+                    Self::draw_ui_row(r, content, row, 4, "CWD", UI_META, PANEL_CYAN);
+                    let ws_path = if snapshot.footer.is_empty() {
+                        "/tmp"
+                    } else {
+                        &snapshot.footer
+                    };
+                    Self::draw_ui_row(
+                        r,
+                        content,
+                        row,
+                        8,
+                        &panels::truncate_to_cells(
+                            ws_path,
+                            content_cols.saturating_sub(9) as usize,
+                        ),
+                        UI_BODY,
+                        PANEL_SECONDARY,
+                    );
                 }
                 panels::RailRow::SessionsHeader => {
-                    r.draw_text_row(content, row, 1, "SESSIONS", RAIL_SECTION_INK);
+                    r.draw_status_dot_px(spine_x, node_y, 3, RAIL_ACCENT, None);
+                    Self::draw_indexed_section(
+                        r,
+                        content,
+                        row,
+                        "02",
+                        "SESSIONS",
+                        RAIL_ACCENT,
+                        RAIL_SECTION_INK,
+                    );
                     let count = snapshot.sessions.len().to_string();
                     let count_col = content_cols.saturating_sub(panels::text_cells(&count) as u32);
-                    if count_col > 1 {
-                        r.draw_text_row(content, row, count_col, &count, RAIL_DIM_INK);
+                    if count_col > 4 {
+                        Self::draw_ui_row(
+                            r,
+                            content,
+                            row,
+                            count_col,
+                            &count,
+                            UI_META,
+                            RAIL_DIM_INK,
+                        );
                     }
                 }
                 panels::RailRow::Session(index) => {
@@ -1368,108 +1803,72 @@ impl App {
                     };
                     let is_active = index == snapshot.active;
                     let is_selected = index == selected;
-                    // In terminal focus the live tab is the strong card; the
-                    // keyboard selection only gets its own fill once the rail
-                    // actually owns focus. This prevents a stale rail_sel from
-                    // looking like the active session.
-                    let fill = if is_selected && focused {
-                        Some(RAIL_SELECTED_BG)
-                    } else if is_active && !focused {
-                        Some(RAIL_ACTIVE_BG)
-                    } else {
-                        None
-                    };
-                    if let Some(fill) = fill {
-                        r.draw_fill(
-                            zet_gpu::renderer::Viewport {
-                                x: vp.x,
-                                y: vp.y + row,
-                                cols: content_cols,
-                                rows: 1,
-                            },
-                            fill,
-                        );
-                        if row + 1 < vp.rows {
-                            r.draw_fill(
-                                zet_gpu::renderer::Viewport {
-                                    x: vp.x,
-                                    y: vp.y + row + 1,
-                                    cols: content_cols,
-                                    rows: 1,
-                                },
-                                fill,
-                            );
-                        }
-                    }
-                    let bar = if is_selected && focused {
-                        Some(RAIL_FOCUS)
+                    let is_hovered = hovered_row
+                        .is_some_and(|hover| hover == row || hover == row.saturating_add(1));
+
+                    let card_border = if is_selected {
+                        PANEL_BORDER_STRONG
+                    } else if is_hovered {
+                        PANEL_VIOLET
                     } else if is_active {
-                        Some(RAIL_ACCENT)
+                        PANEL_BORDER_STRONG
                     } else {
-                        None
+                        RAIL_BORDER
                     };
-                    if let Some(bar) = bar {
-                        r.draw_fill(
-                            zet_gpu::renderer::Viewport {
-                                x: vp.x,
-                                y: vp.y + row,
-                                cols: 1,
-                                rows: 1,
-                            },
-                            bar,
-                        );
-                        if row + 1 < vp.rows {
-                            r.draw_fill(
-                                zet_gpu::renderer::Viewport {
-                                    x: vp.x,
-                                    y: vp.y + row + 1,
-                                    cols: 1,
-                                    rows: 1,
-                                },
-                                bar,
-                            );
-                        }
+                    let card_fill = if is_selected {
+                        RAIL_SELECTED_BG
+                    } else if is_hovered {
+                        RAIL_HOVER_BG
+                    } else if is_active {
+                        RAIL_ACTIVE_BG
+                    } else {
+                        PANEL_INSET
+                    };
+
+                    if is_active || is_selected || is_hovered {
+                        Self::draw_panel_card(r, vp, row, 2, card_fill, card_border);
                     }
 
-                    let marker = if is_active { "▸" } else { " " };
-                    let marker_ink = if is_selected && focused {
-                        RAIL_FOCUS
-                    } else if is_active {
-                        RAIL_ACCENT
-                    } else {
-                        RAIL_DIM_INK
-                    };
-                    r.draw_text_row(content, row, 1, marker, marker_ink);
+                    if is_active || is_selected {
+                        r.draw_rect_px(
+                            origin_x.saturating_add(4),
+                            origin_y
+                                .saturating_add(row.saturating_mul(ch))
+                                .saturating_add(4),
+                            3,
+                            ch.saturating_mul(2).saturating_sub(8),
+                            if is_selected && focused {
+                                PANEL_CYAN
+                            } else {
+                                PANEL_BORDER_STRONG
+                            },
+                        );
+                    }
 
-                    let dot = if session.state == "running" {
-                        "●"
-                    } else if session.state == "exited" {
-                        "×"
+                    if is_active {
+                        r.draw_status_dot_px(
+                            origin_x + cw * 4,
+                            node_y,
+                            4,
+                            PANEL_CYAN,
+                            Some(PANEL_BORDER_STRONG),
+                        );
                     } else {
-                        "○"
-                    };
-                    let dot_ink = if session.state == "running" {
-                        RAIL_OK
-                    } else if session.state == "exited" {
-                        RAIL_BAD
-                    } else {
-                        RAIL_DIM_INK
-                    };
-                    r.draw_text_row(content, row, 3, dot, dot_ink);
+                        Self::draw_ui_row(r, content, row, 3, "○", UI_META, RAIL_DIM_INK);
+                    }
 
-                    let name = format!("{} {}", session.index, session.cwd_tail);
+                    let name = format!("{}  {}", session.index, session.cwd_tail);
                     let name_budget = content_cols.saturating_sub(5);
                     let name = panels::truncate_to_cells(&name, name_budget as usize);
                     let name_ink = if is_active || is_selected {
-                        RAIL_HEADER_INK
+                        PANEL_CYAN
                     } else {
                         RAIL_TEXT_INK
                     };
-                    r.draw_text_row(content, row, 5, &name, name_ink);
+                    Self::draw_ui_row(r, content, row, 5, &name, UI_SESSION, name_ink);
 
-                    // Detail row: state + shortened path, both real.
                     if row + 1 < vp.rows {
-                        let detail_cols = content_cols.saturating_sub(2);
+                        let detail_cols = content_cols.saturating_sub(5);
                         let state_text = if session.state == "exited" && session.exit != "—" {
                             format!("exit {}", session.exit)
                         } else {
@@ -1479,21 +1878,23 @@ impl App {
                             panels::format_session_detail(&state_text, &session.cwd, detail_cols);
                         if !state.is_empty() {
                             let state_ink = if session.state == "running" {
-                                RAIL_OK
+                                PANEL_TEAL
                             } else if session.state == "exited" {
-                                RAIL_BAD
+                                PANEL_RED
                             } else {
                                 RAIL_DIM_INK
                             };
-                            r.draw_text_row(content, row + 1, 2, &state, state_ink);
+                            Self::draw_ui_row(r, content, row + 1, 5, &state, UI_META, state_ink);
                         }
                         if !path.is_empty() {
                             let state_cells = panels::text_cells(&state) as u32;
-                            r.draw_text_row(
+                            Self::draw_ui_row(
+                                r,
                                 content,
                                 row + 1,
-                                2 + state_cells + 1,
+                                5 + state_cells + 1,
                                 &path,
+                                UI_META,
                                 RAIL_DIM_INK,
                             );
                         }
@@ -1501,28 +1902,118 @@ impl App {
                 }
                 panels::RailRow::SessionDetail(_) => {}
                 panels::RailRow::CommandsHeader => {
-                    r.draw_text_row(content, row, 1, "OBSERVED COMMANDS", RAIL_SECTION_INK);
+                    r.draw_status_dot_px(spine_x, node_y, 3, RAIL_ACCENT, None);
+                    Self::draw_indexed_section(
+                        r,
+                        content,
+                        row,
+                        "03",
+                        "COMMAND LEDGER",
+                        RAIL_ACCENT,
+                        RAIL_SECTION_INK,
+                    );
                     let count = snapshot.commands.len().to_string();
                     let count_col = content_cols.saturating_sub(panels::text_cells(&count) as u32);
-                    if count_col > 1 {
-                        r.draw_text_row(content, row, count_col, &count, RAIL_DIM_INK);
+                    if count_col > 4 {
+                        Self::draw_ui_row(
+                            r,
+                            content,
+                            row,
+                            count_col,
+                            &count,
+                            UI_META,
+                            RAIL_DIM_INK,
+                        );
                     }
                 }
                 panels::RailRow::Command(index) => {
                     if let Some(command) = snapshot.commands.get(index) {
                         let failed = !matches!(command.exit.as_str(), "0" | "—");
-                        let marker = if failed { "×" } else { "›" };
-                        let marker_ink = if failed { RAIL_BAD } else { RAIL_ACCENT };
-                        r.draw_text_row(content, row, 1, marker, marker_ink);
-                        let budget = content_cols.saturating_sub(3);
-                        let line = panels::format_command_row(
+                        let selected_command_row = selected_command == Some(command.id);
+                        let hovered_command_row = hovered_row
+                            .is_some_and(|hover| hover == row || hover == row.saturating_add(1));
+
+                        if selected_command_row || hovered_command_row {
+                            Self::draw_panel_card(
+                                r,
+                                vp,
+                                row,
+                                panels::COMMAND_CARD_ROWS as u32,
+                                if selected_command_row {
+                                    RAIL_SELECTED_BG
+                                } else {
+                                    RAIL_HOVER_BG
+                                },
+                                PANEL_BORDER_STRONG,
+                            );
+                        }
+
+                        if selected_command_row {
+                            r.draw_rect_px(
+                                origin_x.saturating_add(4),
+                                origin_y
+                                    .saturating_add(row.saturating_mul(ch))
+                                    .saturating_add(4),
+                                3,
+                                ch.saturating_mul(panels::COMMAND_CARD_ROWS as u32)
+                                    .saturating_sub(8),
+                                if failed {
+                                    PANEL_RED
+                                } else if focused {
+                                    PANEL_CYAN
+                                } else {
+                                    PANEL_VIOLET
+                                },
+                            );
+                        }
+
+                        let line_ink = if selected_command_row {
+                            PANEL_TEXT
+                        } else {
+                            RAIL_TEXT_INK
+                        };
+                        let command_text = panels::truncate_to_cells(
                             &command.command,
+                            content_cols.saturating_sub(5) as usize,
+                        );
+                        Self::draw_ui_row(r, content, row, 5, &command_text, UI_BODY, line_ink);
+                    }
+                }
+                panels::RailRow::CommandDetail(index) => {
+                    if let Some(command) = snapshot.commands.get(index) {
+                        let failed = !matches!(command.exit.as_str(), "0" | "—");
+                        let selected_command_row = selected_command == Some(command.id);
+                        let status_ink = if failed {
+                            PANEL_RED
+                        } else if selected_command_row {
+                            PANEL_CYAN
+                        } else {
+                            PANEL_TEAL
+                        };
+                        if failed {
+                            r.draw_status_dot_px(
+                                origin_x + cw * 3 + 2,
+                                node_y,
+                                if selected_command_row { 5 } else { 4 },
+                                PANEL_RED,
+                                Some(PANEL_DANGER),
+                            );
+                            Self::draw_ui_row(r, content, row, 3, "✕", UI_META, PANEL_RED);
+                        } else {
+                            r.draw_status_dot_px(
+                                origin_x + cw * 3 + 2,
+                                node_y,
+                                if selected_command_row { 4 } else { 3 },
+                                PANEL_TEAL,
+                                None,
+                            );
+                        }
+                        let status = panels::format_command_metadata(
                             &command.exit,
                             &command.duration,
-                            budget,
+                            content_cols.saturating_sub(6),
                         );
-                        let line_ink = if failed { RAIL_BAD } else { RAIL_TEXT_INK };
-                        r.draw_text_row(content, row, 3, &line, line_ink);
+                        Self::draw_ui_row(r, content, row, 5, &status, UI_META, status_ink);
                     }
                 }
                 panels::RailRow::Footer => {
@@ -1537,10 +2028,899 @@ impl App {
                     );
                     let footer =
                         panels::format_footer(&snapshot.footer, content_cols.saturating_sub(1));
-                    r.draw_text_row(content, row, 1, &footer, RAIL_FOOTER_INK);
+                    Self::draw_ui_row(r, content, row, 1, &footer, UI_META, RAIL_FOOTER_INK);
                 }
                 panels::RailRow::Empty => {}
             }
+        }
+
+        if let Some(row) = resources_row {
+            r.draw_status_dot_px(spine_x, origin_y + row * ch + ch / 2, 3, RAIL_ACCENT, None);
+            Self::draw_indexed_section(
+                r,
+                content,
+                row,
+                "04",
+                "RESOURCES",
+                RAIL_ACCENT,
+                RAIL_SECTION_INK,
+            );
+            if row.saturating_add(1) < footer_row {
+                Self::draw_ui_row(
+                    r,
+                    content,
+                    row + 1,
+                    4,
+                    "— NO CONFIGURED SOURCES",
+                    UI_META,
+                    RAIL_DIM_INK,
+                );
+            }
+        }
+    }
+
+    fn draw_instrument_surface(
+        r: &mut Renderer,
+        vp: zet_gpu::renderer::Viewport,
+        row: u32,
+        rows: u32,
+        fill: zet_gpu::quad::Rgba,
+        border: zet_gpu::quad::Rgba,
+        cut: u32,
+    ) {
+        let (cw, ch) = r.cell_px();
+        let x = vp.x.saturating_mul(cw).saturating_add(4);
+        let y =
+            vp.y.saturating_add(row)
+                .saturating_mul(ch)
+                .saturating_add(2);
+        let width = vp.cols.saturating_mul(cw).saturating_sub(8);
+        let height = rows.saturating_mul(ch).saturating_sub(4);
+        if width >= 6 && height >= 6 {
+            r.draw_chamfered_panel_px(x, y, width, height, cut, fill, border);
+        }
+    }
+
+    fn draw_evidence_command_header(
+        r: &mut Renderer,
+        vp: zet_gpu::renderer::Viewport,
+        row: u32,
+        failed: bool,
+        focused: bool,
+    ) {
+        use zet_gpu::renderer::{
+            PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_INSET, PANEL_RAISED, PANEL_RED, PANEL_VIOLET,
+        };
+
+        let (cw, ch) = r.cell_px();
+        let x = vp.x.saturating_mul(cw).saturating_add(10);
+        let y =
+            vp.y.saturating_add(row)
+                .saturating_mul(ch)
+                .saturating_add(2);
+        let width = vp.cols.saturating_mul(cw).saturating_sub(20);
+        let height = ch.saturating_sub(4);
+        if width < 20 || height < 8 {
+            return;
+        }
+        let seam = if failed {
+            PANEL_RED
+        } else if focused {
+            PANEL_CYAN
+        } else {
+            PANEL_VIOLET
+        };
+        r.draw_chamfered_panel_px(x, y, width, height, 7, PANEL_INSET, PANEL_BORDER_STRONG);
+        r.draw_rect_px(
+            x.saturating_add(5),
+            y.saturating_add(6),
+            3,
+            height.saturating_sub(12).max(2),
+            seam,
+        );
+        r.draw_rect_px(
+            x.saturating_add(width.saturating_sub(5)),
+            y.saturating_add(7),
+            1,
+            height.saturating_sub(14).max(1),
+            if failed { PANEL_RED } else { PANEL_RAISED },
+        );
+    }
+
+    fn draw_evidence_divider(
+        r: &mut Renderer,
+        vp: zet_gpu::renderer::Viewport,
+        row: u32,
+        color: zet_gpu::quad::Rgba,
+    ) {
+        let (cw, ch) = r.cell_px();
+        let x = vp.x.saturating_mul(cw).saturating_add(12);
+        let y =
+            vp.y.saturating_add(row)
+                .saturating_mul(ch)
+                .saturating_sub(1);
+        let width = vp.cols.saturating_mul(cw).saturating_sub(24);
+        if width > 8 {
+            r.draw_rect_px(x, y, width, 1, color);
+        }
+    }
+
+    fn draw_evidence_group_heading(
+        r: &mut Renderer,
+        vp: zet_gpu::renderer::Viewport,
+        row: u32,
+        title: &str,
+        ink: zet_gpu::quad::Rgba,
+    ) {
+        if row >= vp.rows {
+            return;
+        }
+        Self::draw_ui_row(r, vp, row, 2, title, UI_SECTION, ink);
+        Self::draw_evidence_divider(r, vp, row + 1, zet_gpu::renderer::PANEL_BORDER);
+    }
+
+    /// Render the Inspector as an evidence detail surface. The command index
+    /// remains a compact navigation aid for the existing P3-A1 keyboard and
+    /// mouse contract, while the selected command and bounded output own the
+    /// visual weight of the panel.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_inspector(
+        r: &mut Renderer,
+        vp: zet_gpu::renderer::Viewport,
+        snapshot: Option<Arc<panels::InspectorSnapshot>>,
+        selected_id: Option<i64>,
+        output: Option<&str>,
+        output_truncated: bool,
+        hovered_row: Option<u32>,
+        focused: bool,
+    ) {
+        use zet_gpu::renderer::{
+            PANEL_AMBER, PANEL_BG, PANEL_BORDER, PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_INSET,
+            PANEL_MUTED, PANEL_RAISED, PANEL_RED, PANEL_SECONDARY, PANEL_TEAL, PANEL_TEXT,
+            PANEL_VIOLET,
+        };
+        let (cw, ch) = r.cell_px();
+        let origin_x = vp.x.saturating_mul(cw);
+        let origin_y = vp.y.saturating_mul(ch);
+        let height_px = vp.rows.saturating_mul(ch);
+        r.draw_fill(vp, PANEL_BG);
+        r.draw_chamfered_panel_px(
+            origin_x.saturating_add(3),
+            origin_y.saturating_add(2),
+            vp.cols.saturating_mul(cw).saturating_sub(6),
+            height_px.saturating_sub(4),
+            10,
+            PANEL_BG,
+            PANEL_BORDER,
+        );
+        r.draw_rect_px(
+            origin_x,
+            origin_y,
+            if focused { 2 } else { 1 },
+            height_px,
+            if focused {
+                PANEL_CYAN
+            } else {
+                PANEL_BORDER_STRONG
+            },
+        );
+
+        r.draw_aperture_mark_px(
+            origin_x.saturating_add(8),
+            origin_y.saturating_add(6),
+            ch.saturating_sub(8),
+            PANEL_CYAN,
+        );
+        Self::draw_ui_row(r, vp, 0, 4, "CONTEXTUAL INSPECTOR", UI_HEADER, PANEL_TEXT);
+        if vp.cols > 31 {
+            Self::draw_ui_row(
+                r,
+                vp,
+                0,
+                25,
+                "OBSERVED / SESSION-SCOPED",
+                UI_META,
+                PANEL_SECONDARY,
+            );
+        }
+        r.draw_rect_px(
+            origin_x.saturating_add(cw.saturating_mul(2)),
+            origin_y.saturating_add(ch.saturating_mul(1).saturating_sub(2)),
+            vp.cols
+                .saturating_mul(cw)
+                .saturating_sub(cw.saturating_mul(4)),
+            1,
+            PANEL_BORDER_STRONG,
+        );
+        if focused {
+            r.draw_rect_px(
+                origin_x.saturating_add(cw.saturating_mul(2)),
+                origin_y.saturating_add(ch.saturating_sub(2)),
+                cw.saturating_mul(5).min(vp.cols.saturating_mul(cw)),
+                1,
+                PANEL_CYAN,
+            );
+        }
+
+        let Some(snapshot) = snapshot else {
+            if vp.rows > 3 {
+                Self::draw_instrument_surface(
+                    r,
+                    vp,
+                    2,
+                    vp.rows.saturating_sub(3),
+                    PANEL_INSET,
+                    PANEL_BORDER,
+                    7,
+                );
+                Self::draw_ui_row(r, vp, 4, 2, "NO ACTIVE SESSION", UI_SECTION, PANEL_MUTED);
+                Self::draw_ui_row(
+                    r,
+                    vp,
+                    6,
+                    2,
+                    "Open a terminal session to",
+                    UI_BODY,
+                    PANEL_SECONDARY,
+                );
+                Self::draw_ui_row(
+                    r,
+                    vp,
+                    7,
+                    2,
+                    "observe recorded evidence.",
+                    UI_BODY,
+                    PANEL_SECONDARY,
+                );
+            }
+            return;
+        };
+
+        // Session overview: real state only, kept separate from the command
+        // ledger so the Inspector has a different job from the Mission Rail.
+        if vp.rows > 5 {
+            Self::draw_instrument_surface(r, vp, 1, 4, PANEL_RAISED, PANEL_BORDER, 7);
+            Self::draw_ui_row(r, vp, 1, 2, "SESSION", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(
+                r,
+                vp,
+                1,
+                12.min(vp.cols.saturating_sub(1)),
+                &snapshot.session,
+                UI_BODY,
+                PANEL_TEXT,
+            );
+            Self::draw_ui_row(r, vp, 2, 2, "STATE", UI_META, PANEL_MUTED);
+            let state_ink = match snapshot.state.as_str() {
+                "exited" => PANEL_RED,
+                "running" => PANEL_TEAL,
+                _ => PANEL_CYAN,
+            };
+            Self::draw_ui_row(
+                r,
+                vp,
+                2,
+                12.min(vp.cols.saturating_sub(1)),
+                &snapshot.state,
+                UI_VALUE,
+                state_ink,
+            );
+            Self::draw_ui_row(r, vp, 3, 2, "LAST EXIT", UI_META, PANEL_MUTED);
+            let exit_ink = if snapshot.exit == "0" {
+                PANEL_TEAL
+            } else if snapshot.exit == "—" {
+                PANEL_MUTED
+            } else {
+                PANEL_RED
+            };
+            Self::draw_ui_row(
+                r,
+                vp,
+                3,
+                12.min(vp.cols.saturating_sub(1)),
+                &snapshot.exit,
+                UI_VALUE,
+                exit_ink,
+            );
+            Self::draw_ui_row(r, vp, 4, 2, "CWD", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(
+                r,
+                vp,
+                4,
+                12.min(vp.cols.saturating_sub(1)),
+                &panels::truncate_to_cells(&snapshot.cwd, vp.cols.saturating_sub(13) as usize),
+                UI_BODY,
+                PANEL_SECONDARY,
+            );
+            Self::draw_ui_row(r, vp, 5, 2, "EVIDENCE / OBSERVED", UI_SECTION, PANEL_MUTED);
+        }
+
+        let detail_start = panels::inspector_detail_start(snapshot.commands.len());
+        let activity_header = panels::INSPECTOR_ACTIVITY_START.saturating_sub(1);
+        if activity_header < vp.rows {
+            Self::draw_ui_row(
+                r,
+                vp,
+                activity_header,
+                2,
+                "EVIDENCE INDEX",
+                UI_SECTION,
+                PANEL_VIOLET,
+            );
+            let count = snapshot.commands.len().to_string();
+            let count_col = vp
+                .cols
+                .saturating_sub(panels::text_cells(&count) as u32 + 2);
+            if count_col > 2 {
+                Self::draw_ui_row(
+                    r,
+                    vp,
+                    activity_header,
+                    count_col,
+                    &count,
+                    UI_META,
+                    PANEL_MUTED,
+                );
+            }
+            let spine_y = origin_y
+                .saturating_add(activity_header.saturating_add(1).saturating_mul(ch))
+                .saturating_add(ch / 2);
+            let spine_end = origin_y
+                .saturating_add(detail_start.saturating_mul(ch))
+                .saturating_sub(ch / 2);
+            if spine_end > spine_y {
+                r.draw_rect_px(
+                    origin_x.saturating_add(14),
+                    spine_y,
+                    1,
+                    spine_end.saturating_sub(spine_y),
+                    PANEL_BORDER_STRONG,
+                );
+            }
+        }
+
+        if snapshot.commands.is_empty() {
+            if panels::INSPECTOR_ACTIVITY_START < vp.rows {
+                Self::draw_ui_row(
+                    r,
+                    vp,
+                    panels::INSPECTOR_ACTIVITY_START,
+                    2,
+                    "NO RECORDED COMMANDS",
+                    UI_BODY,
+                    PANEL_MUTED,
+                );
+            }
+        } else {
+            for (index, command) in snapshot.commands.iter().enumerate() {
+                let row = panels::inspector_command_row(index);
+                if row >= vp.rows {
+                    break;
+                }
+                let failed = !matches!(command.exit.as_str(), "0" | "—");
+                let selected = selected_id == Some(command.id);
+                let hovered = hovered_row == Some(row);
+                if selected || hovered {
+                    Self::draw_panel_card(r, vp, row, 1, PANEL_RAISED, PANEL_BORDER_STRONG);
+                }
+                r.draw_status_dot_px(
+                    origin_x.saturating_add(14),
+                    origin_y
+                        .saturating_add(row.saturating_mul(ch))
+                        .saturating_add(ch / 2),
+                    if selected { 4 } else { 2 },
+                    if failed { PANEL_RED } else { PANEL_TEAL },
+                    None,
+                );
+                if selected {
+                    r.draw_rect_px(
+                        origin_x.saturating_add(5),
+                        origin_y
+                            .saturating_add(row.saturating_mul(ch))
+                            .saturating_add(5),
+                        2,
+                        ch.saturating_sub(10),
+                        if failed { PANEL_RED } else { PANEL_CYAN },
+                    );
+                }
+                Self::draw_ui_row(
+                    r,
+                    vp,
+                    row,
+                    2,
+                    &format!("{:02}", index + 1),
+                    UI_META,
+                    if selected { PANEL_CYAN } else { PANEL_MUTED },
+                );
+                Self::draw_command_summary_row(
+                    r,
+                    vp,
+                    row,
+                    6,
+                    2,
+                    command,
+                    if selected {
+                        PANEL_TEXT
+                    } else {
+                        PANEL_SECONDARY
+                    },
+                    if failed { PANEL_RED } else { PANEL_TEAL },
+                );
+            }
+        }
+
+        let detail = detail_start;
+        if detail >= vp.rows {
+            return;
+        }
+        Self::draw_ui_row(
+            r,
+            vp,
+            detail,
+            2,
+            "SELECTED COMMAND",
+            UI_SECTION,
+            PANEL_VIOLET,
+        );
+        let card_row = detail.saturating_add(1);
+        let card_rows = vp.rows.saturating_sub(card_row);
+        if card_rows == 0 {
+            return;
+        }
+        let selected = selected_id.and_then(|id| snapshot.commands.iter().find(|cmd| cmd.id == id));
+        let failed = selected.is_some_and(|command| !matches!(command.exit.as_str(), "0" | "—"));
+        Self::draw_instrument_surface(
+            r,
+            vp,
+            card_row,
+            card_rows,
+            PANEL_RAISED,
+            if selected.is_some() {
+                PANEL_BORDER_STRONG
+            } else {
+                PANEL_BORDER
+            },
+            10,
+        );
+        if selected.is_some() {
+            Self::draw_evidence_divider(r, vp, card_row + 2, PANEL_BORDER);
+            Self::draw_evidence_command_header(r, vp, card_row + 1, failed, focused);
+            if failed {
+                let card_x = vp.x.saturating_mul(cw).saturating_add(5);
+                let card_y =
+                    vp.y.saturating_add(card_row)
+                        .saturating_mul(ch)
+                        .saturating_add(7);
+                r.draw_rect_px(
+                    card_x,
+                    card_y,
+                    3,
+                    card_rows.saturating_mul(ch).saturating_sub(14).max(2),
+                    PANEL_RED,
+                );
+            }
+        }
+        let Some(command) = selected else {
+            if card_rows > 2 {
+                Self::draw_ui_row(
+                    r,
+                    vp,
+                    card_row + 1,
+                    2,
+                    "SELECT A RECORDED COMMAND",
+                    UI_COMMAND,
+                    PANEL_SECONDARY,
+                );
+                Self::draw_ui_row(
+                    r,
+                    vp,
+                    card_row + 3,
+                    2,
+                    "Evidence will appear here.",
+                    UI_BODY,
+                    PANEL_MUTED,
+                );
+            }
+            return;
+        };
+
+        if card_rows > 1 {
+            Self::draw_ui_row(r, vp, card_row + 1, 2, "$", UI_COMMAND, PANEL_CYAN);
+            Self::draw_ui_row(
+                r,
+                vp,
+                card_row + 1,
+                4,
+                &panels::truncate_to_cells(&command.command, vp.cols.saturating_sub(10) as usize),
+                UI_COMMAND,
+                PANEL_TEXT,
+            );
+        }
+        // The evidence groups are inset from the selected-command surface.
+        // Their rows are deliberately separated so dividers never share a
+        // baseline with a value, and each group remains visually legible on
+        // the narrowest supported Inspector.
+        let observed_heading = card_row.saturating_add(2);
+        let observed_exit = card_row.saturating_add(4);
+        let observed_duration = card_row.saturating_add(5);
+        if observed_heading.saturating_add(4) <= vp.rows {
+            Self::draw_instrument_surface(r, vp, observed_heading, 4, PANEL_INSET, PANEL_BORDER, 6);
+            Self::draw_evidence_group_heading(
+                r,
+                vp,
+                observed_heading,
+                "OBSERVED RESULT",
+                PANEL_VIOLET,
+            );
+        }
+        if observed_exit < vp.rows {
+            Self::draw_ui_row(r, vp, observed_exit, 2, "EXIT", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(
+                r,
+                vp,
+                observed_exit,
+                8,
+                &command.exit,
+                UI_VALUE,
+                if failed { PANEL_RED } else { PANEL_TEAL },
+            );
+            r.draw_status_dot_px(
+                vp.x.saturating_mul(cw).saturating_add(cw.saturating_mul(6)),
+                vp.y.saturating_add(observed_exit)
+                    .saturating_mul(ch)
+                    .saturating_add(ch / 2),
+                3,
+                if failed { PANEL_RED } else { PANEL_TEAL },
+                None,
+            );
+        }
+        if observed_duration < vp.rows {
+            Self::draw_ui_row(
+                r,
+                vp,
+                observed_duration,
+                2,
+                "DURATION",
+                UI_META,
+                PANEL_MUTED,
+            );
+            Self::draw_ui_row(
+                r,
+                vp,
+                observed_duration,
+                12,
+                &command.duration,
+                UI_VALUE,
+                PANEL_SECONDARY,
+            );
+        }
+        let context_heading = card_row.saturating_add(7);
+        let context_cwd = card_row.saturating_add(9);
+        let context_branch = card_row.saturating_add(10);
+        let context_session = card_row.saturating_add(11);
+        if context_heading.saturating_add(6) <= vp.rows {
+            Self::draw_instrument_surface(r, vp, context_heading, 6, PANEL_INSET, PANEL_BORDER, 6);
+            Self::draw_evidence_group_heading(
+                r,
+                vp,
+                context_heading,
+                "EXECUTION CONTEXT",
+                PANEL_VIOLET,
+            );
+        }
+        if context_cwd < vp.rows {
+            Self::draw_ui_row(r, vp, context_cwd, 2, "CWD", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(
+                r,
+                vp,
+                context_cwd,
+                8,
+                &panels::truncate_to_cells(&command.cwd, vp.cols.saturating_sub(9) as usize),
+                UI_BODY,
+                PANEL_SECONDARY,
+            );
+        }
+        if context_branch < vp.rows {
+            Self::draw_ui_row(r, vp, context_branch, 2, "BRANCH", UI_META, PANEL_MUTED);
+            let branch = if command.git_branch.is_empty() {
+                "—"
+            } else {
+                &command.git_branch
+            };
+            Self::draw_ui_row(
+                r,
+                vp,
+                context_branch,
+                8,
+                &panels::truncate_to_cells(branch, vp.cols.saturating_sub(9) as usize),
+                UI_BODY,
+                PANEL_SECONDARY,
+            );
+        }
+        if context_session < vp.rows {
+            Self::draw_ui_row(r, vp, context_session, 2, "SESSION", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(
+                r,
+                vp,
+                context_session,
+                10,
+                &snapshot.session,
+                UI_BODY,
+                PANEL_SECONDARY,
+            );
+            Self::draw_evidence_divider(r, vp, context_session.saturating_add(1), PANEL_BORDER);
+        }
+
+        // The output well is deliberately bounded by the remaining card
+        // height. It carries no synthetic line count or timestamp.
+        let output_label = card_row.saturating_add(14);
+        let provenance_row = vp.rows.saturating_sub(2);
+        if output_label < provenance_row {
+            Self::draw_ui_row(
+                r,
+                vp,
+                output_label,
+                2,
+                "RECORDED OUTPUT",
+                UI_SECTION,
+                PANEL_VIOLET,
+            );
+            let output_row = output_label.saturating_add(1);
+            let output_rows = provenance_row.saturating_sub(output_row);
+            if output_rows > 0 {
+                Self::draw_instrument_surface(
+                    r,
+                    vp,
+                    output_row,
+                    output_rows,
+                    PANEL_BG,
+                    PANEL_BORDER,
+                    5,
+                );
+                Self::draw_evidence_divider(r, vp, output_row, PANEL_BORDER_STRONG);
+                if let Some(text) = output {
+                    if text.is_empty() {
+                        Self::draw_ui_row(
+                            r,
+                            vp,
+                            output_row + 1,
+                            3,
+                            "EMPTY OUTPUT",
+                            UI_OUTPUT,
+                            PANEL_MUTED,
+                        );
+                    } else {
+                        let max_lines = output_rows.saturating_sub(2) as usize;
+                        let mut rendered = 0usize;
+                        for line in text.lines().take(max_lines) {
+                            let row = output_row + 1 + rendered as u32;
+                            Self::draw_ui_row(
+                                r,
+                                vp,
+                                row,
+                                3,
+                                &panels::truncate_to_cells(
+                                    line,
+                                    vp.cols.saturating_sub(7) as usize,
+                                ),
+                                UI_OUTPUT,
+                                PANEL_TEXT,
+                            );
+                            rendered += 1;
+                        }
+                        if rendered == 0 {
+                            Self::draw_ui_row(
+                                r,
+                                vp,
+                                output_row + 1,
+                                3,
+                                "EMPTY OUTPUT",
+                                UI_OUTPUT,
+                                PANEL_MUTED,
+                            );
+                        }
+                        if output_truncated && rendered + 1 < max_lines {
+                            Self::draw_ui_row(
+                                r,
+                                vp,
+                                output_row + 1 + rendered as u32,
+                                3,
+                                "PREVIEW TRUNCATED",
+                                UI_META,
+                                PANEL_AMBER,
+                            );
+                        }
+                    }
+                } else {
+                    Self::draw_ui_row(
+                        r,
+                        vp,
+                        output_row + 1,
+                        3,
+                        "OUTPUT UNAVAILABLE",
+                        UI_OUTPUT,
+                        PANEL_AMBER,
+                    );
+                }
+            }
+        }
+        if provenance_row < vp.rows {
+            r.draw_fill(
+                zet_gpu::renderer::Viewport {
+                    x: vp.x,
+                    y: vp.y + provenance_row,
+                    cols: vp.cols,
+                    rows: 1,
+                },
+                PANEL_INSET,
+            );
+            Self::draw_evidence_divider(r, vp, provenance_row, PANEL_BORDER);
+            Self::draw_ui_row(r, vp, provenance_row, 2, "PROVENANCE", UI_META, PANEL_MUTED);
+            let provenance = format!("RECORDED / SESSION {}", snapshot.session);
+            Self::draw_ui_row(
+                r,
+                vp,
+                provenance_row,
+                13,
+                &panels::truncate_to_cells(&provenance, vp.cols.saturating_sub(14) as usize),
+                UI_META,
+                PANEL_SECONDARY,
+            );
+        }
+    }
+
+    fn aperture_header_layout(
+        width_px: u32,
+        ch: u32,
+        brand_width: u32,
+        mode_width: u32,
+    ) -> (u32, u32, u32) {
+        let mark_size = ch.saturating_mul(2).saturating_sub(8).max(18);
+        let brand_x = 18u32.saturating_add(mark_size).saturating_add(14);
+        let descriptor_x = brand_x.saturating_add(brand_width).saturating_add(14);
+        let mode_x = width_px.saturating_sub(mode_width).saturating_sub(18);
+        let descriptor_max_width = mode_x.saturating_sub(descriptor_x).saturating_sub(18);
+        (descriptor_x, descriptor_max_width, mode_x)
+    }
+
+    /// Integrated Aperture header. It is a real pixel-composed band rather
+    /// than a one-row terminal banner: the identity, descriptor, datum seam,
+    /// and tab surface share a precise architectural frame while the live
+    /// terminal begins below it on an untouched cell grid.
+    fn draw_app_chrome(
+        r: &mut Renderer,
+        cols: u32,
+        rail_cols: u32,
+        bar_rows: usize,
+        layout: layout::Layout,
+    ) {
+        if cols == 0 || bar_rows == 0 {
+            return;
+        }
+        use zet_gpu::renderer::{
+            PANEL_BG, PANEL_BORDER, PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_TEXT, PANEL_VIOLET,
+            TABBAR_BG,
+        };
+        let band = zet_gpu::renderer::Viewport {
+            x: 0,
+            y: 0,
+            cols,
+            rows: bar_rows as u32,
+        };
+        r.draw_fill(band, PANEL_BG);
+        let (cw, ch) = r.cell_px();
+        let width_px = cols.saturating_mul(cw);
+        let band_h = (bar_rows as u32).saturating_mul(ch);
+        let rail_px = rail_cols.saturating_mul(cw);
+
+        // Header depth: a near-black identity deck above a quieter tab datum.
+        r.draw_rect_px(0, 0, width_px, ch.saturating_mul(2), TABBAR_BG);
+        r.draw_rect_px(
+            0,
+            ch.saturating_mul(2).saturating_sub(1),
+            width_px,
+            1,
+            PANEL_BORDER,
+        );
+        r.draw_rect_px(0, band_h.saturating_sub(2), rail_px, 2, PANEL_CYAN);
+        // A short cyan datum carries the identity into the terminal seam.
+        r.draw_rect_px(
+            rail_px,
+            band_h.saturating_sub(2),
+            32.min(width_px.saturating_sub(rail_px)),
+            2,
+            PANEL_CYAN,
+        );
+
+        // Distinctive native geometry plus independent typography. The
+        // descriptor is a product identity, not an invented operational
+        // metric or an inert control.
+        let mark_size = ch.saturating_mul(2).saturating_sub(8).max(18);
+        r.draw_aperture_crystal_mark_px(18, 8, mark_size, mark_size);
+        let brand_x = 18u32.saturating_add(mark_size).saturating_add(14);
+        let mode = if layout.inspector {
+            "EVIDENCE VIEW"
+        } else {
+            "WORKSPACE"
+        };
+        let mode_width = (mode.chars().count() as u32)
+            .saturating_mul(8)
+            .saturating_add(22);
+        let mode_x = width_px.saturating_sub(mode_width).saturating_sub(18);
+
+        let brand_width = r.draw_ui_text_px(
+            brand_x as f32,
+            8.0 + UI_BRAND.baseline_offset(),
+            "ZET",
+            UI_BRAND,
+            PANEL_TEXT,
+            Some(100),
+        );
+        // Place the Aperture descriptor beside the wordmark with a measured
+        // gap, rather than stacking it beneath the wordmark. Keep it inside
+        // the two-row identity deck and clear of the mode control.
+        let (descriptor_x, descriptor_max_width, _) =
+            Self::aperture_header_layout(width_px, ch, brand_width, mode_width);
+        r.draw_ui_text_px(
+            descriptor_x as f32,
+            8.0 + UI_BRAND.baseline_offset(),
+            "APERTURE / OUTCOME-AWARE TERMINAL",
+            UI_HEADER,
+            PANEL_VIOLET,
+            Some(descriptor_max_width),
+        );
+
+        r.draw_chamfered_panel_px(mode_x, 14, mode_width, 26, 5, PANEL_BG, PANEL_BORDER_STRONG);
+        r.draw_ui_text_px(
+            mode_x.saturating_add(10) as f32,
+            18.0 + UI_META.baseline_offset(),
+            mode,
+            UI_META,
+            PANEL_CYAN,
+            Some(mode_width.saturating_sub(14)),
+        );
+    }
+
+    fn draw_ui_tabbar(
+        r: &mut Renderer,
+        labels: &[String],
+        active: usize,
+        cols: usize,
+        rail_cols: usize,
+        row: usize,
+    ) {
+        use zet_gpu::renderer::{PANEL_SECONDARY, PANEL_TEXT};
+        let segments = zet_gpu::selection::tabbar_segments(cols, rail_cols, labels.len().max(1));
+        let (cw, ch) = r.cell_px();
+        let cw_usize = cw as usize;
+        let style = UI_HEADER;
+        let baseline = row as f32 * ch as f32
+            + ((ch as f32 - style.line_height_px).max(0.0) * 0.5)
+            + style.baseline_offset();
+        for (index, &(start, end)) in segments.iter().enumerate() {
+            let Some(label) = labels.get(index) else {
+                continue;
+            };
+            let ink = if index == active {
+                PANEL_TEXT
+            } else {
+                PANEL_SECONDARY
+            };
+            let width = end
+                .saturating_sub(start)
+                .saturating_sub(2)
+                .saturating_mul(cw_usize) as u32;
+            if width == 0 {
+                continue;
+            }
+            r.draw_ui_text_px(
+                start.saturating_add(1).saturating_mul(cw_usize) as f32,
+                baseline,
+                label,
+                style,
+                ink,
+                Some(width),
+            );
         }
     }
 
@@ -1562,7 +2942,11 @@ impl App {
                     .chars()
                     .rev()
                     .collect();
-                format!(" {} {name}", k + 1)
+                if k == self.active {
+                    format!(" LIVING TERMINAL · {} {name}", k + 1)
+                } else {
+                    format!(" SESSION {} {name}", k + 1)
+                }
             })
             .collect()
     }
@@ -1578,6 +2962,10 @@ impl App {
         self.rail_sel = self.active;
         self.inspector_cache.mark_dirty();
         self.inspector_sel = None;
+        self.inspector_sel_id = None;
+        self.inspector_output = None;
+        self.inspector_output_id = None;
+        self.inspector_output_truncated = false;
         if let Some(renderer) = &self.renderer {
             let (fg, bg) = renderer.default_colors();
             if let Some(tab) = self.tabs.last_mut() {
@@ -1606,6 +2994,10 @@ impl App {
         self.rail_sel = self.active;
         self.inspector_cache.mark_dirty();
         self.inspector_sel = None;
+        self.inspector_sel_id = None;
+        self.inspector_output = None;
+        self.inspector_output_id = None;
+        self.inspector_output_truncated = false;
         // Bar may vanish: remaining grids grow back.
         self.fit_all();
         self.needs_draw = true;
@@ -1622,6 +3014,10 @@ impl App {
         self.rail_sel = self.active;
         self.inspector_cache.mark_dirty();
         self.inspector_sel = None;
+        self.inspector_sel_id = None;
+        self.inspector_output = None;
+        self.inspector_output_id = None;
+        self.inspector_output_truncated = false;
         self.needs_draw = true;
         self.retitle();
     }
@@ -1937,6 +3333,20 @@ impl App {
             zet_gpu::perf_mark("first_frame");
             eprintln!("perf: first_frame_ms={}", t0.elapsed().as_millis());
         }
+        if let Some(first_output) = self.tabs[self.active].term.take_first_output_time() {
+            if first_output >= t0 {
+                eprintln!(
+                    "perf: first_output_from_origin_ms={}",
+                    first_output.duration_since(t0).as_millis()
+                );
+            } else {
+                eprintln!("perf: first_output_before_origin=true");
+            }
+            eprintln!(
+                "perf: first_output_to_frame_ms={}",
+                first_output.elapsed().as_millis()
+            );
+        }
         if let Some(tin) = self.perf_input.take() {
             eprintln!("perf: input_latency_us={}", tin.elapsed().as_micros());
         }
@@ -1981,16 +3391,44 @@ impl App {
                 Key::Named(NamedKey::Escape) => {
                     self.focus = Focus::Terminal;
                     self.inspector_sel = None;
+                    self.inspector_sel_id = None;
+                    self.inspector_output = None;
+                    self.inspector_output_id = None;
+                    self.inspector_output_truncated = false;
                 }
                 Key::Named(NamedKey::ArrowUp) => {
                     if self.focus == Focus::Rail && !self.tabs.is_empty() {
                         self.rail_sel = self.rail_sel.saturating_sub(1);
                     }
                     if self.focus == Focus::Inspector {
-                        self.inspector_sel = match self.inspector_sel {
-                            Some(0) | None => Some(3),
-                            Some(n) => Some(n - 1),
-                        };
+                        let n = panels::INSPECTOR_CONTEXT_ROWS
+                            + self
+                                .inspector_cache
+                                .snapshot()
+                                .map(|s| s.commands.len())
+                                .unwrap_or(0);
+                        if n > 0 {
+                            self.inspector_sel = match self.inspector_sel {
+                                Some(0) | None => Some(n - 1),
+                                Some(x) => Some(x - 1),
+                            };
+                            self.inspector_sel_id = self.inspector_sel.and_then(|index| {
+                                if index >= panels::INSPECTOR_CONTEXT_ROWS {
+                                    self.inspector_cache
+                                        .snapshot()
+                                        .and_then(|s| {
+                                            s.commands.get(index - panels::INSPECTOR_CONTEXT_ROWS)
+                                        })
+                                        .map(|command| command.id)
+                                } else {
+                                    None
+                                }
+                            });
+                            self.inspector_output = None;
+                            self.inspector_output_id = None;
+                            self.inspector_output_truncated = false;
+                            self.sync_inspector_output();
+                        }
                     }
                 }
                 Key::Named(NamedKey::ArrowDown) => {
@@ -1998,11 +3436,35 @@ impl App {
                         self.rail_sel = (self.rail_sel + 1).min(self.tabs.len() - 1);
                     }
                     if self.focus == Focus::Inspector {
-                        self.inspector_sel = match self.inspector_sel {
-                            Some(3) => Some(0),
-                            Some(n) => Some(n + 1),
-                            None => Some(0),
-                        };
+                        let n = panels::INSPECTOR_CONTEXT_ROWS
+                            + self
+                                .inspector_cache
+                                .snapshot()
+                                .map(|s| s.commands.len())
+                                .unwrap_or(0);
+                        if n > 0 {
+                            self.inspector_sel = match self.inspector_sel {
+                                Some(x) if x + 1 >= n => Some(0),
+                                Some(x) => Some(x + 1),
+                                None => Some(0),
+                            };
+                            self.inspector_sel_id = self.inspector_sel.and_then(|index| {
+                                if index >= panels::INSPECTOR_CONTEXT_ROWS {
+                                    self.inspector_cache
+                                        .snapshot()
+                                        .and_then(|s| {
+                                            s.commands.get(index - panels::INSPECTOR_CONTEXT_ROWS)
+                                        })
+                                        .map(|command| command.id)
+                                } else {
+                                    None
+                                }
+                            });
+                            self.inspector_output = None;
+                            self.inspector_output_id = None;
+                            self.inspector_output_truncated = false;
+                            self.sync_inspector_output();
+                        }
                     }
                 }
                 Key::Named(NamedKey::Enter)
@@ -2011,6 +3473,10 @@ impl App {
                     self.active = self.rail_sel;
                     self.inspector_cache.mark_dirty();
                     self.inspector_sel = None;
+                    self.inspector_sel_id = None;
+                    self.inspector_output = None;
+                    self.inspector_output_id = None;
+                    self.inspector_output_truncated = false;
                     self.focus = Focus::Terminal;
                     self.retitle();
                 }
@@ -2024,6 +3490,10 @@ impl App {
                 // the emergency-cancellation behavior.
                 self.focus = Focus::Terminal;
                 self.inspector_sel = None;
+                self.inspector_sel_id = None;
+                self.inspector_output = None;
+                self.inspector_output_id = None;
+                self.inspector_output_truncated = false;
             } else {
                 self.needs_draw = true;
                 return;
@@ -2493,8 +3963,12 @@ impl ApplicationHandler for App {
                 } else {
                     None
                 };
+                let rail_hover_row = self.hovered_rail_row();
                 let inspector_vp_layout = self.frame_layout().inspector;
+                let inspector_hover_row = self.hovered_inspector_row();
                 let inspector_cols = inspector_vp_layout.map_or(0, |vp| vp.cols as usize);
+                let inspector_snapshot = self.inspector_cache.snapshot_handle();
+                let inspector_output = self.inspector_output.as_deref();
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
                     r.draw_terminal_in(&self.tabs[self.active].term, gpu_vp, sel);
                     if rail_cols > 0 {
@@ -2511,10 +3985,15 @@ impl ApplicationHandler for App {
                                 rail_vp,
                                 snapshot,
                                 self.rail_sel,
+                                self.inspector_sel_id,
+                                rail_hover_row,
                                 self.focus == Focus::Rail,
                             );
                         }
                     }
+                    // Draw the evidence instrument after terminal and rail
+                    // surfaces so its seams stay crisp without touching PTY
+                    // cells or changing the established hit-test contract.
                     if inspector_cols > 0 {
                         if let Some(insp_layout_vp) = inspector_vp_layout {
                             let insp_vp = zet_gpu::renderer::Viewport {
@@ -2523,64 +4002,22 @@ impl ApplicationHandler for App {
                                 cols: insp_layout_vp.cols,
                                 rows: insp_layout_vp.rows,
                             };
-                            r.draw_fill(insp_vp, zet_gpu::quad::Rgba::rgb(0.012, 0.018, 0.032));
-                            r.draw_text_row(insp_vp, 0, 0, "Inspector", zet_gpu::quad::Rgba::WHITE);
-                            if let Some(selected) = self.inspector_sel {
-                                let row = selected as u32 + 1;
-                                if row < insp_vp.rows {
-                                    r.draw_fill(
-                                        zet_gpu::renderer::Viewport {
-                                            x: insp_vp.x,
-                                            y: insp_vp.y + row,
-                                            cols: insp_vp.cols,
-                                            rows: 1,
-                                        },
-                                        zet_gpu::quad::Rgba::rgb(0.040, 0.065, 0.125),
-                                    );
-                                }
-                            }
-                            if let Some(snapshot) = self.inspector_cache.snapshot_handle() {
-                                r.draw_text_row(
-                                    insp_vp,
-                                    1,
-                                    0,
-                                    &format!("Session {}", snapshot.session),
-                                    zet_gpu::quad::Rgba::rgb(0.72, 0.78, 0.86),
-                                );
-                                r.draw_text_row(
-                                    insp_vp,
-                                    2,
-                                    0,
-                                    &format!("State {}", snapshot.state),
-                                    zet_gpu::quad::Rgba::rgb(0.72, 0.78, 0.86),
-                                );
-                                r.draw_text_row(
-                                    insp_vp,
-                                    3,
-                                    0,
-                                    &format!("Exit {}", snapshot.exit),
-                                    zet_gpu::quad::Rgba::rgb(0.72, 0.78, 0.86),
-                                );
-                                r.draw_text_row(
-                                    insp_vp,
-                                    4,
-                                    0,
-                                    &format!("Cwd {}", snapshot.cwd),
-                                    zet_gpu::quad::Rgba::rgb(0.72, 0.78, 0.86),
-                                );
-                            } else {
-                                r.draw_text_row(
-                                    insp_vp,
-                                    2,
-                                    0,
-                                    "No session",
-                                    zet_gpu::quad::Rgba::rgb(0.72, 0.78, 0.86),
-                                );
-                            }
+                            Self::draw_inspector(
+                                r,
+                                insp_vp,
+                                inspector_snapshot,
+                                self.inspector_sel_id,
+                                inspector_output,
+                                self.inspector_output_truncated,
+                                inspector_hover_row,
+                                self.focus == Focus::Inspector,
+                            );
                         }
                     }
                     if bar > 0 {
-                        r.draw_tabbar_with_rail(&labels, active, cols, rail_cols);
+                        Self::draw_app_chrome(r, cols as u32, rail_cols as u32, bar, self.layout);
+                        r.draw_tabbar_surface_at(active, labels.len(), cols, rail_cols, bar - 1);
+                        Self::draw_ui_tabbar(r, &labels, active, cols, rail_cols, bar - 1);
                     }
                     if let Some((cx, cy, g)) = ghost {
                         r.draw_ghost(gpu_vp, cy, cx, &g);
@@ -2588,7 +4025,13 @@ impl ApplicationHandler for App {
                     if let Some((hits, cur)) = &search {
                         r.draw_search(&self.tabs[self.active].term, hits, *cur, gpu_vp);
                     }
-                    r.render();
+                    if self.perf_t0.is_some() {
+                        let render_t0 = std::time::Instant::now();
+                        r.render();
+                        eprintln!("perf: render_submit_us={}", render_t0.elapsed().as_micros());
+                    } else {
+                        r.render();
+                    }
                     self.last_frame = std::time::Instant::now();
                     self.needs_draw = false;
                     self.note_frame();
@@ -2659,7 +4102,11 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                let previous = self.mouse_px;
                 self.mouse_px = Some((position.x, position.y));
+                if previous != self.mouse_px {
+                    self.needs_draw = true;
+                }
                 if self.tabs[self.active].selecting {
                     if let Some(cell) = self.mouse_cell() {
                         if let Some(sel) = &mut self.tabs[self.active].selection {
@@ -2686,11 +4133,20 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
     zet_gpu::perf_mark("main");
     let (prog, hook) = shell_program();
     let shell_name = prog.clone();
+    // Establish the instrumentation origin before shell/session startup.
+    // ZET_PERF is read once here; terminal instances receive the resulting
+    // enabled flag explicitly.
+    let perf_enabled = std::env::var_os("ZET_PERF").is_some();
+    let perf_t0 = perf_enabled.then(|| {
+        zet_gpu::perf_mark("perf_t0_init");
+        std::time::Instant::now()
+    });
     let event_loop = EventLoop::new().map_err(io_error)?;
     // Wake the loop the moment PTY bytes land: output renders instantly
     // instead of waiting for the heartbeat.
     let proxy = event_loop.create_proxy();
-    let tab = Tab::spawn(&prog, hook.clone(), proxy.clone());
+    let mut tab = Tab::spawn(&prog, hook.clone(), proxy.clone());
+    tab.term.set_perf_enabled(perf_enabled);
     // Model for plain-language input: explicit ZET_INLINE_SPEC (launch config)
     // wins; else the persisted `zet inline` choice re-read per request;
     // else zero-config local when ollama serves a preferred model.
@@ -2701,10 +4157,6 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
             zet_models::keys::autodetect_local().inspect(|s| eprintln!("zet: inline model {s}"))
         }
     };
-    let perf_t0 = std::env::var("ZET_PERF").ok().map(|_| {
-        zet_gpu::perf_mark("perf_t0_init");
-        std::time::Instant::now()
-    });
     let mut app = App {
         window: None,
         renderer: None,
@@ -2722,6 +4174,10 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         rail_sel: 0,
         chrome: panels::ChromeCache::new(),
         inspector_sel: None,
+        inspector_sel_id: None,
+        inspector_output: None,
+        inspector_output_id: None,
+        inspector_output_truncated: false,
         inspector_cache: panels::InspectorCache::new(),
         #[cfg(test)]
         chrome_query_count: 0,
@@ -2913,6 +4369,10 @@ mod layout_fit_tests {
             rail_sel: 0,
             chrome: super::panels::ChromeCache::new(),
             inspector_sel: None,
+            inspector_sel_id: None,
+            inspector_output: None,
+            inspector_output_id: None,
+            inspector_output_truncated: false,
             inspector_cache: super::panels::InspectorCache::new(),
             #[cfg(test)]
             chrome_query_count: 0,
@@ -2941,19 +4401,19 @@ mod layout_fit_tests {
             crate::window::layout::LayoutMode::Workspace.layout(),
         );
         app.fit_all();
-        assert_eq!(app.tabs[0].term.cols(), 80);
-        assert_eq!(app.tabs[0].term.rows(), 24);
+        assert_eq!(app.tabs[0].term.cols(), 82);
+        assert_eq!(app.tabs[0].term.rows(), 21);
 
         app.tabs.push(make_test_tab());
         app.fit_all();
-        assert_eq!(app.tabs[0].term.cols(), 80);
-        assert_eq!(app.tabs[0].term.rows(), 23);
-        assert_eq!(app.tabs[1].term.cols(), 80);
-        assert_eq!(app.tabs[1].term.rows(), 23);
+        assert_eq!(app.tabs[0].term.cols(), 82);
+        assert_eq!(app.tabs[0].term.rows(), 21);
+        assert_eq!(app.tabs[1].term.cols(), 82);
+        assert_eq!(app.tabs[1].term.rows(), 21);
 
         app.tabs.pop();
         app.fit_all();
-        assert_eq!(app.tabs[0].term.rows(), 24);
+        assert_eq!(app.tabs[0].term.rows(), 21);
     }
 
     #[test]
@@ -2984,9 +4444,9 @@ mod layout_fit_tests {
 
         app.fit_all();
         for tab in &mut app.tabs {
-            assert_eq!((tab.term.cols(), tab.term.rows()), (80, 23));
+            assert_eq!((tab.term.cols(), tab.term.rows()), (82, 21));
             if let Some(session) = &mut tab.session {
-                assert_eq!(session.size().unwrap(), (80, 23));
+                assert_eq!(session.size().unwrap(), (82, 21));
             }
         }
 
@@ -2996,10 +4456,10 @@ mod layout_fit_tests {
         }
 
         app.fit_all();
-        assert_eq!(app.tabs[0].term.cols(), 80);
-        assert_eq!(app.tabs[0].term.rows(), 24);
+        assert_eq!(app.tabs[0].term.cols(), 82);
+        assert_eq!(app.tabs[0].term.rows(), 21);
         if let Some(session) = &mut app.tabs[0].session {
-            assert_eq!(session.size().unwrap(), (80, 24));
+            assert_eq!(session.size().unwrap(), (82, 21));
             session.shutdown();
         }
     }
@@ -3300,13 +4760,13 @@ mod layout_fit_tests {
             crate::window::layout::LayoutMode::Workspace.layout(),
         );
         app.tabs.push(make_test_tab());
-        app.mouse_px = Some((10.0, 160.0));
-        app.handle_mouse_click(10.0, 160.0, 10, 20);
+        app.mouse_px = Some((10.0, 200.0));
+        app.handle_mouse_click(10.0, 200.0, 10, 20);
         assert_eq!(app.focus, super::Focus::Rail);
         assert_eq!(app.rail_sel, 1);
 
-        app.mouse_px = Some((300.0, 40.0));
-        app.handle_mouse_click(300.0, 40.0, 10, 20);
+        app.mouse_px = Some((300.0, 80.0));
+        app.handle_mouse_click(300.0, 80.0, 10, 20);
         assert_eq!(app.focus, super::Focus::Terminal);
         assert!(app.tabs[app.active].selection.is_some());
 
@@ -3327,19 +4787,19 @@ mod layout_fit_tests {
         app.active = 1;
 
         // Rail-area clicks never switch tabs.
-        app.handle_mouse_click(10.0, 0.0, 10, 20);
+        app.handle_mouse_click(10.0, 40.0, 10, 20);
         assert_eq!(app.active, 1);
 
         // The first valid tab segment is tab 0.
-        app.handle_mouse_click(240.0, 0.0, 10, 20);
+        app.handle_mouse_click(240.0, 40.0, 10, 20);
         assert_eq!(app.active, 0);
 
         // The second valid tab segment is tab 1.
-        app.handle_mouse_click(640.0, 0.0, 10, 20);
+        app.handle_mouse_click(640.0, 40.0, 10, 20);
         assert_eq!(app.active, 1);
 
         // Outside the window cannot switch tabs.
-        app.handle_mouse_click(1040.0, 0.0, 10, 20);
+        app.handle_mouse_click(1040.0, 40.0, 10, 20);
         assert_eq!(app.active, 1);
 
         // A click above the window cannot switch tabs.
@@ -3354,7 +4814,7 @@ mod layout_fit_tests {
         );
         zero_rail.tabs.push(make_test_tab());
         zero_rail.active = 1;
-        zero_rail.handle_mouse_click(30.0, 0.0, 10, 20);
+        zero_rail.handle_mouse_click(30.0, 40.0, 10, 20);
         assert_eq!(zero_rail.active, 0);
     }
 
@@ -3370,19 +4830,19 @@ mod layout_fit_tests {
         app.focus = super::Focus::Terminal;
         app.rail_sel = 0;
 
-        app.handle_mouse_click(10.0, 80.0, 10, 20);
+        app.handle_mouse_click(10.0, 120.0, 10, 20);
         assert_eq!(app.focus, super::Focus::Rail);
         assert_eq!(app.rail_sel, 0);
         assert_eq!(app.active, 0);
 
-        app.handle_mouse_click(10.0, 160.0, 10, 20);
+        app.handle_mouse_click(10.0, 200.0, 10, 20);
         assert_eq!(app.rail_sel, 1);
         assert_eq!(app.active, 0);
 
-        app.handle_mouse_click(10.0, 20.0, 10, 20);
+        app.handle_mouse_click(10.0, 60.0, 10, 20);
         assert_eq!(app.rail_sel, 1);
 
-        app.handle_mouse_click(10.0, 200.0, 10, 20);
+        app.handle_mouse_click(10.0, 240.0, 10, 20);
         assert_eq!(app.rail_sel, 1);
 
         app.handle_mouse_click(-1.0, 100.0, 10, 20);
@@ -3684,14 +5144,14 @@ mod layout_fit_tests {
             crate::window::layout::LayoutMode::MissionControl.layout(),
         );
         app.refresh_inspector();
-        app.handle_mouse_click(900.0, 5.0, 10, 20);
+        app.handle_mouse_click(900.0, 65.0, 10, 20);
         assert_eq!(app.focus, super::Focus::Inspector);
         assert_eq!(app.inspector_sel, None);
-        app.handle_mouse_click(900.0, 25.0, 10, 20);
-        assert_eq!(app.inspector_sel, Some(0));
         app.handle_mouse_click(900.0, 85.0, 10, 20);
+        assert_eq!(app.inspector_sel, Some(0));
+        app.handle_mouse_click(900.0, 145.0, 10, 20);
         assert_eq!(app.inspector_sel, Some(3));
-        app.handle_mouse_click(900.0, 200.0, 10, 20);
+        app.handle_mouse_click(900.0, 240.0, 10, 20);
         assert_eq!(app.focus, super::Focus::Inspector);
     }
 
@@ -3790,6 +5250,277 @@ mod layout_fit_tests {
     }
 
     #[test]
+    fn inspector_selection_follows_recorded_command_identity() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let mut ids = Vec::new();
+        for i in 0..9 {
+            let id = store
+                .append(&zet_blocks::Block {
+                    id: 0,
+                    session: "session-a".to_string(),
+                    command: format!("echo {i}"),
+                    output: String::new(),
+                    exit_code: 0,
+                    cwd: "/tmp".to_string(),
+                    git_branch: String::new(),
+                    duration_ms: 1,
+                })
+                .unwrap();
+            ids.push(id);
+        }
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        app.refresh_inspector();
+        assert_eq!(app.inspector_cache.snapshot().unwrap().commands.len(), 8);
+
+        // Select the command whose identity should survive a bounded-list shift.
+        let selected_id = ids[5];
+        let initial_index = app
+            .inspector_cache
+            .snapshot()
+            .unwrap()
+            .commands
+            .iter()
+            .position(|command| command.id == selected_id)
+            .unwrap()
+            + 4;
+        app.focus = super::Focus::Inspector;
+        app.inspector_sel = Some(initial_index);
+        app.inspector_sel_id = Some(selected_id);
+
+        // Append a ninth... actually tenth command, evicting the oldest.
+        app.tabs[0]
+            .recorder
+            .as_ref()
+            .unwrap()
+            .store()
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo 9".to_string(),
+                output: String::new(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+
+        let later = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        app.refresh_inspector_at(later);
+        let snapshot = app.inspector_cache.snapshot().unwrap();
+        let new_index = snapshot
+            .commands
+            .iter()
+            .position(|command| command.id == selected_id)
+            .map(|pos| pos + 4);
+        assert_eq!(app.inspector_sel, new_index);
+        assert_eq!(app.inspector_sel_id, Some(selected_id));
+    }
+
+    #[test]
+    fn inspector_selection_clears_when_selected_command_evicted() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let mut ids = Vec::new();
+        for i in 0..9 {
+            let id = store
+                .append(&zet_blocks::Block {
+                    id: 0,
+                    session: "session-a".to_string(),
+                    command: format!("echo {i}"),
+                    output: String::new(),
+                    exit_code: 0,
+                    cwd: "/tmp".to_string(),
+                    git_branch: String::new(),
+                    duration_ms: 1,
+                })
+                .unwrap();
+            ids.push(id);
+        }
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        app.refresh_inspector();
+
+        let evicted_id = ids[0];
+        // echo 0 is already evicted from the bounded list; force selection to
+        // an identity that cannot be present.
+        app.focus = super::Focus::Inspector;
+        app.inspector_sel = Some(4);
+        app.inspector_sel_id = Some(evicted_id);
+
+        let later = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        app.refresh_inspector_at(later);
+        assert_eq!(app.inspector_sel, None);
+        assert_eq!(app.inspector_sel_id, None);
+    }
+
+    #[test]
+    fn inspector_selected_command_exposes_recorded_output() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let id = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo hi".to_string(),
+                output: "hi\n".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        app.refresh_inspector();
+        app.focus = super::Focus::Inspector;
+        app.inspector_sel = Some(4);
+        app.inspector_sel_id = Some(id);
+        let later = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        app.refresh_inspector_at(later);
+        assert_eq!(app.inspector_output_id, Some(id));
+        assert_eq!(app.inspector_output.as_deref(), Some("hi\n"));
+    }
+
+    #[test]
+    fn inspector_selected_silent_command_exposes_empty_recorded_output() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let id = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "false".to_string(),
+                output: String::new(),
+                exit_code: 1,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        app.refresh_inspector();
+        app.focus = super::Focus::Inspector;
+        app.inspector_sel = Some(4);
+        app.inspector_sel_id = Some(id);
+        let later = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        app.refresh_inspector_at(later);
+
+        assert_eq!(app.inspector_output_id, Some(id));
+        assert_eq!(app.inspector_output.as_deref(), Some(""));
+        assert!(!app.inspector_output_truncated);
+    }
+
+    #[test]
+    fn inspector_output_clears_on_session_replacement() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let id = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo hi".to_string(),
+                output: "hi".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        app.tabs[0].session_id = 10;
+        app.refresh_inspector();
+        app.inspector_sel = Some(4);
+        app.inspector_sel_id = Some(id);
+        app.inspector_output = Some("hi".to_string());
+        app.inspector_output_id = Some(id);
+
+        app.tabs[0].session_id = 20;
+        app.refresh_inspector();
+        assert_eq!(app.inspector_output, None);
+        assert_eq!(app.inspector_output_id, None);
+    }
+
+    #[test]
+    fn inspector_switching_commands_does_not_show_stale_output() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let first = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo first".to_string(),
+                output: "first output".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let second = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo second".to_string(),
+                output: "second output".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        app.refresh_inspector();
+
+        let now = std::time::Instant::now();
+        app.refresh_inspector_at(now);
+        app.inspector_sel = Some(4);
+        app.inspector_sel_id = Some(first);
+        app.inspector_output = None;
+        app.inspector_output_id = None;
+        app.sync_inspector_output();
+        assert_eq!(app.inspector_output.as_deref(), Some("first output"));
+
+        // Switch without advancing the 250 ms poll interval.
+        app.inspector_sel = Some(5);
+        app.inspector_sel_id = Some(second);
+        app.inspector_output = None;
+        app.inspector_output_id = None;
+        app.sync_inspector_output();
+        assert_eq!(app.inspector_output.as_deref(), Some("second output"));
+        assert_ne!(app.inspector_output.as_deref(), Some("first output"));
+    }
+
+    #[test]
     fn inspector_rebuilds_for_same_index_session_replacement() {
         let mut app = make_test_app(
             120,
@@ -3807,4 +5538,112 @@ mod layout_fit_tests {
         assert_eq!(app.inspector_sel, None);
         assert!(app.inspector_cache.snapshot().is_some());
     }
+}
+
+#[test]
+fn aperture_header_descriptor_is_measured_and_clear_of_mode_control() {
+    let (descriptor_x, descriptor_max_width, mode_x) =
+        App::aperture_header_layout(1920, 22, 24, 102);
+    assert!(descriptor_x > 18 + 24 + 14 + 24 + 14);
+    assert!(descriptor_max_width > 0);
+    assert!(mode_x > descriptor_x);
+    // The descriptor is constrained before the mode control.
+    assert!(descriptor_x + descriptor_max_width + 18 <= mode_x);
+}
+
+#[test]
+fn aperture_header_descriptor_uses_real_glyph_metrics() {
+    use zet_gpu::presentation::{UI_BRAND, UI_HEADER};
+    use zet_gpu::text::Shaper;
+
+    let mut shaper = Shaper::new(16.0);
+    let (_cw, ch) = shaper.cell_px();
+
+    let brand_width: u32 = "ZET"
+        .chars()
+        .map(|c| {
+            let glyph = shaper.rasterize_ui_glyph(
+                c,
+                UI_BRAND.size_px,
+                UI_BRAND.line_height_px,
+                UI_BRAND.weight,
+                UI_BRAND.family,
+            );
+            (glyph.advance.max(0.0) + UI_BRAND.tracking_px).round() as u32
+        })
+        .sum();
+    let mode_width = ("WORKSPACE".chars().count() as u32)
+        .saturating_mul(8)
+        .saturating_add(22);
+
+    for width_px in [440u32, 1320u32] {
+        let (descriptor_x, descriptor_max_width, mode_x) =
+            App::aperture_header_layout(width_px, ch, brand_width, mode_width);
+
+        // Brand ink extents.
+        let mut brand_left = u32::MAX;
+        let mut brand_right = 0u32;
+        let mut brand_top = u32::MAX;
+        let mut brand_bottom = 0u32;
+        let brand_x = 18u32 + ch.saturating_mul(2).saturating_sub(8).max(18) + 14;
+        let brand_baseline = 8.0 + UI_BRAND.baseline_offset();
+        let mut pen = 0.0f32;
+        for c in "ZET".chars() {
+            let glyph = shaper.rasterize_ui_glyph(
+                c,
+                UI_BRAND.size_px,
+                UI_BRAND.line_height_px,
+                UI_BRAND.weight,
+                UI_BRAND.family,
+            );
+            let left = brand_x as i32 + pen as i32 + glyph.offset_x;
+            let right = left + glyph.width as i32;
+            let top = (brand_baseline + glyph.offset_y as f32).round() as i32;
+            let bottom = top + glyph.height as i32;
+            brand_left = brand_left.min(left as u32);
+            brand_right = brand_right.max(right as u32);
+            brand_top = brand_top.min(top as u32);
+            brand_bottom = brand_bottom.max(bottom as u32);
+            pen += glyph.advance.max(0.0) + UI_BRAND.tracking_px;
+        }
+
+        // Descriptor ink extents, clipped to the allocated budget.
+        let mut descriptor_left = u32::MAX;
+        let mut descriptor_right = 0u32;
+        let mut descriptor_top = u32::MAX;
+        let mut descriptor_bottom = 0u32;
+        let descriptor_baseline = 8.0 + UI_BRAND.baseline_offset();
+        let mut pen = 0.0f32;
+        for c in "APERTURE / OUTCOME-AWARE TERMINAL".chars() {
+            if pen >= descriptor_max_width as f32 {
+                break;
+            }
+            let glyph = shaper.rasterize_ui_glyph(
+                c,
+                UI_HEADER.size_px,
+                UI_HEADER.line_height_px,
+                UI_HEADER.weight,
+                UI_HEADER.family,
+            );
+            let left = descriptor_x as i32 + pen as i32 + glyph.offset_x;
+            let right = left + glyph.width as i32;
+            let top = (descriptor_baseline + glyph.offset_y as f32).round() as i32;
+            let bottom = top + glyph.height as i32;
+            descriptor_left = descriptor_left.min(left as u32);
+            descriptor_right = descriptor_right.max(right as u32);
+            descriptor_top = descriptor_top.min(top as u32);
+            descriptor_bottom = descriptor_bottom.max(bottom as u32);
+            pen += glyph.advance.max(0.0) + UI_HEADER.tracking_px;
+        }
+
+        assert!(brand_right + 14 <= descriptor_left);
+        assert!(descriptor_bottom <= ch.saturating_mul(2));
+        assert!(descriptor_right < mode_x);
+        assert!(mode_x > descriptor_x);
+    }
+
+    // Zero-width budget is safe and produces no descriptor ink.
+    let (descriptor_x, descriptor_max_width, _) = App::aperture_header_layout(100, 22, 24, 102);
+    assert_eq!(descriptor_max_width, 0);
+    assert!(descriptor_x > 0);
 }

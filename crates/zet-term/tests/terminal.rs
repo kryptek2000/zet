@@ -545,3 +545,99 @@ fn search_matches_multibyte_without_panicking() {
     assert_eq!(m2.len(), 1, "{m2:?}");
     assert_eq!(m2[0].1, 1, "{m2:?}");
 }
+
+#[test]
+fn sgr_reverse_video_sets_reverse_attribute() {
+    let mut t = Terminal::new(10, 4);
+    t.feed(b"\x1b[7mrev\x1b[0m");
+    let cell = t.visible_cell(0, 0).unwrap();
+    assert!(cell.reverse);
+    assert_eq!(cell.c, 'r');
+    let reset = t.visible_cell(3, 0).unwrap();
+    assert!(!reset.reverse);
+}
+
+#[test]
+fn sgr_reverse_off_preserves_other_attributes() {
+    let mut t = Terminal::new(10, 4);
+    t.feed(b"\x1b[1;7mboldrev\x1b[27mafter");
+    let cell = t.visible_cell(0, 0).unwrap();
+    assert!(cell.bold);
+    assert!(cell.reverse);
+    let after = t.visible_cell(7, 0).unwrap();
+    assert!(after.bold);
+    assert!(!after.reverse);
+}
+
+#[test]
+fn sgr_truecolor_foreground_and_background() {
+    let mut t = Terminal::new(10, 4);
+    t.feed(b"\x1b[38;2;1;2;3;48;5;7mX");
+    let cell = t.visible_cell(0, 0).unwrap();
+    assert_eq!(cell.fg, zet_term::Color::Rgb(1, 2, 3));
+    assert_eq!(cell.bg, zet_term::Color::Indexed(7));
+}
+
+#[test]
+fn sgr_256_and_bright_colors() {
+    let mut t = Terminal::new(10, 4);
+    t.feed(b"\x1b[91;102mX");
+    let cell = t.visible_cell(0, 0).unwrap();
+    assert_eq!(cell.fg, zet_term::Color::Indexed(9));
+    assert_eq!(cell.bg, zet_term::Color::Indexed(10));
+}
+#[test]
+fn first_output_time_is_recorded_when_perf_enabled() {
+    let mut t = Terminal::with_perf(10, 4, true);
+    assert!(t.first_output_time().is_none());
+    t.feed(b"hello");
+    assert!(t.first_output_time().is_some());
+}
+
+#[test]
+fn first_output_time_ignores_empty_feed() {
+    let mut t = Terminal::with_perf(10, 4, true);
+    t.feed(b"");
+    assert!(t.first_output_time().is_none());
+    t.feed(b"x");
+    assert!(t.first_output_time().is_some());
+}
+
+#[test]
+fn first_output_time_is_not_collected_when_disabled() {
+    let mut t = Terminal::with_perf(10, 4, false);
+    t.feed(b"hello");
+    assert!(t.first_output_time().is_none());
+    assert!(t.take_first_output_time().is_none());
+}
+
+#[test]
+fn first_output_time_is_recorded_once_for_repeated_feeds() {
+    let mut t = Terminal::with_perf(10, 4, true);
+    t.feed(b"first");
+    let first = t.first_output_time();
+    t.feed(b"second");
+    assert_eq!(t.first_output_time(), first);
+    assert!(t.take_first_output_time().is_some());
+    assert!(t.take_first_output_time().is_none());
+}
+
+#[test]
+fn first_output_time_handles_very_early_output() {
+    let mut t = Terminal::with_perf(10, 4, true);
+    t.feed(b"x");
+    assert!(t.first_output_time().is_some());
+    assert!(t.take_first_output_time().is_some());
+    assert!(t.take_first_output_time().is_none());
+}
+
+#[test]
+fn absent_first_output_time_is_not_consumed() {
+    let mut t = Terminal::with_perf(10, 4, true);
+    assert!(t.take_first_output_time().is_none());
+    t.feed(b"");
+    assert!(t.take_first_output_time().is_none());
+    t.feed(b"x");
+    assert!(t.take_first_output_time().is_some());
+    assert!(t.take_first_output_time().is_none());
+}

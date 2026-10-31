@@ -14,6 +14,7 @@ pub struct Cell {
     pub fg: Color,
     pub bg: Color,
     pub bold: bool,
+    pub reverse: bool,
 }
 
 impl Cell {
@@ -23,6 +24,7 @@ impl Cell {
             fg: Color::Default,
             bg: Color::Default,
             bold: false,
+            reverse: false,
         }
     }
 }
@@ -32,6 +34,7 @@ struct Pen {
     fg: Color,
     bg: Color,
     bold: bool,
+    reverse: bool,
 }
 
 impl Pen {
@@ -40,6 +43,7 @@ impl Pen {
             fg: Color::Default,
             bg: Color::Default,
             bold: false,
+            reverse: false,
         };
     }
 
@@ -48,16 +52,49 @@ impl Pen {
             self.reset();
             return;
         }
-        for &p in params {
-            match p {
+        let mut i = 0;
+        while i < params.len() {
+            match params[i] {
                 0 => self.reset(),
                 1 => self.bold = true,
-                30..=37 => self.fg = Color::Indexed((p - 30) as u8),
-                40..=47 => self.bg = Color::Indexed((p - 40) as u8),
-                90..=97 => self.fg = Color::Indexed((p - 90 + 8) as u8),
-                100..=107 => self.bg = Color::Indexed((p - 100 + 8) as u8),
+                7 => self.reverse = true,
+                22 => self.bold = false,
+                27 => self.reverse = false,
+                30..=37 => self.fg = Color::Indexed((params[i] - 30) as u8),
+                38 => {
+                    if i + 2 < params.len() && params[i + 1] == 5 {
+                        self.fg = Color::Indexed(params[i + 2] as u8);
+                        i += 2;
+                    } else if i + 4 < params.len() && params[i + 1] == 2 {
+                        self.fg = Color::Rgb(
+                            params[i + 2] as u8,
+                            params[i + 3] as u8,
+                            params[i + 4] as u8,
+                        );
+                        i += 4;
+                    }
+                }
+                39 => self.fg = Color::Default,
+                40..=47 => self.bg = Color::Indexed((params[i] - 40) as u8),
+                48 => {
+                    if i + 2 < params.len() && params[i + 1] == 5 {
+                        self.bg = Color::Indexed(params[i + 2] as u8);
+                        i += 2;
+                    } else if i + 4 < params.len() && params[i + 1] == 2 {
+                        self.bg = Color::Rgb(
+                            params[i + 2] as u8,
+                            params[i + 3] as u8,
+                            params[i + 4] as u8,
+                        );
+                        i += 4;
+                    }
+                }
+                49 => self.bg = Color::Default,
+                90..=97 => self.fg = Color::Indexed((params[i] - 90 + 8) as u8),
+                100..=107 => self.bg = Color::Indexed((params[i] - 100 + 8) as u8),
                 _ => {}
             }
+            i += 1;
         }
     }
 }
@@ -151,6 +188,10 @@ pub struct Terminal {
     markers: Vec<Marker>,
     /// Pending terminal responses to write back to the PTY.
     responses: Vec<Vec<u8>>,
+    /// First time bytes were fed to this terminal (perf instrumentation).
+    first_output: Option<std::time::Instant>,
+    first_output_reported: bool,
+    perf_enabled: bool,
     /// Configured default foreground/background colors used for OSC 10/11
     /// color queries. These are RGB triples, not palette indices.
     default_fg: (u8, u8, u8),
@@ -163,6 +204,34 @@ pub struct Terminal {
 impl Terminal {
     pub fn new(cols: usize, rows: usize) -> Self {
         Self::with_scrollback(cols, rows, 10_000)
+    }
+
+    pub fn with_perf(cols: usize, rows: usize, perf_enabled: bool) -> Self {
+        Self::with_scrollback_and_perf(cols, rows, 10_000, perf_enabled)
+    }
+
+    pub fn with_scrollback_and_perf(
+        cols: usize,
+        rows: usize,
+        scrollback_cap: usize,
+        perf_enabled: bool,
+    ) -> Self {
+        let mut terminal = Self::with_scrollback(cols, rows, scrollback_cap);
+        terminal.perf_enabled = perf_enabled;
+        terminal
+    }
+
+    pub fn new_with_perf(cols: usize, rows: usize, perf_enabled: bool) -> Self {
+        Self::with_perf(cols, rows, perf_enabled)
+    }
+
+    pub fn with_perf_scrollback(
+        cols: usize,
+        rows: usize,
+        scrollback_cap: usize,
+        perf_enabled: bool,
+    ) -> Self {
+        Self::with_scrollback_and_perf(cols, rows, scrollback_cap, perf_enabled)
     }
 
     pub fn with_scrollback(cols: usize, rows: usize, scrollback_cap: usize) -> Self {
@@ -188,12 +257,16 @@ impl Terminal {
                 fg: Color::Default,
                 bg: Color::Default,
                 bold: false,
+                reverse: false,
             },
             state: State::Ground,
             osc_buf: Vec::new(),
             events: Vec::new(),
             markers: Vec::new(),
             responses: Vec::new(),
+            first_output: None,
+            first_output_reported: false,
+            perf_enabled: false,
             default_fg: (255, 255, 255),
             default_bg: (0, 0, 0),
             utf8_buf: [0; 4],
@@ -203,6 +276,9 @@ impl Terminal {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
+        if self.perf_enabled && self.first_output.is_none() && !bytes.is_empty() {
+            self.first_output = Some(std::time::Instant::now());
+        }
         for &b in bytes {
             match self.state {
                 State::Ground => self.ground(b),
@@ -633,6 +709,7 @@ impl Terminal {
             fg: self.pen.fg,
             bg: self.pen.bg,
             bold: self.pen.bold,
+            reverse: self.pen.reverse,
         };
         self.cx += 1;
         if self.cx >= self.cols {
@@ -848,6 +925,30 @@ impl Terminal {
     /// Absolute-row base for the wheel-shifted view (selection math).
     pub fn visible_base(&self) -> usize {
         self.abs_base().saturating_sub(self.view_offset)
+    }
+
+    /// First time bytes were fed, if any.
+    pub fn first_output_time(&self) -> Option<std::time::Instant> {
+        self.first_output
+    }
+    pub fn set_perf_enabled(&mut self, enabled: bool) {
+        self.perf_enabled = enabled;
+    }
+
+    pub fn take_first_output_time(&mut self) -> Option<std::time::Instant> {
+        if self.first_output_reported {
+            return None;
+        }
+        if let Some(first_output) = self.first_output {
+            self.first_output_reported = true;
+            Some(first_output)
+        } else {
+            None
+        }
+    }
+
+    pub fn first_output_reported(&self) -> bool {
+        self.first_output_reported
     }
 
     /// Alt screen active (vim/helix): the visible grid is NOT the main

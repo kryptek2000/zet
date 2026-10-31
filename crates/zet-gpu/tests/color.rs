@@ -40,3 +40,43 @@ fn bold_brightens_standard_colors() {
     );
     assert_eq!(term_color(Color::Default, true), Rgba::WHITE);
 }
+
+#[test]
+fn indexed_256_palette_uses_standard_cube_and_grayscale() {
+    // Cube endpoints and a mid-gray entry.
+    assert_eq!(
+        term_color(Color::Indexed(16), false),
+        Rgba::srgb(0.0, 0.0, 0.0)
+    );
+    assert_eq!(
+        term_color(Color::Indexed(231), false),
+        Rgba::srgb(1.0, 1.0, 1.0)
+    );
+    assert_eq!(
+        term_color(Color::Indexed(232), false),
+        Rgba::srgb(8.0 / 255.0, 8.0 / 255.0, 8.0 / 255.0)
+    );
+    assert_eq!(
+        term_color(Color::Indexed(255), false),
+        Rgba::srgb(238.0 / 255.0, 238.0 / 255.0, 238.0 / 255.0)
+    );
+
+    // Representative cube entries.
+    let c21 = term_color(Color::Indexed(21), false);
+    assert!((c21.b - 1.0).abs() < 1e-3, "21 b = {}", c21.b);
+    let c46 = term_color(Color::Indexed(46), false);
+    assert!((c46.g - 1.0).abs() < 1e-3, "46 g = {}", c46.g);
+    let c196 = term_color(Color::Indexed(196), false);
+    assert!((c196.r - 1.0).abs() < 1e-3, "196 r = {}", c196.r);
+
+    // Index 244 must be grayscale, not wrap into the 16-color palette.
+    let c244 = term_color(Color::Indexed(244), false);
+    let expected244 = Rgba::srgb(128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0);
+    assert!((c244.r - expected244.r).abs() < 1e-3, "244 r = {}", c244.r);
+    assert!((c244.g - expected244.g).abs() < 1e-3, "244 g = {}", c244.g);
+    assert!((c244.b - expected244.b).abs() < 1e-3, "244 b = {}", c244.b);
+    assert_ne!(
+        term_color(Color::Indexed(244), false),
+        term_color(Color::Indexed(8), false)
+    );
+}

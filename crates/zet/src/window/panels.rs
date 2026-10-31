@@ -50,9 +50,12 @@ pub struct SessionRow {
 /// A real recorded command as shown in the rail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandRow {
+    pub id: i64,
     pub command: String,
     pub exit: String,
     pub duration: String,
+    pub cwd: String,
+    pub git_branch: String,
     pub provenance: Provenance,
 }
 
@@ -213,6 +216,25 @@ pub fn format_command_row(command: &str, exit: &str, duration: &str, cols: u32) 
         right
     } else {
         format!("{command} {right}")
+    }
+}
+
+/// Format the second line of a two-row command card. The readable form keeps
+/// the field names when the row has room; the existing bounded formatter is
+/// the conservative fallback for narrow rails so a duration unit is never
+/// rendered as a misleading bare number.
+pub fn format_command_metadata(exit: &str, duration: &str, cols: u32) -> String {
+    let cols = cols as usize;
+    if cols == 0 {
+        return String::new();
+    }
+    let exit = single_line(exit);
+    let duration = single_line(duration);
+    let labeled = format!("exit {exit}  {duration}");
+    if text_cells(&labeled) <= cols {
+        labeled
+    } else {
+        format_command_row("", &exit, &duration, cols as u32)
     }
 }
 
@@ -483,6 +505,7 @@ pub enum RailRow {
     SessionDetail(usize),
     CommandsHeader,
     Command(usize),
+    CommandDetail(usize),
     Footer,
     Empty,
 }
@@ -492,6 +515,9 @@ pub const SESSION_CARD_ROWS: usize = 2;
 /// Expanded rails leave one blank row between cards. Compact rails spend
 /// every row on a real session instead.
 pub const SESSION_GAP_ROWS: usize = 1;
+/// Every observed command owns a command line and a separate evidence line.
+/// Keeping this in the pure layout model makes drawing and hit-testing agree.
+pub const COMMAND_CARD_ROWS: usize = 2;
 
 /// Deterministic rail row layout shared by rendering and hit testing.
 ///
@@ -543,15 +569,17 @@ pub fn rail_rows(viewport_rows: u32, session_count: usize, command_count: usize)
         }
     }
 
-    if command_count > 0 && cursor + 2 < footer_row {
+    if command_count > 0 && cursor + 1 + COMMAND_CARD_ROWS < footer_row {
         rows[cursor] = RailRow::Empty;
         cursor += 1;
         rows[cursor] = RailRow::CommandsHeader;
         cursor += 1;
-        let command_capacity = footer_row.saturating_sub(cursor);
+        let command_capacity = footer_row.saturating_sub(cursor) / COMMAND_CARD_ROWS;
         let visible_commands = command_count.min(command_capacity);
         for i in 0..visible_commands {
-            rows[cursor + i] = RailRow::Command(i);
+            let command_row = cursor + i * COMMAND_CARD_ROWS;
+            rows[command_row] = RailRow::Command(i);
+            rows[command_row + 1] = RailRow::CommandDetail(i);
         }
     }
 
@@ -574,6 +602,21 @@ pub fn rail_row_target(row: u32, session_count: usize, viewport_rows: u32) -> Op
     rail_session_at_row(row, session_count, viewport_rows)
 }
 
+/// Command index for a clicked activity row, if the row is real. Keeping
+/// this beside `rail_rows` makes the visual stream and hit testing share one
+/// bounded layout contract.
+pub fn rail_command_at_row(
+    row: u32,
+    session_count: usize,
+    command_count: usize,
+    viewport_rows: u32,
+) -> Option<usize> {
+    match rail_rows(viewport_rows, session_count, command_count).get(row as usize) {
+        Some(RailRow::Command(index)) | Some(RailRow::CommandDetail(index)) => Some(*index),
+        _ => None,
+    }
+}
+
 /// Backwards-compatible alias.
 pub fn rail_row_layout(
     viewport_rows: u32,
@@ -585,7 +628,7 @@ pub fn rail_row_layout(
 
 #[cfg(test)]
 mod rail_row_tests {
-    use super::{rail_rows, rail_session_at_row, RailRow};
+    use super::{rail_command_at_row, rail_rows, rail_session_at_row, RailRow, COMMAND_CARD_ROWS};
 
     #[test]
     fn one_session_has_two_rows_and_footer_last() {
@@ -647,7 +690,57 @@ mod rail_row_tests {
                 .count(),
             3
         );
+        assert_eq!(rows[11], RailRow::Command(0));
+        assert_eq!(rows[12], RailRow::CommandDetail(0));
+        assert_eq!(rows[13], RailRow::Command(1));
+        assert_eq!(rows[14], RailRow::CommandDetail(1));
+        assert_eq!(rows[15], RailRow::Command(2));
+        assert_eq!(rows[16], RailRow::CommandDetail(2));
         assert_eq!(rows[19], RailRow::Footer);
+    }
+
+    #[test]
+    fn rail_command_hit_testing_matches_observed_rows() {
+        assert_eq!(rail_command_at_row(11, 2, 3, 20), Some(0));
+        assert_eq!(rail_command_at_row(12, 2, 3, 20), Some(0));
+        assert_eq!(rail_command_at_row(13, 2, 3, 20), Some(1));
+        assert_eq!(rail_command_at_row(14, 2, 3, 20), Some(1));
+        assert_eq!(rail_command_at_row(15, 2, 3, 20), Some(2));
+        assert_eq!(rail_command_at_row(16, 2, 3, 20), Some(2));
+        assert_eq!(rail_command_at_row(10, 2, 3, 20), None);
+        assert_eq!(rail_command_at_row(19, 2, 3, 20), None);
+    }
+
+    #[test]
+    fn commands_are_paired_and_never_cross_the_footer() {
+        for rows in 0u32..=40 {
+            for sessions in 0usize..=8 {
+                for commands in 0usize..=8 {
+                    let layout = rail_rows(rows, sessions, commands);
+                    for (row, kind) in layout.iter().enumerate() {
+                        let Some(index) = (match kind {
+                            RailRow::Command(index) | RailRow::CommandDetail(index) => Some(*index),
+                            _ => None,
+                        }) else {
+                            continue;
+                        };
+                        let expected = if matches!(kind, RailRow::Command(_)) {
+                            RailRow::CommandDetail(index)
+                        } else {
+                            RailRow::Command(index)
+                        };
+                        let pair = layout.get(if matches!(kind, RailRow::Command(_)) {
+                            row + 1
+                        } else {
+                            row.saturating_sub(1)
+                        });
+                        assert_eq!(pair, Some(&expected), "unpaired command row {row}");
+                        assert!(row < layout.len().saturating_sub(1));
+                    }
+                }
+            }
+        }
+        assert_eq!(COMMAND_CARD_ROWS, 2);
     }
 
     #[test]
@@ -701,6 +794,39 @@ mod rail_row_tests {
         for rows in 0u32..=20 {
             assert_eq!(rail_session_at_row(rows.saturating_sub(1), 3, rows), None);
         }
+    }
+}
+
+#[cfg(test)]
+mod inspector_layout_tests {
+    use super::{
+        inspector_command_row, inspector_detail_start, inspector_selection_at_row,
+        INSPECTOR_CONTEXT_ROWS,
+    };
+
+    #[test]
+    fn inspector_context_and_activity_rows_are_stable() {
+        assert_eq!(inspector_command_row(0), 7);
+        assert_eq!(inspector_command_row(3), 10);
+        assert_eq!(inspector_selection_at_row(1, 2, 30), Some(0));
+        assert_eq!(inspector_selection_at_row(4, 2, 30), Some(3));
+        assert_eq!(
+            inspector_selection_at_row(7, 2, 30),
+            Some(INSPECTOR_CONTEXT_ROWS)
+        );
+        assert_eq!(
+            inspector_selection_at_row(8, 2, 30),
+            Some(INSPECTOR_CONTEXT_ROWS + 1)
+        );
+    }
+
+    #[test]
+    fn inspector_sections_and_detail_surface_are_not_click_targets() {
+        assert_eq!(inspector_selection_at_row(0, 2, 30), None);
+        assert_eq!(inspector_selection_at_row(6, 2, 30), None);
+        assert_eq!(inspector_selection_at_row(9, 2, 30), None);
+        assert_eq!(inspector_selection_at_row(20, 2, 12), None);
+        assert_eq!(inspector_detail_start(2), 10);
     }
 }
 
@@ -857,6 +983,27 @@ mod tests {
         let row = format_command_row("make --a-very-long-target-name", "—", "—", 24);
         assert!(row.ends_with("— —"));
         assert_fits(&row, 24);
+    }
+
+    #[test]
+    fn command_metadata_prefers_labeled_evidence_when_it_fits() {
+        let row = format_command_metadata("127", "812ms", 20);
+        assert_eq!(row, "exit 127  812ms");
+        assert_fits(&row, 20);
+    }
+
+    #[test]
+    fn command_metadata_stays_bounded_on_narrow_rails() {
+        for cols in 0..=24u32 {
+            let row = format_command_metadata("127", "812ms", cols);
+            assert_fits(&row, cols);
+            if cols >= 6 {
+                assert!(
+                    row.ends_with("812ms") || row.ends_with("…ms"),
+                    "cols={cols}: duration lost in {row:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1022,6 +1169,62 @@ pub fn sanitize_inspector_text(text: &str, max_cells: usize) -> String {
     truncate_to_cells(collapsed.trim(), max_cells)
 }
 
+/// Sanitize recorded command output for bounded Inspector display. Preserves
+/// line breaks while removing other control characters and bounding the
+/// result.
+pub fn sanitize_inspector_output(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    for (count, c) in text.chars().enumerate() {
+        if count >= max_chars {
+            break;
+        }
+        if c == '\n' {
+            out.push('\n');
+        } else if c == '\r' || c.is_control() {
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Four context rows remain keyboard-selectable for compatibility with the
+/// P3-A1 focus contract. Activity rows start below a dedicated section label.
+pub const INSPECTOR_CONTEXT_ROWS: usize = 4;
+pub const INSPECTOR_ACTIVITY_START: u32 = 7;
+
+pub fn inspector_command_row(index: usize) -> u32 {
+    INSPECTOR_ACTIVITY_START + index as u32
+}
+
+/// Translate an Inspector click into the stable selection index used by App.
+/// Section labels, empty space, and the detail surface are not selectable.
+pub fn inspector_selection_at_row(
+    row: u32,
+    command_count: usize,
+    viewport_rows: u32,
+) -> Option<usize> {
+    if (1..=INSPECTOR_CONTEXT_ROWS as u32).contains(&row) {
+        return Some(row as usize - 1);
+    }
+    let start = INSPECTOR_ACTIVITY_START;
+    let end = start.saturating_add(command_count as u32);
+    if row >= start && row < end && row < viewport_rows {
+        return Some(INSPECTOR_CONTEXT_ROWS + (row - start) as usize);
+    }
+    None
+}
+
+pub fn inspector_detail_start(command_count: usize) -> u32 {
+    INSPECTOR_ACTIVITY_START
+        .saturating_add(command_count as u32)
+        .saturating_add(1)
+}
+
 /// Read-only snapshot for the first Contextual Inspector slice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InspectorSnapshot {
@@ -1030,6 +1233,7 @@ pub struct InspectorSnapshot {
     pub cwd: String,
     pub state: String,
     pub exit: String,
+    pub commands: Vec<CommandRow>,
 }
 
 /// Dirty-flagged cache for Inspector snapshots.
@@ -1043,6 +1247,7 @@ pub struct InspectorCache {
     pub last_phase: Option<String>,
     pub last_tab_count: usize,
     pub last_active_dead: bool,
+    pub last_blocks: usize,
     pub last_refresh: Option<Instant>,
     pub poll_interval: Duration,
 }
@@ -1058,6 +1263,7 @@ impl InspectorCache {
             last_phase: None,
             last_tab_count: usize::MAX,
             last_active_dead: true,
+            last_blocks: usize::MAX,
             last_refresh: None,
             poll_interval: Duration::from_millis(250),
         }
@@ -1164,6 +1370,7 @@ mod inspector_cache_tests {
             cwd: "/tmp".to_string(),
             state: "prompt".to_string(),
             exit: "—".to_string(),
+            commands: Vec::new(),
         };
         cache.commit_refresh(
             1,
@@ -1188,6 +1395,7 @@ mod inspector_cache_tests {
             cwd: "/tmp".to_string(),
             state: "prompt".to_string(),
             exit: "—".to_string(),
+            commands: Vec::new(),
         };
         cache.commit_refresh(
             1,
@@ -1211,6 +1419,7 @@ mod inspector_cache_tests {
             cwd: "/tmp".to_string(),
             state: "prompt".to_string(),
             exit: "—".to_string(),
+            commands: Vec::new(),
         };
         cache.commit_refresh(
             1,
