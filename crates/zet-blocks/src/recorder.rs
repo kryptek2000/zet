@@ -91,6 +91,14 @@ impl Recorder {
         &self.store
     }
 
+    pub fn timeline(&self, limit: usize) -> rusqlite::Result<Vec<Block>> {
+        self.store.timeline(limit)
+    }
+
+    pub fn latest_block_id(&self) -> rusqlite::Result<Option<i64>> {
+        self.store.latest_block_id()
+    }
+
     pub fn output_preview(
         &self,
         id: i64,

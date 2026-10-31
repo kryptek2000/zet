@@ -228,11 +228,17 @@ struct App {
     /// the active session/store. Visual row indices remain in
     /// `inspector_sel`.
     inspector_sel_id: Option<i64>,
+    /// Whether the Inspector is showing the cross-session observed work
+    /// timeline instead of the active session's commands.
+    inspector_timeline: bool,
     /// Bounded, sanitized output for the currently selected recorded
     /// command, if available.
     inspector_output: Option<String>,
     inspector_output_id: Option<i64>,
     inspector_output_truncated: bool,
+    /// Selected Timeline event whose bounded output is expanded in the
+    /// preview. Cleared whenever a different event becomes selected.
+    inspector_expanded_id: Option<i64>,
     inspector_cache: panels::InspectorCache,
     #[cfg(test)]
     pub chrome_query_count: usize,
@@ -982,6 +988,7 @@ impl App {
                 self.inspector_output = None;
                 self.inspector_output_id = None;
                 self.inspector_output_truncated = false;
+                self.inspector_expanded_id = None;
             }
             return;
         }
@@ -991,6 +998,7 @@ impl App {
             self.inspector_output = None;
             self.inspector_output_id = None;
             self.inspector_output_truncated = false;
+            self.inspector_expanded_id = None;
         }
         let phase = self
             .tabs
@@ -1020,6 +1028,7 @@ impl App {
             self.inspector_output = None;
             self.inspector_output_id = None;
             self.inspector_output_truncated = false;
+            self.inspector_expanded_id = None;
         }
         let cheap_changed = self.inspector_cache.cheap_changed(
             session_id,
@@ -1031,6 +1040,21 @@ impl App {
         );
         if !cheap_changed && !self.inspector_cache.poll_due(now) {
             return;
+        }
+        // A command recorded in another session changes the cross-session
+        // timeline even when the active session is unchanged. This query is
+        // only performed when a refresh is already due, avoiding per-frame
+        // database work.
+        let latest_timeline_id = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.recorder.as_ref())
+            .and_then(|recorder| recorder.latest_block_id().ok())
+            .flatten();
+        let mut cheap_changed = cheap_changed;
+        if latest_timeline_id != self.inspector_cache.last_timeline_max_id {
+            cheap_changed = true;
+            self.inspector_cache.mark_dirty();
         }
         let session_id = self
             .tabs
@@ -1048,7 +1072,14 @@ impl App {
                 if !self
                     .inspector_cache
                     .snapshot()
-                    .map(|snapshot| snapshot.commands.iter().any(|command| command.id == id))
+                    .map(|snapshot| {
+                        let displayed = if self.inspector_timeline {
+                            &snapshot.timeline
+                        } else {
+                            &snapshot.commands
+                        };
+                        displayed.iter().any(|command| command.id == id)
+                    })
                     .unwrap_or(false)
                 {
                     self.inspector_sel = None;
@@ -1056,19 +1087,22 @@ impl App {
                     self.inspector_output = None;
                     self.inspector_output_id = None;
                     self.inspector_output_truncated = false;
+                    self.inspector_expanded_id = None;
                 }
             }
             self.sync_inspector_output();
+            self.inspector_cache.last_timeline_max_id = latest_timeline_id;
             self.inspector_cache.mark_refreshed(now);
             return;
         }
         let snapshot = self.build_inspector_snapshot();
         if let Some(id) = self.inspector_sel_id {
-            if let Some(pos) = snapshot
-                .commands
-                .iter()
-                .position(|command| command.id == id)
-            {
+            let displayed = if self.inspector_timeline {
+                &snapshot.timeline
+            } else {
+                &snapshot.commands
+            };
+            if let Some(pos) = displayed.iter().position(|command| command.id == id) {
                 self.inspector_sel = Some(panels::INSPECTOR_CONTEXT_ROWS + pos);
             } else {
                 self.inspector_sel = None;
@@ -1076,6 +1110,7 @@ impl App {
                 self.inspector_output = None;
                 self.inspector_output_id = None;
                 self.inspector_output_truncated = false;
+                self.inspector_expanded_id = None;
             }
         }
         self.inspector_cache.commit_refresh(
@@ -1089,22 +1124,158 @@ impl App {
             now,
         );
         self.inspector_cache.last_blocks = block_count;
+        self.inspector_cache.last_timeline_max_id = latest_timeline_id;
         self.sync_inspector_output();
     }
 
+    fn inspector_view(&self) -> panels::InspectorView {
+        if self.inspector_timeline {
+            panels::InspectorView::Timeline
+        } else {
+            panels::InspectorView::Session
+        }
+    }
+
+    fn inspector_displayed(&self) -> Option<&[panels::CommandRow]> {
+        let snapshot = self.inspector_cache.snapshot()?;
+        Some(if self.inspector_timeline {
+            &snapshot.timeline
+        } else {
+            &snapshot.commands
+        })
+    }
+
+    fn inspector_expanded(&self) -> bool {
+        self.inspector_expanded_id.is_some() && self.inspector_expanded_id == self.inspector_sel_id
+    }
+
+    fn clear_inspector_selection(&mut self) {
+        self.inspector_sel = None;
+        self.inspector_sel_id = None;
+        self.inspector_output = None;
+        self.inspector_output_id = None;
+        self.inspector_output_truncated = false;
+        self.inspector_expanded_id = None;
+    }
+
+    /// Switch views and drop every piece of stale selection/output state
+    /// before the new layout is painted.
+    fn set_inspector_timeline(&mut self, timeline: bool) {
+        self.inspector_timeline = timeline;
+        self.clear_inspector_selection();
+        self.inspector_cache.mark_dirty();
+        self.needs_draw = true;
+    }
+
+    fn inspector_visible_count(&self) -> usize {
+        let rows = self
+            .frame_layout()
+            .inspector
+            .map(|viewport| viewport.rows)
+            .unwrap_or(0);
+        let count = self
+            .inspector_displayed()
+            .map(|displayed| displayed.len())
+            .unwrap_or(0);
+        panels::inspector_visible_commands(
+            self.inspector_view(),
+            rows,
+            count,
+            self.inspector_expanded(),
+        )
+    }
+
+    fn inspector_selection_id(&self, selection: Option<usize>) -> Option<i64> {
+        let position = selection.and_then(panels::inspector_command_position)?;
+        self.inspector_displayed()
+            .and_then(|displayed| displayed.get(position))
+            .map(|command| command.id)
+    }
+
+    /// Move over the currently displayed and actually visible commands.
+    /// Hidden entries are not part of the selectable set.
+    fn move_inspector_selection(&mut self, delta: isize) {
+        let visible = self.inspector_visible_count();
+        if visible == 0 {
+            self.clear_inspector_selection();
+            self.needs_draw = true;
+            return;
+        }
+        let current = self
+            .inspector_sel
+            .and_then(panels::inspector_command_position)
+            .filter(|position| *position < visible);
+        let next = match current {
+            Some(position) => (position as isize + delta).rem_euclid(visible as isize) as usize,
+            None if delta < 0 => visible - 1,
+            None => 0,
+        };
+        let id = self
+            .inspector_displayed()
+            .and_then(|displayed| displayed.get(next))
+            .map(|command| command.id);
+        self.inspector_sel = Some(panels::inspector_selection_for_command(next));
+        self.inspector_sel_id = id;
+        self.inspector_expanded_id = None;
+        self.inspector_output = None;
+        self.inspector_output_id = None;
+        self.inspector_output_truncated = false;
+        self.sync_inspector_output();
+        self.needs_draw = true;
+    }
+
+    /// Enter inspects the selected Timeline event by expanding or collapsing
+    /// its bounded output preview. With no selection, Enter selects the first
+    /// visible observed event.
+    fn inspector_enter(&mut self) {
+        if !self.inspector_timeline {
+            return;
+        }
+        if self.inspector_sel_id.is_none() {
+            self.move_inspector_selection(1);
+            return;
+        }
+        let selected_id = self.inspector_sel_id;
+        if self.inspector_expanded_id == selected_id {
+            self.inspector_expanded_id = None;
+        } else {
+            self.inspector_expanded_id = selected_id;
+        }
+        self.sync_inspector_output();
+        self.needs_draw = true;
+    }
+
     fn sync_inspector_output(&mut self) {
+        if self.inspector_expanded_id.is_some()
+            && self.inspector_expanded_id != self.inspector_sel_id
+        {
+            self.inspector_expanded_id = None;
+        }
         let selected_id = self.inspector_sel_id;
         if selected_id == self.inspector_output_id {
             if selected_id.is_none() {
                 self.inspector_output = None;
+                self.inspector_output_truncated = false;
+                self.inspector_expanded_id = None;
             }
             return;
         }
         self.inspector_output_id = selected_id;
         let preview = selected_id.and_then(|id| {
+            let snapshot = self.inspector_cache.snapshot()?;
+            let displayed = if self.inspector_timeline {
+                &snapshot.timeline
+            } else {
+                &snapshot.commands
+            };
+            let entry = displayed.iter().find(|command| command.id == id)?;
             let tab = self.tabs.get(self.active)?;
             let recorder = tab.recorder.as_ref()?;
-            recorder.output_preview(id, 4096).ok().flatten()
+            recorder
+                .store()
+                .output_preview(entry.session.as_str(), id, 4096)
+                .ok()
+                .flatten()
         });
         self.inspector_output_truncated = preview
             .as_ref()
@@ -1154,6 +1325,7 @@ impl App {
                     .into_iter()
                     .map(|block| panels::CommandRow {
                         id: block.id,
+                        session: block.session.clone(),
                         command: zet_blocks::scrub_secrets(&block.command),
                         exit: block.exit_code.to_string(),
                         duration: format!("{}ms", block.duration_ms),
@@ -1177,6 +1349,38 @@ impl App {
                 row
             })
             .collect();
+
+        // Bounded cross-session observed work timeline. This uses metadata
+        // only; full output is retrieved separately by block identity. A
+        // readable store with zero rows is an empty history; a missing
+        // recorder or a failed read is an unavailable history. They must not
+        // be presented as the same state.
+        let (timeline_blocks, timeline_availability) =
+            match tab.and_then(|tab| tab.recorder.as_ref()) {
+                Some(recorder) => match recorder.store().timeline(8) {
+                    Ok(blocks) => (blocks, panels::TimelineAvailability::Recorded),
+                    Err(_) => (Vec::new(), panels::TimelineAvailability::Unavailable),
+                },
+                None => (Vec::new(), panels::TimelineAvailability::Unavailable),
+            };
+        let timeline = timeline_blocks
+            .into_iter()
+            .map(|block| panels::CommandRow {
+                id: block.id,
+                session: block.session.clone(),
+                command: zet_blocks::scrub_secrets(&block.command),
+                exit: block.exit_code.to_string(),
+                duration: format!("{}ms", block.duration_ms),
+                cwd: if zet_blocks::scrub_secrets(&block.cwd).is_empty() {
+                    "—".to_string()
+                } else {
+                    panels::sanitize_inspector_text(&zet_blocks::scrub_secrets(&block.cwd), 64)
+                },
+                git_branch: zet_blocks::scrub_secrets(&block.git_branch),
+                provenance: panels::Provenance::Observed,
+            })
+            .collect();
+
         panels::InspectorSnapshot {
             active: self.active,
             session,
@@ -1184,6 +1388,8 @@ impl App {
             state,
             exit,
             commands,
+            timeline,
+            timeline_availability,
         }
     }
 
@@ -1308,6 +1514,7 @@ impl App {
                     .into_iter()
                     .map(|block| panels::CommandRow {
                         id: block.id,
+                        session: block.session.clone(),
                         command: block.command,
                         exit: block.exit_code.to_string(),
                         duration: format!("{}ms", block.duration_ms),
@@ -1376,6 +1583,7 @@ impl App {
             self.inspector_output = None;
             self.inspector_output_id = None;
             self.inspector_output_truncated = false;
+            self.inspector_expanded_id = None;
         }
         self.inspector_cache.mark_dirty();
         self.fit_all();
@@ -1409,6 +1617,7 @@ impl App {
                 self.inspector_output = None;
                 self.inspector_output_id = None;
                 self.inspector_output_truncated = false;
+                self.inspector_expanded_id = None;
                 self.focus = Focus::Terminal;
                 self.needs_draw = true;
                 self.retitle();
@@ -1443,6 +1652,7 @@ impl App {
                     self.inspector_output = None;
                     self.inspector_output_id = None;
                     self.inspector_output_truncated = false;
+                    self.inspector_expanded_id = None;
                     self.sync_inspector_output();
                 }
                 self.focus = Focus::Rail;
@@ -1460,27 +1670,38 @@ impl App {
             if x >= left && x < right && y >= top && y < bottom {
                 self.focus = Focus::Inspector;
                 let row = ((y - top) / ch as f64).floor() as usize;
+                let col = ((x - left) / cw as f64).floor() as usize;
+                // Clickable Inspector view switch.
+                if row == 1 {
+                    if (8..16).contains(&col) {
+                        self.set_inspector_timeline(false);
+                        return;
+                    }
+                    if (16..25).contains(&col) {
+                        self.set_inspector_timeline(true);
+                        return;
+                    }
+                }
                 let cmd_count = self
-                    .inspector_cache
-                    .snapshot()
-                    .map(|s| s.commands.len())
+                    .inspector_displayed()
+                    .map(|displayed| displayed.len())
                     .unwrap_or(0);
-                let new_sel =
-                    panels::inspector_selection_at_row(row as u32, cmd_count, insp_vp.rows);
+                let new_sel = panels::inspector_selection_at_row(
+                    self.inspector_view(),
+                    row as u32,
+                    cmd_count,
+                    insp_vp.rows,
+                    self.inspector_expanded(),
+                );
                 self.inspector_sel = new_sel;
                 self.inspector_output = None;
                 self.inspector_output_id = None;
                 self.inspector_output_truncated = false;
-                self.inspector_sel_id = new_sel.and_then(|index| {
-                    if index >= panels::INSPECTOR_CONTEXT_ROWS {
-                        self.inspector_cache
-                            .snapshot()
-                            .and_then(|s| s.commands.get(index - panels::INSPECTOR_CONTEXT_ROWS))
-                            .map(|command| command.id)
-                    } else {
-                        None
-                    }
-                });
+                self.inspector_expanded_id = None;
+                self.inspector_sel_id = self.inspector_selection_id(new_sel);
+                if self.inspector_expanded_id != self.inspector_sel_id {
+                    self.inspector_expanded_id = None;
+                }
                 self.sync_inspector_output();
                 self.needs_draw = true;
                 return;
@@ -2159,6 +2380,370 @@ impl App {
         Self::draw_evidence_divider(r, vp, row + 1, zet_gpu::renderer::PANEL_BORDER);
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn draw_timeline_inspector(
+        r: &mut Renderer,
+        vp: zet_gpu::renderer::Viewport,
+        displayed_commands: &[panels::CommandRow],
+        availability: panels::TimelineAvailability,
+        selected_id: Option<i64>,
+        output: Option<&str>,
+        output_truncated: bool,
+        expanded: bool,
+        hovered_row: Option<u32>,
+        focused: bool,
+    ) {
+        use zet_gpu::renderer::{
+            PANEL_BG, PANEL_BORDER, PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_MUTED, PANEL_RAISED,
+            PANEL_RED, PANEL_SECONDARY, PANEL_TEAL, PANEL_TEXT, PANEL_VIOLET,
+        };
+        if vp.rows == 0 {
+            return;
+        }
+        let _ = focused;
+        let (cw, ch) = r.cell_px();
+        let origin_x = vp.x.saturating_mul(cw);
+        let origin_y = vp.y.saturating_mul(ch);
+        if vp.rows > 2 {
+            r.draw_fill(
+                zet_gpu::renderer::Viewport {
+                    x: vp.x,
+                    y: vp.y.saturating_add(2),
+                    cols: vp.cols,
+                    rows: vp.rows.saturating_sub(2),
+                },
+                PANEL_BG,
+            );
+        }
+
+        if vp.rows > 4 {
+            Self::draw_ui_row(r, vp, 2, 2, "SOURCE", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(
+                r,
+                vp,
+                2,
+                12.min(vp.cols.saturating_sub(1)),
+                "RECORDED BLOCKS",
+                UI_BODY,
+                PANEL_SECONDARY,
+            );
+            Self::draw_ui_row(r, vp, 3, 2, "ORDER", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(
+                r,
+                vp,
+                3,
+                12.min(vp.cols.saturating_sub(1)),
+                "DATABASE INSERTION",
+                UI_BODY,
+                PANEL_SECONDARY,
+            );
+        }
+
+        let activity_header = 4u32;
+        if activity_header < vp.rows {
+            Self::draw_ui_row(
+                r,
+                vp,
+                activity_header,
+                2,
+                "OBSERVED WORK",
+                UI_SECTION,
+                PANEL_VIOLET,
+            );
+            let count = displayed_commands.len().to_string();
+            let count_col = vp
+                .cols
+                .saturating_sub(panels::text_cells(&count) as u32 + 2);
+            if count_col > 2 {
+                Self::draw_ui_row(
+                    r,
+                    vp,
+                    activity_header,
+                    count_col,
+                    &count,
+                    UI_META,
+                    PANEL_MUTED,
+                );
+            }
+        }
+
+        let layout = panels::timeline_layout(vp.rows, displayed_commands.len(), expanded);
+        let selected =
+            selected_id.and_then(|id| displayed_commands.iter().find(|cmd| cmd.id == id));
+
+        // The shared display model owns the measured columns and truncation.
+        // Nothing outside the visible list is ever painted or selectable.
+        for model in panels::timeline_display_rows(displayed_commands, vp.rows, expanded, vp.cols) {
+            let row = model.row;
+            if row >= vp.rows {
+                break;
+            }
+            let Some(command) = displayed_commands.get(model.position) else {
+                break;
+            };
+            let is_selected = selected_id == Some(command.id);
+            let hovered = hovered_row == Some(row);
+            if is_selected || hovered {
+                Self::draw_panel_card(r, vp, row, 1, PANEL_RAISED, PANEL_BORDER_STRONG);
+            }
+            if vp.cols >= 3 {
+                r.draw_status_dot_px(
+                    origin_x.saturating_add(14),
+                    origin_y
+                        .saturating_add(row.saturating_mul(ch))
+                        .saturating_add(ch / 2),
+                    if is_selected { 4 } else { 2 },
+                    if model.failed { PANEL_RED } else { PANEL_TEAL },
+                    None,
+                );
+            }
+            if is_selected && vp.cols >= 4 {
+                r.draw_rect_px(
+                    origin_x.saturating_add(5),
+                    origin_y
+                        .saturating_add(row.saturating_mul(ch))
+                        .saturating_add(5),
+                    2,
+                    ch.saturating_sub(10),
+                    if model.failed { PANEL_RED } else { PANEL_CYAN },
+                );
+            }
+            Self::draw_ui_row(
+                r,
+                vp,
+                row,
+                panels::TIMELINE_INDEX_COL,
+                &model.index_label,
+                UI_META,
+                if is_selected { PANEL_CYAN } else { PANEL_MUTED },
+            );
+            Self::draw_ui_row(
+                r,
+                vp,
+                row,
+                panels::TIMELINE_BADGE_COL,
+                &model.session_badge,
+                UI_META,
+                if is_selected { PANEL_CYAN } else { PANEL_MUTED },
+            );
+            if !model.command_text.is_empty() {
+                Self::draw_ui_row(
+                    r,
+                    vp,
+                    row,
+                    model.command_col,
+                    &model.command_text,
+                    UI_BODY,
+                    if is_selected {
+                        PANEL_TEXT
+                    } else {
+                        PANEL_SECONDARY
+                    },
+                );
+            }
+            if let (Some(status), Some(status_col)) =
+                (model.status_text.as_deref(), model.status_col)
+            {
+                if status_col > model.command_col {
+                    Self::draw_ui_row(
+                        r,
+                        vp,
+                        row,
+                        status_col,
+                        status,
+                        UI_META,
+                        if model.failed { PANEL_RED } else { PANEL_TEAL },
+                    );
+                }
+            }
+        }
+
+        if displayed_commands.is_empty() {
+            if let Some(row) = panels::timeline_empty_row(vp.rows) {
+                Self::draw_ui_row(
+                    r,
+                    vp,
+                    row,
+                    2,
+                    availability.empty_message(),
+                    UI_BODY,
+                    if availability == panels::TimelineAvailability::Unavailable {
+                        PANEL_RED
+                    } else {
+                        PANEL_MUTED
+                    },
+                );
+            }
+        }
+
+        // Compact selected-event preview. Exit code and duration live here
+        // when a narrow row spends its cells on the command.
+        if let Some(preview_start) = layout.preview_start {
+            let (label, hint) = panels::timeline_preview_heading(vp.cols, expanded);
+            Self::draw_ui_row(r, vp, preview_start, 2, label, UI_SECTION, PANEL_VIOLET);
+            if let Some((hint, hint_col)) = hint {
+                Self::draw_ui_row(r, vp, preview_start, hint_col, hint, UI_META, PANEL_MUTED);
+            }
+            let content = preview_start.saturating_add(1);
+            if let Some(command) = selected {
+                if content < vp.rows {
+                    Self::draw_ui_row(
+                        r,
+                        vp,
+                        content,
+                        2,
+                        &panels::truncate_to_cells(
+                            &command.command,
+                            vp.cols.saturating_sub(4) as usize,
+                        ),
+                        UI_COMMAND,
+                        PANEL_TEXT,
+                    );
+                }
+                if content.saturating_add(1) < layout.footer_row {
+                    Self::draw_ui_row(
+                        r,
+                        vp,
+                        content.saturating_add(1),
+                        2,
+                        &format!("SESSION {}", command.session),
+                        UI_META,
+                        PANEL_SECONDARY,
+                    );
+                }
+                if content.saturating_add(2) < layout.footer_row {
+                    Self::draw_ui_row(
+                        r,
+                        vp,
+                        content.saturating_add(2),
+                        2,
+                        &format!("EXIT {}  {}", command.exit, command.duration),
+                        UI_META,
+                        if command.exit == "0" || command.exit == "—" {
+                            PANEL_TEAL
+                        } else {
+                            PANEL_RED
+                        },
+                    );
+                }
+                let output_start = content.saturating_add(3);
+                let capacity = layout.footer_row.saturating_sub(output_start) as usize;
+                if capacity > 0 {
+                    if let Some(text) = output {
+                        if text.is_empty() {
+                            Self::draw_ui_row(
+                                r,
+                                vp,
+                                output_start,
+                                2,
+                                "EMPTY OUTPUT",
+                                UI_OUTPUT,
+                                PANEL_MUTED,
+                            );
+                        } else {
+                            let lines: Vec<&str> = text.lines().collect();
+                            let more = lines.len() > capacity || output_truncated;
+                            let body_capacity = if more && capacity > 1 {
+                                capacity - 1
+                            } else {
+                                capacity
+                            };
+                            let mut rendered = 0usize;
+                            for line in lines.iter().take(body_capacity) {
+                                Self::draw_ui_row(
+                                    r,
+                                    vp,
+                                    output_start.saturating_add(rendered as u32),
+                                    2,
+                                    &panels::truncate_to_cells(
+                                        line,
+                                        vp.cols.saturating_sub(4) as usize,
+                                    ),
+                                    UI_OUTPUT,
+                                    PANEL_TEXT,
+                                );
+                                rendered += 1;
+                            }
+                            if rendered == 0 {
+                                if let Some(line) = lines.first() {
+                                    Self::draw_ui_row(
+                                        r,
+                                        vp,
+                                        output_start,
+                                        2,
+                                        &panels::truncate_to_cells(
+                                            line,
+                                            vp.cols.saturating_sub(4) as usize,
+                                        ),
+                                        UI_OUTPUT,
+                                        PANEL_TEXT,
+                                    );
+                                }
+                            }
+                            if more && capacity > 1 {
+                                Self::draw_ui_row(
+                                    r,
+                                    vp,
+                                    output_start.saturating_add(body_capacity as u32),
+                                    2,
+                                    if output_truncated {
+                                        "... PREVIEW TRUNCATED"
+                                    } else {
+                                        "... MORE OUTPUT"
+                                    },
+                                    UI_META,
+                                    if output_truncated {
+                                        PANEL_RED
+                                    } else {
+                                        PANEL_MUTED
+                                    },
+                                );
+                            }
+                        }
+                    } else {
+                        Self::draw_ui_row(
+                            r,
+                            vp,
+                            output_start,
+                            2,
+                            "OUTPUT UNAVAILABLE",
+                            UI_OUTPUT,
+                            PANEL_RED,
+                        );
+                    }
+                }
+            } else if content < layout.footer_row {
+                Self::draw_ui_row(
+                    r,
+                    vp,
+                    content,
+                    2,
+                    "SELECT AN OBSERVED COMMAND",
+                    UI_COMMAND,
+                    PANEL_SECONDARY,
+                );
+            }
+        }
+
+        let provenance_row = layout.footer_row;
+        if provenance_row < vp.rows {
+            Self::draw_evidence_divider(r, vp, provenance_row, PANEL_BORDER);
+            Self::draw_ui_row(r, vp, provenance_row, 2, "PROVENANCE", UI_META, PANEL_MUTED);
+            let provenance = selected
+                .map(|command| format!("RECORDED / SESSION {}", command.session))
+                .unwrap_or_else(|| "NO RECORDED COMMAND SELECTED".to_string());
+            Self::draw_ui_row(
+                r,
+                vp,
+                provenance_row,
+                13,
+                &panels::truncate_to_cells(&provenance, vp.cols.saturating_sub(14) as usize),
+                UI_META,
+                PANEL_SECONDARY,
+            );
+        }
+    }
+
     /// Render the Inspector as an evidence detail surface. The command index
     /// remains a compact navigation aid for the existing P3-A1 keyboard and
     /// mouse contract, while the selected command and bounded output own the
@@ -2173,6 +2758,8 @@ impl App {
         output_truncated: bool,
         hovered_row: Option<u32>,
         focused: bool,
+        timeline: bool,
+        expanded: bool,
     ) {
         use zet_gpu::renderer::{
             PANEL_AMBER, PANEL_BG, PANEL_BORDER, PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_INSET,
@@ -2211,13 +2798,51 @@ impl App {
             ch.saturating_sub(8),
             PANEL_CYAN,
         );
-        Self::draw_ui_row(r, vp, 0, 4, "CONTEXTUAL INSPECTOR", UI_HEADER, PANEL_TEXT);
-        if vp.cols > 31 {
+        Self::draw_ui_row(
+            r,
+            vp,
+            0,
+            4,
+            if timeline {
+                "OBSERVED WORK TIMELINE"
+            } else {
+                "CONTEXTUAL INSPECTOR"
+            },
+            UI_HEADER,
+            PANEL_TEXT,
+        );
+        Self::draw_ui_row(r, vp, 1, 2, "VIEW", UI_META, PANEL_MUTED);
+        Self::draw_ui_row(
+            r,
+            vp,
+            1,
+            8,
+            "SESSION",
+            UI_META,
+            if timeline { PANEL_MUTED } else { PANEL_CYAN },
+        );
+        Self::draw_ui_row(
+            r,
+            vp,
+            1,
+            16,
+            "TIMELINE",
+            UI_META,
+            if timeline { PANEL_CYAN } else { PANEL_MUTED },
+        );
+        let title = if timeline {
+            "OBSERVED WORK TIMELINE"
+        } else {
+            "CONTEXTUAL INSPECTOR"
+        };
+        if let Some(descriptor_col) =
+            panels::inspector_header_descriptor_col(vp.cols, title, "OBSERVED / SESSION-SCOPED")
+        {
             Self::draw_ui_row(
                 r,
                 vp,
                 0,
-                25,
+                descriptor_col,
                 "OBSERVED / SESSION-SCOPED",
                 UI_META,
                 PANEL_SECONDARY,
@@ -2275,6 +2900,28 @@ impl App {
             }
             return;
         };
+
+        let displayed_commands = if timeline {
+            &snapshot.timeline
+        } else {
+            &snapshot.commands
+        };
+
+        if timeline {
+            Self::draw_timeline_inspector(
+                r,
+                vp,
+                displayed_commands,
+                snapshot.timeline_availability,
+                selected_id,
+                output,
+                output_truncated,
+                expanded,
+                hovered_row,
+                focused,
+            );
+            return;
+        }
 
         // Session overview: real state only, kept separate from the command
         // ledger so the Inspector has a different job from the Mission Rail.
@@ -2335,7 +2982,7 @@ impl App {
             Self::draw_ui_row(r, vp, 5, 2, "EVIDENCE / OBSERVED", UI_SECTION, PANEL_MUTED);
         }
 
-        let detail_start = panels::inspector_detail_start(snapshot.commands.len());
+        let detail_start = panels::inspector_detail_start(displayed_commands.len());
         let activity_header = panels::INSPECTOR_ACTIVITY_START.saturating_sub(1);
         if activity_header < vp.rows {
             Self::draw_ui_row(
@@ -2347,7 +2994,7 @@ impl App {
                 UI_SECTION,
                 PANEL_VIOLET,
             );
-            let count = snapshot.commands.len().to_string();
+            let count = displayed_commands.len().to_string();
             let count_col = vp
                 .cols
                 .saturating_sub(panels::text_cells(&count) as u32 + 2);
@@ -2379,20 +3026,24 @@ impl App {
             }
         }
 
-        if snapshot.commands.is_empty() {
+        if displayed_commands.is_empty() {
             if panels::INSPECTOR_ACTIVITY_START < vp.rows {
                 Self::draw_ui_row(
                     r,
                     vp,
                     panels::INSPECTOR_ACTIVITY_START,
                     2,
-                    "NO RECORDED COMMANDS",
+                    if timeline {
+                        "NO OBSERVED WORK"
+                    } else {
+                        "NO RECORDED COMMANDS"
+                    },
                     UI_BODY,
                     PANEL_MUTED,
                 );
             }
         } else {
-            for (index, command) in snapshot.commands.iter().enumerate() {
+            for (index, command) in displayed_commands.iter().enumerate() {
                 let row = panels::inspector_command_row(index);
                 if row >= vp.rows {
                     break;
@@ -2432,11 +3083,21 @@ impl App {
                     UI_META,
                     if selected { PANEL_CYAN } else { PANEL_MUTED },
                 );
+                let session_compact = panels::truncate_to_cells(&command.session, 4);
+                Self::draw_ui_row(
+                    r,
+                    vp,
+                    row,
+                    4,
+                    &session_compact,
+                    UI_META,
+                    if selected { PANEL_CYAN } else { PANEL_MUTED },
+                );
                 Self::draw_command_summary_row(
                     r,
                     vp,
                     row,
-                    6,
+                    8,
                     2,
                     command,
                     if selected {
@@ -2467,7 +3128,8 @@ impl App {
         if card_rows == 0 {
             return;
         }
-        let selected = selected_id.and_then(|id| snapshot.commands.iter().find(|cmd| cmd.id == id));
+        let selected =
+            selected_id.and_then(|id| displayed_commands.iter().find(|cmd| cmd.id == id));
         let failed = selected.is_some_and(|command| !matches!(command.exit.as_str(), "0" | "—"));
         Self::draw_instrument_surface(
             r,
@@ -2644,7 +3306,7 @@ impl App {
                 vp,
                 context_session,
                 10,
-                &snapshot.session,
+                &command.session,
                 UI_BODY,
                 PANEL_SECONDARY,
             );
@@ -2756,7 +3418,9 @@ impl App {
             );
             Self::draw_evidence_divider(r, vp, provenance_row, PANEL_BORDER);
             Self::draw_ui_row(r, vp, provenance_row, 2, "PROVENANCE", UI_META, PANEL_MUTED);
-            let provenance = format!("RECORDED / SESSION {}", snapshot.session);
+            let provenance = selected
+                .map(|command| format!("RECORDED / SESSION {}", command.session))
+                .unwrap_or_else(|| "NO RECORDED COMMAND SELECTED".to_string());
             Self::draw_ui_row(
                 r,
                 vp,
@@ -2966,6 +3630,7 @@ impl App {
         self.inspector_output = None;
         self.inspector_output_id = None;
         self.inspector_output_truncated = false;
+        self.inspector_expanded_id = None;
         if let Some(renderer) = &self.renderer {
             let (fg, bg) = renderer.default_colors();
             if let Some(tab) = self.tabs.last_mut() {
@@ -2998,6 +3663,7 @@ impl App {
         self.inspector_output = None;
         self.inspector_output_id = None;
         self.inspector_output_truncated = false;
+        self.inspector_expanded_id = None;
         // Bar may vanish: remaining grids grow back.
         self.fit_all();
         self.needs_draw = true;
@@ -3018,6 +3684,7 @@ impl App {
         self.inspector_output = None;
         self.inspector_output_id = None;
         self.inspector_output_truncated = false;
+        self.inspector_expanded_id = None;
         self.needs_draw = true;
         self.retitle();
     }
@@ -3390,45 +4057,20 @@ impl App {
             match &logical {
                 Key::Named(NamedKey::Escape) => {
                     self.focus = Focus::Terminal;
-                    self.inspector_sel = None;
-                    self.inspector_sel_id = None;
-                    self.inspector_output = None;
-                    self.inspector_output_id = None;
-                    self.inspector_output_truncated = false;
+                    self.clear_inspector_selection();
+                }
+                Key::Character(ch)
+                    if self.focus == Focus::Inspector && (ch == "t" || ch == "T") =>
+                {
+                    let timeline = !self.inspector_timeline;
+                    self.set_inspector_timeline(timeline);
                 }
                 Key::Named(NamedKey::ArrowUp) => {
                     if self.focus == Focus::Rail && !self.tabs.is_empty() {
                         self.rail_sel = self.rail_sel.saturating_sub(1);
                     }
                     if self.focus == Focus::Inspector {
-                        let n = panels::INSPECTOR_CONTEXT_ROWS
-                            + self
-                                .inspector_cache
-                                .snapshot()
-                                .map(|s| s.commands.len())
-                                .unwrap_or(0);
-                        if n > 0 {
-                            self.inspector_sel = match self.inspector_sel {
-                                Some(0) | None => Some(n - 1),
-                                Some(x) => Some(x - 1),
-                            };
-                            self.inspector_sel_id = self.inspector_sel.and_then(|index| {
-                                if index >= panels::INSPECTOR_CONTEXT_ROWS {
-                                    self.inspector_cache
-                                        .snapshot()
-                                        .and_then(|s| {
-                                            s.commands.get(index - panels::INSPECTOR_CONTEXT_ROWS)
-                                        })
-                                        .map(|command| command.id)
-                                } else {
-                                    None
-                                }
-                            });
-                            self.inspector_output = None;
-                            self.inspector_output_id = None;
-                            self.inspector_output_truncated = false;
-                            self.sync_inspector_output();
-                        }
+                        self.move_inspector_selection(-1);
                     }
                 }
                 Key::Named(NamedKey::ArrowDown) => {
@@ -3436,47 +4078,18 @@ impl App {
                         self.rail_sel = (self.rail_sel + 1).min(self.tabs.len() - 1);
                     }
                     if self.focus == Focus::Inspector {
-                        let n = panels::INSPECTOR_CONTEXT_ROWS
-                            + self
-                                .inspector_cache
-                                .snapshot()
-                                .map(|s| s.commands.len())
-                                .unwrap_or(0);
-                        if n > 0 {
-                            self.inspector_sel = match self.inspector_sel {
-                                Some(x) if x + 1 >= n => Some(0),
-                                Some(x) => Some(x + 1),
-                                None => Some(0),
-                            };
-                            self.inspector_sel_id = self.inspector_sel.and_then(|index| {
-                                if index >= panels::INSPECTOR_CONTEXT_ROWS {
-                                    self.inspector_cache
-                                        .snapshot()
-                                        .and_then(|s| {
-                                            s.commands.get(index - panels::INSPECTOR_CONTEXT_ROWS)
-                                        })
-                                        .map(|command| command.id)
-                                } else {
-                                    None
-                                }
-                            });
-                            self.inspector_output = None;
-                            self.inspector_output_id = None;
-                            self.inspector_output_truncated = false;
-                            self.sync_inspector_output();
-                        }
+                        self.move_inspector_selection(1);
                     }
+                }
+                Key::Named(NamedKey::Enter) if self.focus == Focus::Inspector => {
+                    self.inspector_enter();
                 }
                 Key::Named(NamedKey::Enter)
                     if self.focus == Focus::Rail && self.rail_sel < self.tabs.len() =>
                 {
                     self.active = self.rail_sel;
                     self.inspector_cache.mark_dirty();
-                    self.inspector_sel = None;
-                    self.inspector_sel_id = None;
-                    self.inspector_output = None;
-                    self.inspector_output_id = None;
-                    self.inspector_output_truncated = false;
+                    self.clear_inspector_selection();
                     self.focus = Focus::Terminal;
                     self.retitle();
                 }
@@ -3489,11 +4102,7 @@ impl App {
                 // then translated and sent normally below, preserving
                 // the emergency-cancellation behavior.
                 self.focus = Focus::Terminal;
-                self.inspector_sel = None;
-                self.inspector_sel_id = None;
-                self.inspector_output = None;
-                self.inspector_output_id = None;
-                self.inspector_output_truncated = false;
+                self.clear_inspector_selection();
             } else {
                 self.needs_draw = true;
                 return;
@@ -3969,6 +4578,7 @@ impl ApplicationHandler for App {
                 let inspector_cols = inspector_vp_layout.map_or(0, |vp| vp.cols as usize);
                 let inspector_snapshot = self.inspector_cache.snapshot_handle();
                 let inspector_output = self.inspector_output.as_deref();
+                let inspector_expanded = self.inspector_expanded();
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
                     r.draw_terminal_in(&self.tabs[self.active].term, gpu_vp, sel);
                     if rail_cols > 0 {
@@ -4011,6 +4621,8 @@ impl ApplicationHandler for App {
                                 self.inspector_output_truncated,
                                 inspector_hover_row,
                                 self.focus == Focus::Inspector,
+                                self.inspector_timeline,
+                                inspector_expanded,
                             );
                         }
                     }
@@ -4175,9 +4787,11 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         chrome: panels::ChromeCache::new(),
         inspector_sel: None,
         inspector_sel_id: None,
+        inspector_timeline: false,
         inspector_output: None,
         inspector_output_id: None,
         inspector_output_truncated: false,
+        inspector_expanded_id: None,
         inspector_cache: panels::InspectorCache::new(),
         #[cfg(test)]
         chrome_query_count: 0,
@@ -4370,9 +4984,11 @@ mod layout_fit_tests {
             chrome: super::panels::ChromeCache::new(),
             inspector_sel: None,
             inspector_sel_id: None,
+            inspector_timeline: false,
             inspector_output: None,
             inspector_output_id: None,
             inspector_output_truncated: false,
+            inspector_expanded_id: None,
             inspector_cache: super::panels::InspectorCache::new(),
             #[cfg(test)]
             chrome_query_count: 0,
@@ -5137,21 +5753,47 @@ mod layout_fit_tests {
     }
 
     #[test]
-    fn inspector_click_selects_only_real_rows() {
+    fn inspector_click_selects_only_real_visible_rows() {
         let mut app = make_test_app(
             120,
             40,
             crate::window::layout::LayoutMode::MissionControl.layout(),
         );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        for i in 0..2 {
+            store
+                .append(&zet_blocks::Block {
+                    id: 0,
+                    session: "session-a".to_string(),
+                    command: format!("echo {i}"),
+                    output: String::new(),
+                    exit_code: 0,
+                    cwd: "/tmp".to_string(),
+                    git_branch: String::new(),
+                    duration_ms: 1,
+                })
+                .unwrap();
+        }
+        app.tabs[0].recorder = Some(zet_blocks::Recorder::new(store, "session-a"));
         app.refresh_inspector();
-        app.handle_mouse_click(900.0, 65.0, 10, 20);
-        assert_eq!(app.focus, super::Focus::Inspector);
+
+        // Row 1 is the view switch, row 2 a session fact, row 6 the section
+        // label: none of them are command targets.
+        for row in [1u32, 2, 6] {
+            app.inspector_sel = Some(4);
+            app.handle_mouse_click(900.0, f64::from(3 + row) * 20.0 + 10.0, 10, 20);
+            assert_eq!(app.focus, super::Focus::Inspector);
+            assert_eq!(app.inspector_sel, None, "row {row} selected a command");
+        }
+        app.handle_mouse_click(900.0, f64::from(3 + 7) * 20.0 + 10.0, 10, 20);
+        assert_eq!(app.inspector_sel, Some(4));
+        assert_eq!(app.inspector_sel_id, Some(1));
+        app.handle_mouse_click(900.0, f64::from(3 + 8) * 20.0 + 10.0, 10, 20);
+        assert_eq!(app.inspector_sel, Some(5));
+        assert_eq!(app.inspector_sel_id, Some(2));
+        // The detail card starts after the list and is not selectable.
+        app.handle_mouse_click(900.0, f64::from(3 + 10) * 20.0 + 10.0, 10, 20);
         assert_eq!(app.inspector_sel, None);
-        app.handle_mouse_click(900.0, 85.0, 10, 20);
-        assert_eq!(app.inspector_sel, Some(0));
-        app.handle_mouse_click(900.0, 145.0, 10, 20);
-        assert_eq!(app.inspector_sel, Some(3));
-        app.handle_mouse_click(900.0, 240.0, 10, 20);
         assert_eq!(app.focus, super::Focus::Inspector);
     }
 
@@ -5162,8 +5804,24 @@ mod layout_fit_tests {
             40,
             crate::window::layout::LayoutMode::MissionControl.layout(),
         );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        for i in 0..2 {
+            store
+                .append(&zet_blocks::Block {
+                    id: 0,
+                    session: "session-a".to_string(),
+                    command: format!("echo {i}"),
+                    output: String::new(),
+                    exit_code: 0,
+                    cwd: "/tmp".to_string(),
+                    git_branch: String::new(),
+                    duration_ms: 1,
+                })
+                .unwrap();
+        }
+        app.tabs[0].recorder = Some(zet_blocks::Recorder::new(store, "session-a"));
+        app.refresh_inspector();
         app.focus = super::Focus::Inspector;
-        app.inspector_sel = Some(0);
         app.handle_key_parts(
             winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown),
             None,
@@ -5171,8 +5829,7 @@ mod layout_fit_tests {
             winit::keyboard::ModifiersState::empty(),
             None,
         );
-        assert_eq!(app.inspector_sel, Some(1));
-        app.inspector_sel = Some(3);
+        assert_eq!(app.inspector_sel, Some(4));
         app.handle_key_parts(
             winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown),
             None,
@@ -5180,8 +5837,15 @@ mod layout_fit_tests {
             winit::keyboard::ModifiersState::empty(),
             None,
         );
-        assert_eq!(app.inspector_sel, Some(0));
-        app.inspector_sel = Some(0);
+        assert_eq!(app.inspector_sel, Some(5));
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.inspector_sel, Some(4));
         app.handle_key_parts(
             winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowUp),
             None,
@@ -5189,7 +5853,7 @@ mod layout_fit_tests {
             winit::keyboard::ModifiersState::empty(),
             None,
         );
-        assert_eq!(app.inspector_sel, Some(3));
+        assert_eq!(app.inspector_sel, Some(5));
     }
 
     #[test]
@@ -5473,7 +6137,7 @@ mod layout_fit_tests {
             crate::window::layout::LayoutMode::MissionControl.layout(),
         );
         let store = zet_blocks::Store::open_in_memory().unwrap();
-        let first = store
+        let _first = store
             .append(&zet_blocks::Block {
                 id: 0,
                 session: "session-a".to_string(),
@@ -5504,7 +6168,7 @@ mod layout_fit_tests {
         let now = std::time::Instant::now();
         app.refresh_inspector_at(now);
         app.inspector_sel = Some(4);
-        app.inspector_sel_id = Some(first);
+        app.inspector_sel_id = Some(_first);
         app.inspector_output = None;
         app.inspector_output_id = None;
         app.sync_inspector_output();
@@ -5518,6 +6182,630 @@ mod layout_fit_tests {
         app.sync_inspector_output();
         assert_eq!(app.inspector_output.as_deref(), Some("second output"));
         assert_ne!(app.inspector_output.as_deref(), Some("first output"));
+    }
+
+    #[test]
+    fn inspector_timeline_shows_cross_session_observed_work() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo a".to_string(),
+                output: "a".to_string(),
+                exit_code: 1,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 2,
+            })
+            .unwrap();
+        store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-b".to_string(),
+                command: "echo b".to_string(),
+                output: "b".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 3,
+            })
+            .unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        app.refresh_inspector();
+        let snapshot = app.inspector_cache.snapshot().unwrap();
+        assert_eq!(snapshot.timeline.len(), 2);
+        assert_eq!(snapshot.timeline[0].session, "session-a");
+        assert_eq!(snapshot.timeline[1].session, "session-b");
+        assert_eq!(snapshot.timeline[0].exit, "1");
+        assert_eq!(snapshot.timeline[1].exit, "0");
+    }
+
+    #[test]
+    fn inspector_timeline_toggle_clears_selection_and_output() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.inspector_timeline = false;
+        app.inspector_sel = Some(4);
+        app.inspector_sel_id = Some(1);
+        app.inspector_output = Some("old".to_string());
+        app.inspector_output_id = Some(1);
+        app.inspector_output_truncated = true;
+        app.inspector_expanded_id = Some(1);
+
+        app.set_inspector_timeline(true);
+
+        assert!(app.inspector_timeline);
+        assert_eq!(app.inspector_sel, None);
+        assert_eq!(app.inspector_sel_id, None);
+        assert_eq!(app.inspector_output, None);
+        assert_eq!(app.inspector_expanded_id, None);
+    }
+
+    #[test]
+    fn inspector_timeline_output_uses_selected_entry_session() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let _first = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo a".to_string(),
+                output: "output a".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let second = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-b".to_string(),
+                command: "echo b".to_string(),
+                output: "output b".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        app.inspector_timeline = true;
+        app.refresh_inspector();
+        app.inspector_sel = Some(5);
+        app.inspector_sel_id = Some(second);
+        app.inspector_output = None;
+        app.inspector_output_id = None;
+        app.inspector_output_truncated = false;
+        app.sync_inspector_output();
+        assert_eq!(app.inspector_output.as_deref(), Some("output b"));
+    }
+
+    #[test]
+    fn inspector_background_timeline_change_marks_cache_dirty() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo a".to_string(),
+                output: "a".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        app.refresh_inspector();
+        assert_eq!(app.inspector_cache.last_timeline_max_id, Some(1));
+
+        app.tabs[0]
+            .recorder
+            .as_ref()
+            .unwrap()
+            .store()
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-b".to_string(),
+                command: "echo b".to_string(),
+                output: "b".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+
+        let later = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        app.refresh_inspector_at(later);
+        assert!(
+            app.inspector_cache.dirty
+                || app.inspector_cache.snapshot().unwrap().timeline.len() == 2
+        );
+    }
+
+    #[test]
+    fn inspector_timeline_selection_survives_unchanged_refresh() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let id = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo a".to_string(),
+                output: "a".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let recorder = zet_blocks::Recorder::new(store, "session-a");
+        app.tabs[0].recorder = Some(recorder);
+        app.inspector_timeline = true;
+        app.refresh_inspector();
+        app.inspector_sel = Some(4);
+        app.inspector_sel_id = Some(id);
+        app.inspector_output = Some("a".to_string());
+        app.inspector_output_id = Some(id);
+
+        let now = std::time::Instant::now() + std::time::Duration::from_millis(250);
+        app.refresh_inspector_at(now);
+        assert_eq!(app.inspector_sel, Some(4));
+        assert_eq!(app.inspector_sel_id, Some(id));
+        assert_eq!(app.inspector_output.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn inspector_timeline_toggle_changes_view_and_clears_stale_state() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.inspector_timeline = false;
+        app.inspector_sel = Some(4);
+        app.inspector_sel_id = Some(7);
+        app.inspector_output = Some("old".to_string());
+        app.inspector_output_id = Some(7);
+        app.inspector_output_truncated = true;
+        app.inspector_expanded_id = Some(7);
+
+        // Exercise the production toggle path used by T and the mouse.
+        app.set_inspector_timeline(true);
+
+        assert!(app.inspector_timeline);
+        assert_eq!(app.inspector_sel, None);
+        assert_eq!(app.inspector_sel_id, None);
+        assert_eq!(app.inspector_output, None);
+        assert_eq!(app.inspector_output_id, None);
+        assert_eq!(app.inspector_expanded_id, None);
+
+        app.inspector_sel = Some(4);
+        app.inspector_sel_id = Some(7);
+        app.inspector_output = Some("old".to_string());
+        app.inspector_expanded_id = Some(7);
+        app.set_inspector_timeline(false);
+        assert!(!app.inspector_timeline);
+        assert_eq!(app.inspector_sel, None);
+        assert_eq!(app.inspector_output, None);
+        assert_eq!(app.inspector_expanded_id, None);
+    }
+
+    #[test]
+    fn timeline_session_badges_are_collision_resistant() {
+        let rows = vec![
+            super::panels::CommandRow {
+                id: 1,
+                session: "shared-prefix-a".to_string(),
+                command: "echo a".to_string(),
+                exit: "0".to_string(),
+                duration: "1ms".to_string(),
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                provenance: super::panels::Provenance::Observed,
+            },
+            super::panels::CommandRow {
+                id: 2,
+                session: "shared-prefix-b".to_string(),
+                command: "echo b".to_string(),
+                exit: "0".to_string(),
+                duration: "1ms".to_string(),
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                provenance: super::panels::Provenance::Observed,
+            },
+            super::panels::CommandRow {
+                id: 3,
+                session: "shared-prefix-a".to_string(),
+                command: "echo c".to_string(),
+                exit: "0".to_string(),
+                duration: "1ms".to_string(),
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                provenance: super::panels::Provenance::Observed,
+            },
+        ];
+        let badges = super::panels::timeline_session_badges(&rows);
+        assert_eq!(badges, vec!["S1", "S2", "S1"]);
+    }
+
+    #[test]
+    fn timeline_keyboard_selection_uses_displayed_entries_and_their_session_output() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let first = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-a".to_string(),
+                command: "echo a".to_string(),
+                output: "output a".to_string(),
+                exit_code: 1,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 2,
+            })
+            .unwrap();
+        let second = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "session-b".to_string(),
+                command: "echo b".to_string(),
+                output: "output b".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 3,
+            })
+            .unwrap();
+        app.tabs[0].recorder = Some(zet_blocks::Recorder::new(store, "session-a"));
+        app.inspector_timeline = true;
+        app.refresh_inspector();
+        app.focus = super::Focus::Inspector;
+
+        let down = || winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown);
+        app.handle_key_parts(
+            down(),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.inspector_sel, Some(4));
+        assert_eq!(app.inspector_sel_id, Some(first));
+        assert_eq!(app.inspector_output.as_deref(), Some("output a"));
+
+        app.handle_key_parts(
+            down(),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.inspector_sel, Some(5));
+        assert_eq!(app.inspector_sel_id, Some(second));
+        assert_eq!(app.inspector_output.as_deref(), Some("output b"));
+        assert_eq!(
+            app.inspector_cache
+                .snapshot()
+                .unwrap()
+                .timeline
+                .iter()
+                .find(|row| row.id == second)
+                .unwrap()
+                .session,
+            "session-b"
+        );
+
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowUp),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.inspector_sel_id, Some(first));
+        assert_eq!(app.inspector_output.as_deref(), Some("output a"));
+    }
+
+    #[test]
+    fn timeline_enter_expands_and_collapses_the_selected_preview() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let mut ids = Vec::new();
+        for i in 0..8 {
+            ids.push(
+                store
+                    .append(&zet_blocks::Block {
+                        id: 0,
+                        session: if i % 2 == 0 {
+                            "session-a".to_string()
+                        } else {
+                            "session-b".to_string()
+                        },
+                        command: format!("echo {i}"),
+                        output: format!("line {i}\nsecond {i}\nthird {i}"),
+                        exit_code: 0,
+                        cwd: "/tmp".to_string(),
+                        git_branch: String::new(),
+                        duration_ms: 1,
+                    })
+                    .unwrap(),
+            );
+        }
+        app.tabs[0].recorder = Some(zet_blocks::Recorder::new(store, "session-a"));
+        app.inspector_timeline = true;
+        app.refresh_inspector();
+        app.focus = super::Focus::Inspector;
+
+        // Enter with no selection inspects the first visible event.
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.inspector_sel_id, Some(ids[0]));
+        assert!(!app.inspector_expanded());
+
+        let rows = app.frame_layout().inspector.unwrap().rows;
+        let compact = super::panels::timeline_layout(rows, 8, false);
+        let expanded = super::panels::timeline_layout(rows, 8, true);
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.inspector_expanded_id, Some(ids[0]));
+        assert!(app.inspector_expanded());
+        assert!(expanded.preview_rows > compact.preview_rows);
+        assert!(expanded.visible_commands <= compact.visible_commands);
+
+        app.handle_key_parts(
+            winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.inspector_expanded_id, None);
+        assert!(!app.inspector_expanded());
+        assert_eq!(app.inspector_sel_id, Some(ids[0]));
+        assert_eq!(
+            app.inspector_output.as_deref(),
+            Some("line 0\nsecond 0\nthird 0")
+        );
+    }
+
+    #[test]
+    fn timeline_short_window_mouse_and_keyboard_only_reach_visible_entries() {
+        let mut app = make_test_app(
+            120,
+            13,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let mut ids = Vec::new();
+        for i in 0..8 {
+            ids.push(
+                store
+                    .append(&zet_blocks::Block {
+                        id: 0,
+                        session: "session-a".to_string(),
+                        command: format!("echo {i}"),
+                        output: String::new(),
+                        exit_code: 0,
+                        cwd: "/tmp".to_string(),
+                        git_branch: String::new(),
+                        duration_ms: 1,
+                    })
+                    .unwrap(),
+            );
+        }
+        app.tabs[0].recorder = Some(zet_blocks::Recorder::new(store, "session-a"));
+        app.inspector_timeline = true;
+        app.refresh_inspector();
+        let rows = app.frame_layout().inspector.unwrap().rows;
+        let layout = super::panels::timeline_layout(rows, 8, false);
+        assert!(layout.visible_commands < 8);
+        assert_eq!(layout.preview_start, None);
+        assert_eq!(app.inspector_visible_count(), layout.visible_commands);
+
+        // Mouse targets exist only on drawn event rows.
+        app.handle_mouse_click(900.0, 60.0 + 20.0 * 7.0 + 10.0, 10, 20);
+        assert_eq!(app.inspector_sel, Some(4));
+        app.handle_mouse_click(900.0, 60.0 + 20.0 * 9.0 + 10.0, 10, 20);
+        assert_eq!(app.inspector_sel, None);
+        for hidden_row in [layout.list_end, layout.footer_row] {
+            assert_eq!(
+                super::panels::inspector_selection_at_row(
+                    super::panels::InspectorView::Timeline,
+                    hidden_row,
+                    8,
+                    rows,
+                    false,
+                ),
+                None
+            );
+        }
+
+        // Keyboard wraps inside the same visible set.
+        app.focus = super::Focus::Inspector;
+        app.inspector_sel = Some(super::panels::inspector_selection_for_command(0));
+        app.inspector_sel_id = Some(ids[0]);
+        for _ in 0..layout.visible_commands {
+            app.handle_key_parts(
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown),
+                None,
+                true,
+                winit::keyboard::ModifiersState::empty(),
+                None,
+            );
+        }
+        assert_eq!(
+            app.inspector_sel,
+            Some(super::panels::inspector_selection_for_command(0))
+        );
+        assert_eq!(app.inspector_sel_id, Some(ids[0]));
+        for _ in 0..3 {
+            app.handle_key_parts(
+                winit::keyboard::Key::Named(winit::keyboard::NamedKey::ArrowDown),
+                None,
+                true,
+                winit::keyboard::ModifiersState::empty(),
+                None,
+            );
+        }
+        assert_eq!(app.inspector_sel_id, Some(ids[layout.visible_commands - 1]));
+        assert!(!ids[layout.visible_commands..].contains(&app.inspector_sel_id.unwrap()));
+    }
+
+    #[test]
+    fn timeline_preview_and_footer_clicks_are_not_command_targets() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        for i in 0..8 {
+            store
+                .append(&zet_blocks::Block {
+                    id: 0,
+                    session: "session-a".to_string(),
+                    command: format!("echo {i}"),
+                    output: String::new(),
+                    exit_code: 0,
+                    cwd: "/tmp".to_string(),
+                    git_branch: String::new(),
+                    duration_ms: 1,
+                })
+                .unwrap();
+        }
+        app.tabs[0].recorder = Some(zet_blocks::Recorder::new(store, "session-a"));
+        app.inspector_timeline = true;
+        app.refresh_inspector();
+        app.inspector_sel = Some(4);
+        app.inspector_sel_id = Some(1);
+        let rows = app.frame_layout().inspector.unwrap().rows;
+        let layout = super::panels::timeline_layout(rows, 8, false);
+        let preview_start = layout.preview_start.unwrap();
+        app.handle_mouse_click(900.0, 60.0 + 20.0 * f64::from(preview_start) + 10.0, 10, 20);
+        assert_eq!(app.inspector_sel, None);
+        assert_eq!(app.inspector_sel_id, None);
+        app.inspector_sel = Some(4);
+        app.inspector_sel_id = Some(1);
+        app.handle_mouse_click(
+            900.0,
+            60.0 + 20.0 * f64::from(layout.footer_row) + 10.0,
+            10,
+            20,
+        );
+        assert_eq!(app.inspector_sel, None);
+        assert_eq!(app.inspector_output, None);
+    }
+
+    #[test]
+    fn timeline_reports_empty_history_separately_from_unreadable_recording() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.refresh_inspector();
+        let unavailable = app.inspector_cache.snapshot().unwrap();
+        assert!(unavailable.timeline.is_empty());
+        assert_eq!(
+            unavailable.timeline_availability,
+            super::panels::TimelineAvailability::Unavailable
+        );
+        assert_eq!(
+            unavailable.timeline_availability.empty_message(),
+            "RECORDING UNAVAILABLE"
+        );
+
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        app.tabs[0].recorder = Some(zet_blocks::Recorder::new(store, "session-a"));
+        app.inspector_cache.mark_dirty();
+        app.refresh_inspector();
+        let empty = app.inspector_cache.snapshot().unwrap();
+        assert!(empty.timeline.is_empty());
+        assert_eq!(
+            empty.timeline_availability,
+            super::panels::TimelineAvailability::Recorded
+        );
+        assert_eq!(
+            empty.timeline_availability.empty_message(),
+            "NO OBSERVED WORK"
+        );
+    }
+
+    #[test]
+    fn timeline_mode_switch_preserves_terminal_geometry_and_input_ownership() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        let before = app.frame_layout();
+        app.focus = super::Focus::Inspector;
+        app.handle_key_parts(
+            winit::keyboard::Key::Character("t".into()),
+            Some("t"),
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert!(app.inspector_timeline);
+        let after = app.frame_layout();
+        assert_eq!(after.term, before.term);
+        assert_eq!(after.inspector, before.inspector);
+        assert_eq!(after.rail, before.rail);
+        app.handle_key_parts(
+            winit::keyboard::Key::Character("x".into()),
+            Some("x"),
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert_eq!(app.focus, super::Focus::Inspector);
     }
 
     #[test]
