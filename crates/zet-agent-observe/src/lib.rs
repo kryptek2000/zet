@@ -205,13 +205,6 @@ impl AgentObservation {
         }
         match dto.source {
             EvidenceSource::RecordedCommand => {
-                if dto.evidence_kind != EvidenceKind::CommandLaunchCandidate
-                    || dto.classification != ObservationClass::HeuristicCandidate
-                    || dto.strength != EvidenceStrength::Candidate
-                    || dto.agent.is_unknown()
-                {
-                    return Err(ObservationError::InvalidEvidence);
-                }
                 let block_id = dto.command.ok_or(ObservationError::InvalidEvidence)?;
                 let store = store.ok_or(ObservationError::InvalidEvidence)?;
                 let block = store
@@ -220,6 +213,11 @@ impl AgentObservation {
                 if block.session != session.as_str() {
                     return Err(ObservationError::InvalidEvidence);
                 }
+                let derived_name =
+                    first_command_token(&block.command).ok_or(ObservationError::InvalidEvidence)?;
+                let derived_agent =
+                    known_agent(&derived_name).ok_or(ObservationError::InvalidEvidence)?;
+                // Normalize identity exclusively from trusted source data.
                 Ok(AgentObservation {
                     id: ObservationId(dto.id),
                     session,
@@ -227,10 +225,10 @@ impl AgentObservation {
                     evidence_kind: EvidenceKind::CommandLaunchCandidate,
                     classification: ObservationClass::HeuristicCandidate,
                     strength: EvidenceStrength::Candidate,
-                    availability: dto.availability,
-                    agent: dto.agent,
+                    availability: EvidenceAvailability::Available,
+                    agent: derived_agent,
                     command: Some(CommandRef(block_id)),
-                    command_name: dto.command_name,
+                    command_name: Some(derived_name),
                     observed_at_ms: dto.observed_at_ms,
                     stale_after_ms: dto.stale_after_ms,
                 })
@@ -246,6 +244,13 @@ impl AgentObservation {
                 {
                     return Err(ObservationError::InvalidEvidence);
                 }
+                if let Some(name) = &dto.command_name {
+                    if let Some(derived) = known_agent(name) {
+                        if derived != dto.agent {
+                            return Err(ObservationError::InvalidEvidence);
+                        }
+                    }
+                }
                 Ok(AgentObservation {
                     id: ObservationId(dto.id),
                     session,
@@ -253,7 +258,7 @@ impl AgentObservation {
                     evidence_kind: EvidenceKind::CommandLaunchCandidate,
                     classification: ObservationClass::HeuristicCandidate,
                     strength: EvidenceStrength::Candidate,
-                    availability: dto.availability,
+                    availability: EvidenceAvailability::Available,
                     agent: dto.agent,
                     command: None,
                     command_name: dto.command_name,
@@ -1256,6 +1261,136 @@ mod tests {
             store.record_recorder_dropped(SessionRef::new(format!("s{i}")).unwrap(), 1);
         }
         assert!(store.recorded_dropped_by_session().len() <= MAX_OBSERVATION_CAPACITY);
+    }
+
+    #[test]
+    fn dto_recorded_identity_is_derived_from_store() {
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let id = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "s".to_string(),
+                command: "opencode run".to_string(),
+                output: String::new(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let dto = AgentObservationDto {
+            id: 7,
+            session: "s".to_string(),
+            source: EvidenceSource::RecordedCommand,
+            evidence_kind: EvidenceKind::CommandLaunchCandidate,
+            classification: ObservationClass::HeuristicCandidate,
+            strength: EvidenceStrength::Candidate,
+            availability: EvidenceAvailability::Conflicting,
+            agent: AgentKind::ClaudeCode,
+            command: Some(id),
+            command_name: Some("claude".to_string()),
+            observed_at_ms: 10,
+            stale_after_ms: 300_000,
+        };
+        let obs = AgentObservation::from_dto(dto, Some(&store)).unwrap();
+        assert_eq!(obs.agent(), &AgentKind::OpenCode);
+        assert_eq!(obs.command_name(), Some("opencode"));
+        assert_eq!(obs.availability(), EvidenceAvailability::Available);
+        assert_eq!(obs.command(), Some(CommandRef(id)));
+    }
+
+    #[test]
+    fn dto_ordinary_command_is_rejected() {
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let id = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "s".to_string(),
+                command: "pwd".to_string(),
+                output: String::new(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let dto = AgentObservationDto {
+            id: 7,
+            session: "s".to_string(),
+            source: EvidenceSource::RecordedCommand,
+            evidence_kind: EvidenceKind::CommandLaunchCandidate,
+            classification: ObservationClass::HeuristicCandidate,
+            strength: EvidenceStrength::Candidate,
+            availability: EvidenceAvailability::Available,
+            agent: AgentKind::OpenCode,
+            command: Some(id),
+            command_name: Some("opencode".to_string()),
+            observed_at_ms: 10,
+            stale_after_ms: 300_000,
+        };
+        assert!(AgentObservation::from_dto(dto, Some(&store)).is_err());
+    }
+
+    #[test]
+    fn dto_wrong_session_or_missing_block_is_rejected() {
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let id = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "s".to_string(),
+                command: "opencode run".to_string(),
+                output: String::new(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let mut dto = AgentObservationDto {
+            id: 7,
+            session: "other".to_string(),
+            source: EvidenceSource::RecordedCommand,
+            evidence_kind: EvidenceKind::CommandLaunchCandidate,
+            classification: ObservationClass::HeuristicCandidate,
+            strength: EvidenceStrength::Candidate,
+            availability: EvidenceAvailability::Available,
+            agent: AgentKind::OpenCode,
+            command: Some(id),
+            command_name: Some("opencode".to_string()),
+            observed_at_ms: 10,
+            stale_after_ms: 300_000,
+        };
+        assert!(AgentObservation::from_dto(dto.clone(), Some(&store)).is_err());
+        dto.session = "s".to_string();
+        dto.command = Some(999999);
+        assert!(AgentObservation::from_dto(dto, Some(&store)).is_err());
+    }
+
+    #[test]
+    fn dto_round_trip_preserves_candidate_provenance() {
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let id = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "s".to_string(),
+                command: "opencode run".to_string(),
+                output: String::new(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let mut obs_store = AgentObservationStore::new(8);
+        let session = SessionRef::new("s").unwrap();
+        let obs = obs_store
+            .observe_recorded_command(&store, session, id, 10)
+            .unwrap();
+        let dto = obs.to_dto();
+        let restored = AgentObservation::from_dto(dto, Some(&store)).unwrap();
+        assert_eq!(restored.agent(), obs.agent());
+        assert_eq!(restored.command(), obs.command());
+        assert_eq!(restored.source(), EvidenceSource::RecordedCommand);
     }
     #[test]
     fn id_exhaustion_is_safe() {

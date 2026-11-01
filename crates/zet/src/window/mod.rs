@@ -4557,7 +4557,12 @@ impl ApplicationHandler for App {
         event: WindowEvent,
     ) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                for i in (0..self.tabs.len()).rev() {
+                    self.finalize_tab_for_closure(i);
+                }
+                event_loop.exit();
+            }
             WindowEvent::ModifiersChanged(m) => {
                 self.mods = m.state();
             }
