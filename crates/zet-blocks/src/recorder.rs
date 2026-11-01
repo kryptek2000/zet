@@ -48,7 +48,7 @@ pub struct Recorder {
     /// Last nonzero-exit block (command, cwd, output, exit), drained by
     /// the window for did-you-mean offers. Preview fuel only.
     last_failed: Option<(String, String, String, i32)>,
-    recorded_events: VecDeque<(i64, String)>,
+    recorded_events: VecDeque<i64>,
     recorded_dropped: u64,
     recorded_capacity: usize,
 }
@@ -82,7 +82,7 @@ impl Recorder {
     /// Last recorded block since the last pump, if one settled. Used by
     /// the agent-observation adapter; the block id is the persisted
     /// identity and the command is the recorded command text.
-    pub fn drain_recorded(&mut self) -> Vec<(i64, String)> {
+    pub fn drain_recorded(&mut self) -> Vec<i64> {
         self.recorded_events.drain(..).collect()
     }
 
@@ -284,7 +284,7 @@ impl Recorder {
                 self.recorded_events.pop_front();
                 self.recorded_dropped = self.recorded_dropped.saturating_add(1);
             }
-            self.recorded_events.push_back((id, block.command.clone()));
+            self.recorded_events.push_back(id);
         }
     }
 }

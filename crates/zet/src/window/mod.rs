@@ -446,7 +446,7 @@ impl App {
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
                 if let Some(store) = self.tabs[i].recorder.as_ref().map(|r| r.store()) {
-                    for (block_id, _command) in recorded {
+                    for block_id in recorded {
                         self.agent_observations.observe_recorded_command(
                             store,
                             session.clone(),
@@ -454,6 +454,10 @@ impl App {
                             now_ms,
                         );
                     }
+                }
+                if let Some(rec) = self.tabs[i].recorder.as_ref() {
+                    self.agent_observations
+                        .record_recorder_dropped(rec.recorded_dropped());
                 }
             }
         }
