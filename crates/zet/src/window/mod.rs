@@ -3690,7 +3690,51 @@ impl App {
     /// Close the active tab: the session is shut down (kill + wait,
     /// no zombies) before the tab drops. The last tab closes the
     /// window instead of stranding it.
+    fn finalize_tab_for_closure(&mut self, idx: usize) {
+        if idx >= self.tabs.len() {
+            return;
+        }
+        let cwd = shell_cwd(&self.tabs[idx].session);
+        let session_id = self.tabs[idx]
+            .recorder
+            .as_ref()
+            .map(|rec| rec.session().to_string());
+        let mut recorder = self.tabs[idx].recorder.take();
+        let mut recorded = Vec::new();
+        let mut dropped = 0;
+        if let Some(rec) = recorder.as_mut() {
+            rec.pump(&mut self.tabs[idx].term, &cwd);
+            recorded = rec.drain_recorded();
+            dropped = rec.recorded_dropped();
+        }
+        let store = recorder.as_ref().map(|rec| rec.store());
+        if let Some(session_id) = session_id {
+            if let Ok(session) = zet_agent_observe::SessionRef::new(session_id) {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                if let Some(store) = store {
+                    for block_id in recorded {
+                        self.agent_observations.observe_recorded_command(
+                            store,
+                            session.clone(),
+                            block_id,
+                            now_ms,
+                        );
+                    }
+                }
+                self.agent_observations
+                    .record_recorder_dropped(session.clone(), dropped);
+                self.agent_observations.retire_session(&session);
+            }
+        }
+        // recorder dropped here
+        drop(recorder);
+    }
+
     fn close_tab(&mut self, event_loop: &ActiveEventLoop) {
+        self.finalize_tab_for_closure(self.active);
         if self.tabs.len() <= 1 {
             event_loop.exit();
             return;

@@ -572,13 +572,7 @@ impl AgentObservationStore {
         now_ms: u64,
     ) -> Option<AgentObservation> {
         let name = first_command_token(command_line)?;
-        let agent = match known_agent(&name) {
-            Some(a) => a,
-            None => {
-                eprintln!("unknown agent {name}");
-                return None;
-            }
-        };
+        let agent = known_agent(&name)?;
         let session = SessionRef::new(session.as_str().to_string()).ok()?;
         let draft = ObservationDraft {
             session,
@@ -709,6 +703,11 @@ impl AgentObservationStore {
         self.recorded_dropped_by_session.clear();
         self.recorded_loss_complete = true;
         self.seen_recorded.clear();
+    }
+
+    pub fn retire_session(&mut self, session: &SessionRef) {
+        self.seen_recorded.retain(|(s, _)| s != session.as_str());
+        self.recorded_dropped_by_session.remove(session.as_str());
     }
 
     pub fn clear_session(&mut self, session: &SessionRef) {
