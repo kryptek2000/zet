@@ -140,8 +140,7 @@ pub enum ConflictStatus {
     Conflicting,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "AgentObservationWire")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AgentObservation {
     id: ObservationId,
     session: SessionRef,
@@ -157,57 +156,117 @@ pub struct AgentObservation {
     stale_after_ms: u64,
 }
 
-#[derive(Deserialize)]
-struct AgentObservationWire {
-    id: ObservationId,
-    session: SessionRef,
-    source: EvidenceSource,
-    evidence_kind: EvidenceKind,
-    classification: ObservationClass,
-    strength: EvidenceStrength,
-    availability: EvidenceAvailability,
-    agent: AgentKind,
-    command_name: Option<String>,
-    observed_at_ms: u64,
-    stale_after_ms: u64,
-}
-
-impl TryFrom<AgentObservationWire> for AgentObservation {
-    type Error = ObservationError;
-
-    fn try_from(wire: AgentObservationWire) -> Result<Self, Self::Error> {
-        let draft = ObservationDraft {
-            session: wire.session,
-            source: wire.source,
-            evidence_kind: wire.evidence_kind,
-            classification: wire.classification,
-            strength: wire.strength,
-            agent: wire.agent,
-            command: None,
-            command_name: wire.command_name,
-            observed_at_ms: wire.observed_at_ms,
-            stale_after_ms: wire.stale_after_ms,
-            availability: wire.availability,
-        };
-        validate_draft(&draft)?;
-        Ok(AgentObservation {
-            id: wire.id,
-            session: draft.session,
-            source: draft.source,
-            evidence_kind: draft.evidence_kind,
-            classification: draft.classification,
-            strength: draft.strength,
-            availability: draft.availability,
-            agent: draft.agent,
-            command: None,
-            command_name: draft.command_name,
-            observed_at_ms: draft.observed_at_ms,
-            stale_after_ms: draft.stale_after_ms,
-        })
-    }
+/// Untrusted serialized representation of an observation claim.
+/// This is a data DTO only; it does not establish trusted authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentObservationDto {
+    pub id: u64,
+    pub session: String,
+    pub source: EvidenceSource,
+    pub evidence_kind: EvidenceKind,
+    pub classification: ObservationClass,
+    pub strength: EvidenceStrength,
+    pub availability: EvidenceAvailability,
+    pub agent: AgentKind,
+    pub command: Option<i64>,
+    pub command_name: Option<String>,
+    pub observed_at_ms: u64,
+    pub stale_after_ms: u64,
 }
 
 impl AgentObservation {
+    pub fn to_dto(&self) -> AgentObservationDto {
+        AgentObservationDto {
+            id: self.id.0,
+            session: self.session.as_str().to_string(),
+            source: self.source,
+            evidence_kind: self.evidence_kind,
+            classification: self.classification,
+            strength: self.strength,
+            availability: self.availability,
+            agent: self.agent.clone(),
+            command: self.command.map(|c| c.0),
+            command_name: self.command_name.clone(),
+            observed_at_ms: self.observed_at_ms,
+            stale_after_ms: self.stale_after_ms,
+        }
+    }
+
+    pub fn from_dto(
+        dto: AgentObservationDto,
+        store: Option<&zet_blocks::Store>,
+    ) -> Result<Self, ObservationError> {
+        let session = SessionRef::new(dto.session)?;
+        if dto.stale_after_ms < MIN_STALE_AFTER_MS || dto.stale_after_ms > MAX_STALE_AFTER_MS {
+            return Err(ObservationError::InvalidTimestamp);
+        }
+        if dto.command_name.as_ref().map(|s| s.len()).unwrap_or(0) > MAX_COMMAND_NAME_BYTES {
+            return Err(ObservationError::OversizedInput);
+        }
+        match dto.source {
+            EvidenceSource::RecordedCommand => {
+                if dto.evidence_kind != EvidenceKind::CommandLaunchCandidate
+                    || dto.classification != ObservationClass::HeuristicCandidate
+                    || dto.strength != EvidenceStrength::Candidate
+                    || dto.agent.is_unknown()
+                {
+                    return Err(ObservationError::InvalidEvidence);
+                }
+                let block_id = dto.command.ok_or(ObservationError::InvalidEvidence)?;
+                let store = store.ok_or(ObservationError::InvalidEvidence)?;
+                let block = store
+                    .get(block_id)
+                    .map_err(|_| ObservationError::InvalidEvidence)?;
+                if block.session != session.as_str() {
+                    return Err(ObservationError::InvalidEvidence);
+                }
+                Ok(AgentObservation {
+                    id: ObservationId(dto.id),
+                    session,
+                    source: EvidenceSource::RecordedCommand,
+                    evidence_kind: EvidenceKind::CommandLaunchCandidate,
+                    classification: ObservationClass::HeuristicCandidate,
+                    strength: EvidenceStrength::Candidate,
+                    availability: dto.availability,
+                    agent: dto.agent,
+                    command: Some(CommandRef(block_id)),
+                    command_name: dto.command_name,
+                    observed_at_ms: dto.observed_at_ms,
+                    stale_after_ms: dto.stale_after_ms,
+                })
+            }
+            EvidenceSource::CommandText => {
+                if dto.command.is_some() {
+                    return Err(ObservationError::InvalidEvidence);
+                }
+                if dto.evidence_kind != EvidenceKind::CommandLaunchCandidate
+                    || dto.classification != ObservationClass::HeuristicCandidate
+                    || dto.strength != EvidenceStrength::Candidate
+                    || dto.agent.is_unknown()
+                {
+                    return Err(ObservationError::InvalidEvidence);
+                }
+                Ok(AgentObservation {
+                    id: ObservationId(dto.id),
+                    session,
+                    source: EvidenceSource::CommandText,
+                    evidence_kind: EvidenceKind::CommandLaunchCandidate,
+                    classification: ObservationClass::HeuristicCandidate,
+                    strength: EvidenceStrength::Candidate,
+                    availability: dto.availability,
+                    agent: dto.agent,
+                    command: None,
+                    command_name: dto.command_name,
+                    observed_at_ms: dto.observed_at_ms,
+                    stale_after_ms: dto.stale_after_ms,
+                })
+            }
+            EvidenceSource::ProcessTable | EvidenceSource::StructuredIntegration => {
+                Err(ObservationError::UnsupportedSource)
+            }
+        }
+    }
+
     pub fn id(&self) -> ObservationId {
         self.id
     }
@@ -275,13 +334,14 @@ pub struct ObservationDraft {
     pub availability: EvidenceAvailability,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AgentObservationSnapshot {
     pub observations: Vec<AgentObservation>,
     pub capacity: usize,
     pub len: usize,
     pub dropped: u64,
     pub recorded_dropped: u64,
+    pub recorded_loss_complete: bool,
     pub conflict_status: ConflictStatus,
 }
 
@@ -316,6 +376,7 @@ pub struct AgentObservationStore {
     dropped: u64,
     recorded_dropped: u64,
     recorded_dropped_by_session: HashMap<String, u64>,
+    recorded_loss_complete: bool,
     seen_recorded: std::collections::HashSet<(String, i64)>,
 }
 
@@ -329,6 +390,7 @@ impl AgentObservationStore {
             dropped: 0,
             recorded_dropped: 0,
             recorded_dropped_by_session: HashMap::new(),
+            recorded_loss_complete: true,
             seen_recorded: std::collections::HashSet::new(),
         }
     }
@@ -415,6 +477,94 @@ impl AgentObservationStore {
         Ok(observation)
     }
 
+    pub(crate) fn try_record_trusted(
+        &mut self,
+        draft: ObservationDraft,
+    ) -> Result<AgentObservation, ObservationError> {
+        // Only the trusted recorder adapter may create RecordedCommand.
+        match draft.source {
+            EvidenceSource::RecordedCommand => {
+                if draft.command.is_none()
+                    || draft.evidence_kind != EvidenceKind::CommandLaunchCandidate
+                    || draft.classification != ObservationClass::HeuristicCandidate
+                    || draft.strength != EvidenceStrength::Candidate
+                    || draft.agent.is_unknown()
+                {
+                    return Err(ObservationError::InvalidEvidence);
+                }
+            }
+            _ => return Err(ObservationError::UnsupportedSource),
+        }
+        if draft.availability != EvidenceAvailability::Available {
+            return Err(ObservationError::InvalidEvidence);
+        }
+        if draft.session.as_str().len() > MAX_SESSION_REF_BYTES {
+            return Err(ObservationError::OversizedInput);
+        }
+        if let Some(name) = &draft.command_name {
+            if name.len() > MAX_COMMAND_NAME_BYTES {
+                return Err(ObservationError::OversizedInput);
+            }
+        }
+        if let AgentKind::Unknown(name) = &draft.agent {
+            if name.len() > MAX_AGENT_NAME_BYTES {
+                return Err(ObservationError::OversizedInput);
+            }
+        }
+        if draft.stale_after_ms < MIN_STALE_AFTER_MS || draft.stale_after_ms > MAX_STALE_AFTER_MS {
+            return Err(ObservationError::InvalidTimestamp);
+        }
+
+        let id = if self.next_id == u64::MAX {
+            return Err(ObservationError::IdExhausted);
+        } else {
+            let id = self.next_id;
+            self.next_id += 1;
+            id
+        };
+
+        let session = draft.session;
+        let agent = draft.agent;
+        let command_name = draft.command_name.map(|name| {
+            let mut out: String = name.chars().take(MAX_COMMAND_NAME_BYTES).collect();
+            if let Some(idx) = out.find(char::is_whitespace) {
+                out.truncate(idx);
+            }
+            out
+        });
+
+        let observation = AgentObservation {
+            id: ObservationId(id),
+            session,
+            source: draft.source,
+            evidence_kind: draft.evidence_kind,
+            classification: draft.classification,
+            strength: draft.strength,
+            availability: draft.availability,
+            agent,
+            command: draft.command,
+            command_name,
+            observed_at_ms: draft.observed_at_ms,
+            stale_after_ms: draft.stale_after_ms,
+        };
+
+        // Evict dedup key with observation.
+        if self.observations.len() >= self.capacity {
+            if let Some(old_obs) = self.observations.front() {
+                if old_obs.source() == EvidenceSource::RecordedCommand {
+                    if let Some(cmd) = old_obs.command() {
+                        self.seen_recorded
+                            .remove(&(old_obs.session().as_str().to_string(), cmd.0));
+                    }
+                }
+            }
+            self.observations.pop_front();
+            self.dropped = self.dropped.saturating_add(1);
+        }
+        self.observations.push_back(observation.clone());
+        Ok(observation)
+    }
+
     pub fn observe_command(
         &mut self,
         session: SessionRef,
@@ -422,7 +572,13 @@ impl AgentObservationStore {
         now_ms: u64,
     ) -> Option<AgentObservation> {
         let name = first_command_token(command_line)?;
-        let agent = known_agent(&name)?;
+        let agent = match known_agent(&name) {
+            Some(a) => a,
+            None => {
+                eprintln!("unknown agent {name}");
+                return None;
+            }
+        };
         let session = SessionRef::new(session.as_str().to_string()).ok()?;
         let draft = ObservationDraft {
             session,
@@ -474,7 +630,7 @@ impl AgentObservationStore {
             stale_after_ms: 300_000,
             availability: EvidenceAvailability::Available,
         };
-        match self.try_record(draft) {
+        match self.try_record_trusted(draft) {
             Ok(obs) => Some(obs),
             Err(_) => {
                 self.seen_recorded.remove(&seen_key);
@@ -485,35 +641,24 @@ impl AgentObservationStore {
 
     pub fn record_recorder_dropped(&mut self, session: SessionRef, count: u64) {
         let key = session.as_str().to_string();
+        if !self.recorded_dropped_by_session.contains_key(&key)
+            && self.recorded_dropped_by_session.len() >= MAX_OBSERVATION_CAPACITY
+        {
+            self.recorded_loss_complete = false;
+            return;
+        }
         let previous = self
             .recorded_dropped_by_session
             .get(&key)
             .copied()
             .unwrap_or(0);
-        if count >= previous {
-            let delta = count - previous;
-            self.recorded_dropped = self.recorded_dropped.saturating_add(delta);
+        let delta = if count >= previous {
+            count - previous
         } else {
-            // Counter reset: replace the old contribution.
-            self.recorded_dropped = self
-                .recorded_dropped
-                .saturating_sub(previous)
-                .saturating_add(count);
-        }
+            count
+        };
+        self.recorded_dropped = self.recorded_dropped.saturating_add(delta);
         self.recorded_dropped_by_session.insert(key, count);
-
-        // Bound per-session bookkeeping.
-        if self.recorded_dropped_by_session.len() > MAX_OBSERVATION_CAPACITY {
-            if let Some((evicted, evicted_count)) = self
-                .recorded_dropped_by_session
-                .iter()
-                .next()
-                .map(|(k, v)| (k.clone(), *v))
-            {
-                self.recorded_dropped_by_session.remove(&evicted);
-                self.recorded_dropped = self.recorded_dropped.saturating_sub(evicted_count);
-            }
-        }
     }
 
     pub fn recorded_dropped(&self) -> u64 {
@@ -552,6 +697,7 @@ impl AgentObservationStore {
             len: self.observations.len(),
             dropped: self.dropped,
             recorded_dropped: self.recorded_dropped,
+            recorded_loss_complete: self.recorded_loss_complete,
             conflict_status: ConflictStatus::Unknown,
         }
     }
@@ -561,15 +707,14 @@ impl AgentObservationStore {
         self.dropped = 0;
         self.recorded_dropped = 0;
         self.recorded_dropped_by_session.clear();
+        self.recorded_loss_complete = true;
         self.seen_recorded.clear();
     }
 
     pub fn clear_session(&mut self, session: &SessionRef) {
         self.observations.retain(|o| o.session != *session);
         self.seen_recorded.retain(|(s, _)| s != session.as_str());
-        if let Some(count) = self.recorded_dropped_by_session.remove(session.as_str()) {
-            self.recorded_dropped = self.recorded_dropped.saturating_sub(count);
-        }
+        self.recorded_dropped_by_session.remove(session.as_str());
     }
 }
 
@@ -579,18 +724,8 @@ fn validate_draft(draft: &ObservationDraft) -> Result<(), ObservationError> {
     }
     match draft.source {
         EvidenceSource::RecordedCommand => {
-            if draft.command.is_none() {
-                return Err(ObservationError::InvalidEvidence);
-            }
-            if draft.evidence_kind != EvidenceKind::CommandLaunchCandidate
-                || draft.classification != ObservationClass::HeuristicCandidate
-                || draft.strength != EvidenceStrength::Candidate
-            {
-                return Err(ObservationError::InvalidEvidence);
-            }
-            if draft.agent.is_unknown() {
-                return Err(ObservationError::InvalidEvidence);
-            }
+            // Public recording cannot manufacture persisted provenance.
+            return Err(ObservationError::UnsupportedSource);
         }
         EvidenceSource::CommandText => {
             if draft.command.is_some() {
@@ -923,8 +1058,10 @@ mod tests {
             "observed_at_ms": 1,
             "stale_after_ms": 300000
         }"#;
-        let result: Result<AgentObservation, _> = serde_json::from_str(json);
-        assert!(result.is_err());
+        let dto: Result<AgentObservationDto, _> = serde_json::from_str(json);
+        assert!(dto.is_ok());
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        assert!(AgentObservation::from_dto(dto.unwrap(), Some(&store)).is_err());
     }
 
     #[test]
@@ -1103,12 +1240,14 @@ mod tests {
         // Increased count adds only the delta.
         store.record_recorder_dropped(s1, 4);
         assert_eq!(store.recorded_dropped(), 7);
-        // Counter reset replaces the old contribution.
+        // Counter reset adds the new counter value as fresh loss.
         store.record_recorder_dropped(s2.clone(), 1);
-        assert_eq!(store.recorded_dropped(), 5);
-        // Session removal removes its contribution.
+        assert_eq!(store.recorded_dropped(), 8);
+        // Session retirement releases active bookkeeping but preserves
+        // historical loss.
         store.clear_session(&s2);
-        assert_eq!(store.recorded_dropped(), 4);
+        assert_eq!(store.recorded_dropped(), 8);
+        assert!(!store.recorded_dropped_by_session().contains_key("s2"));
     }
 
     #[test]
