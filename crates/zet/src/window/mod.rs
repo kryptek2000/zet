@@ -120,13 +120,17 @@ impl Tab {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
+        static TAB_SESSION_COUNTER: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        let tab_number = TAB_SESSION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let session_id = format!(
-            "{}-{}",
+            "{}-{}-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
+                .map(|d| d.as_nanos())
                 .unwrap_or(0),
-            std::process::id()
+            std::process::id(),
+            tab_number
         );
         let setup = setup_lines(&session_id, hook.as_deref());
         let _ = session.write_all(setup.as_bytes());
@@ -429,20 +433,28 @@ impl App {
                     rec.drain_recorded(),
                 )
             }
-            None => (Vec::new(), None, None),
+            None => (Vec::new(), None, Vec::new()),
         };
-        if let Some((block_id, command)) = recorded {
+        if !recorded.is_empty() {
             if let Some(session) = session_id {
+                let session = match zet_agent_observe::SessionRef::new(session) {
+                    Ok(s) => s,
+                    Err(_) => return died,
+                };
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
-                self.agent_observations.observe_command(
-                    zet_agent_observe::SessionRef::new(session),
-                    &command,
-                    Some(zet_agent_observe::CommandRef(block_id)),
-                    now_ms,
-                );
+                if let Some(store) = self.tabs[i].recorder.as_ref().map(|r| r.store()) {
+                    for (block_id, _command) in recorded {
+                        self.agent_observations.observe_recorded_command(
+                            store,
+                            session.clone(),
+                            block_id,
+                            now_ms,
+                        );
+                    }
+                }
             }
         }
         // Shell-reported aliases/functions feed the router.

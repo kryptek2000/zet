@@ -23,16 +23,16 @@ pub const MAX_STALE_AFTER_MS: u64 = 86_400_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ObservationId(pub u64);
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct SessionRef(String);
 
 impl SessionRef {
-    pub fn new(value: impl Into<String>) -> Self {
-        let mut value = value.into();
+    pub fn new(value: impl Into<String>) -> Result<Self, ObservationError> {
+        let value = value.into();
         if value.len() > MAX_SESSION_REF_BYTES {
-            value.truncate(MAX_SESSION_REF_BYTES);
+            return Err(ObservationError::OversizedInput);
         }
-        Self(value)
+        Ok(Self(value))
     }
 
     pub fn as_str(&self) -> &str {
@@ -40,8 +40,18 @@ impl SessionRef {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for SessionRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        SessionRef::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommandRef(pub i64);
+pub struct CommandRef(pub(crate) i64);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AgentKind {
@@ -400,7 +410,7 @@ impl AgentObservationStore {
     ) -> Option<AgentObservation> {
         let name = first_command_token(command_line)?;
         let agent = known_agent(&name)?;
-        let session = SessionRef::new(session.as_str().to_string());
+        let session = SessionRef::new(session.as_str().to_string()).ok()?;
         let source = if command_id.is_some() {
             EvidenceSource::RecordedCommand
         } else {
@@ -414,6 +424,39 @@ impl AgentObservationStore {
             strength: EvidenceStrength::Candidate,
             agent,
             command: command_id,
+            command_name: Some(name),
+            observed_at_ms: now_ms,
+            stale_after_ms: 300_000,
+            availability: EvidenceAvailability::Available,
+        };
+        self.try_record(draft).ok()
+    }
+
+    pub fn observe_recorded_command(
+        &mut self,
+        store: &zet_blocks::Store,
+        session: SessionRef,
+        block_id: i64,
+        now_ms: u64,
+    ) -> Option<AgentObservation> {
+        if block_id <= 0 {
+            return None;
+        }
+        let block = store.get(block_id).ok()?;
+        if block.session != session.as_str() {
+            return None;
+        }
+        let name = first_command_token(&block.command)?;
+        let agent = known_agent(&name)?;
+        let session = SessionRef::new(session.as_str().to_string()).ok()?;
+        let draft = ObservationDraft {
+            session,
+            source: EvidenceSource::RecordedCommand,
+            evidence_kind: EvidenceKind::CommandLaunchCandidate,
+            classification: ObservationClass::HeuristicCandidate,
+            strength: EvidenceStrength::Candidate,
+            agent,
+            command: Some(CommandRef(block_id)),
             command_name: Some(name),
             observed_at_ms: now_ms,
             stale_after_ms: 300_000,
@@ -583,7 +626,7 @@ mod tests {
     fn ordinary_command_does_not_become_observation() {
         let mut store = AgentObservationStore::new(8);
         assert!(store
-            .observe_command(SessionRef::new("s1"), "cargo test", None, 1000)
+            .observe_command(SessionRef::new("s1").unwrap(), "cargo test", None, 1000)
             .is_none());
         assert!(store.is_empty());
     }
@@ -593,7 +636,7 @@ mod tests {
         let mut store = AgentObservationStore::new(8);
         let obs = store
             .observe_command(
-                SessionRef::new("s1"),
+                SessionRef::new("s1").unwrap(),
                 "opencode run foo",
                 Some(CommandRef(7)),
                 1000,
@@ -612,7 +655,7 @@ mod tests {
     fn unlinked_command_text_is_not_recorded_provenance() {
         let mut store = AgentObservationStore::new(8);
         let obs = store
-            .observe_command(SessionRef::new("s1"), "claude", None, 1000)
+            .observe_command(SessionRef::new("s1").unwrap(), "claude", None, 1000)
             .expect("candidate");
         assert_eq!(obs.source(), EvidenceSource::CommandText);
         assert_eq!(obs.command(), None);
@@ -622,26 +665,41 @@ mod tests {
     fn unknown_agent_cli_is_not_observed() {
         let mut store = AgentObservationStore::new(8);
         assert!(store
-            .observe_command(SessionRef::new("s1"), "my-agent-cli do work", None, 1000)
+            .observe_command(
+                SessionRef::new("s1").unwrap(),
+                "my-agent-cli do work",
+                None,
+                1000
+            )
             .is_none());
     }
 
     #[test]
     fn multiple_sessions_stay_separate() {
         let mut store = AgentObservationStore::new(8);
-        store.observe_command(SessionRef::new("s1"), "claude", Some(CommandRef(1)), 1000);
-        store.observe_command(SessionRef::new("s2"), "codex", Some(CommandRef(2)), 1000);
-        assert_eq!(store.for_session(&SessionRef::new("s1")).len(), 1);
-        assert_eq!(store.for_session(&SessionRef::new("s2")).len(), 1);
-        assert_eq!(store.for_session(&SessionRef::new("s3")).len(), 0);
+        store.observe_command(
+            SessionRef::new("s1").unwrap(),
+            "claude",
+            Some(CommandRef(1)),
+            1000,
+        );
+        store.observe_command(
+            SessionRef::new("s2").unwrap(),
+            "codex",
+            Some(CommandRef(2)),
+            1000,
+        );
+        assert_eq!(store.for_session(&SessionRef::new("s1").unwrap()).len(), 1);
+        assert_eq!(store.for_session(&SessionRef::new("s2").unwrap()).len(), 1);
+        assert_eq!(store.for_session(&SessionRef::new("s3").unwrap()).len(), 0);
     }
 
     #[test]
     fn bounded_history_drops_oldest() {
         let mut store = AgentObservationStore::new(2);
-        store.observe_command(SessionRef::new("s"), "opencode", None, 1);
-        store.observe_command(SessionRef::new("s"), "claude", None, 2);
-        store.observe_command(SessionRef::new("s"), "codex", None, 3);
+        store.observe_command(SessionRef::new("s").unwrap(), "opencode", None, 1);
+        store.observe_command(SessionRef::new("s").unwrap(), "claude", None, 2);
+        store.observe_command(SessionRef::new("s").unwrap(), "codex", None, 3);
         assert_eq!(store.len(), 2);
         assert_eq!(store.dropped(), 1);
     }
@@ -649,8 +707,8 @@ mod tests {
     #[test]
     fn sequential_agent_launches_are_not_conflicts() {
         let mut store = AgentObservationStore::new(8);
-        store.observe_command(SessionRef::new("s"), "opencode", None, 1000);
-        store.observe_command(SessionRef::new("s"), "gemini", None, 1001);
+        store.observe_command(SessionRef::new("s").unwrap(), "opencode", None, 1000);
+        store.observe_command(SessionRef::new("s").unwrap(), "gemini", None, 1001);
         let snap = store.snapshot(1001);
         assert_eq!(snap.conflict_status, ConflictStatus::Unknown);
         assert_eq!(snap.observations.len(), 2);
@@ -659,7 +717,7 @@ mod tests {
     #[test]
     fn stale_candidates_do_not_imply_stopped_agent() {
         let mut store = AgentObservationStore::new(8);
-        store.observe_command(SessionRef::new("s"), "opencode", None, 1000);
+        store.observe_command(SessionRef::new("s").unwrap(), "opencode", None, 1000);
         let snap = store.snapshot(1000 + 400_000);
         assert_eq!(
             snap.observations[0].availability(),
@@ -671,7 +729,7 @@ mod tests {
     #[test]
     fn snapshot_materializes_effective_availability() {
         let mut store = AgentObservationStore::new(8);
-        store.observe_command(SessionRef::new("s"), "opencode", None, 1000);
+        store.observe_command(SessionRef::new("s").unwrap(), "opencode", None, 1000);
         let snap = store.snapshot(1000 + 400_000);
         assert_eq!(
             snap.observations[0].availability(),
@@ -682,7 +740,7 @@ mod tests {
     #[test]
     fn future_dated_observation_is_not_stale() {
         let mut store = AgentObservationStore::new(8);
-        store.observe_command(SessionRef::new("s"), "opencode", None, 5000);
+        store.observe_command(SessionRef::new("s").unwrap(), "opencode", None, 5000);
         let snap = store.snapshot(1000);
         assert_eq!(
             snap.observations[0].availability(),
@@ -693,7 +751,12 @@ mod tests {
     #[test]
     fn clock_boundary_is_safe() {
         let mut store = AgentObservationStore::new(8);
-        store.observe_command(SessionRef::new("s"), "opencode", None, u64::MAX - 10);
+        store.observe_command(
+            SessionRef::new("s").unwrap(),
+            "opencode",
+            None,
+            u64::MAX - 10,
+        );
         let snap = store.snapshot(u64::MAX);
         assert_eq!(
             snap.observations[0].availability(),
@@ -712,11 +775,13 @@ mod tests {
     #[test]
     fn clear_session_removes_only_that_session() {
         let mut store = AgentObservationStore::new(8);
-        store.observe_command(SessionRef::new("s1"), "opencode", None, 1);
-        store.observe_command(SessionRef::new("s2"), "claude", None, 2);
-        store.clear_session(&SessionRef::new("s1"));
-        assert!(store.for_session(&SessionRef::new("s1")).is_empty());
-        assert_eq!(store.for_session(&SessionRef::new("s2")).len(), 1);
+        store.observe_command(SessionRef::new("s1").unwrap(), "opencode", None, 1);
+        store.observe_command(SessionRef::new("s2").unwrap(), "claude", None, 2);
+        store.clear_session(&SessionRef::new("s1").unwrap());
+        assert!(store
+            .for_session(&SessionRef::new("s1").unwrap())
+            .is_empty());
+        assert_eq!(store.for_session(&SessionRef::new("s2").unwrap()).len(), 1);
     }
 
     #[test]
@@ -724,7 +789,7 @@ mod tests {
         let mut store = AgentObservationStore::new(8);
         let obs = store
             .observe_command(
-                SessionRef::new("s"),
+                SessionRef::new("s").unwrap(),
                 "opencode --secret-token=abc run",
                 None,
                 1,
@@ -738,7 +803,7 @@ mod tests {
         let mut store = AgentObservationStore::new(8);
         // Process source unsupported.
         let draft = ObservationDraft {
-            session: SessionRef::new("s"),
+            session: SessionRef::new("s").unwrap(),
             source: EvidenceSource::ProcessTable,
             evidence_kind: EvidenceKind::ProcessPresent,
             classification: ObservationClass::ObservedFact,
@@ -754,7 +819,7 @@ mod tests {
 
         // RecordedCommand without block id.
         let draft = ObservationDraft {
-            session: SessionRef::new("s"),
+            session: SessionRef::new("s").unwrap(),
             source: EvidenceSource::RecordedCommand,
             evidence_kind: EvidenceKind::CommandLaunchCandidate,
             classification: ObservationClass::HeuristicCandidate,
@@ -770,7 +835,7 @@ mod tests {
 
         // Candidate upgraded to verified.
         let draft = ObservationDraft {
-            session: SessionRef::new("s"),
+            session: SessionRef::new("s").unwrap(),
             source: EvidenceSource::CommandText,
             evidence_kind: EvidenceKind::CommandLaunchCandidate,
             classification: ObservationClass::HeuristicCandidate,
@@ -786,7 +851,7 @@ mod tests {
 
         // Unknown agent cannot be recorded as candidate.
         let draft = ObservationDraft {
-            session: SessionRef::new("s"),
+            session: SessionRef::new("s").unwrap(),
             source: EvidenceSource::CommandText,
             evidence_kind: EvidenceKind::CommandLaunchCandidate,
             classification: ObservationClass::HeuristicCandidate,
@@ -826,11 +891,11 @@ mod tests {
         let mut store = AgentObservationStore::new(8);
         // Wrapper should not be recognized as an agent.
         assert!(store
-            .observe_command(SessionRef::new("s"), "sudo opencode", None, 1)
+            .observe_command(SessionRef::new("s").unwrap(), "sudo opencode", None, 1)
             .is_none());
         // Unknown near-match is not recognized.
         assert!(store
-            .observe_command(SessionRef::new("s"), "opencodee", None, 1)
+            .observe_command(SessionRef::new("s").unwrap(), "opencodee", None, 1)
             .is_none());
     }
 
@@ -838,13 +903,10 @@ mod tests {
     fn oversized_inputs_are_bounded() {
         let mut store = AgentObservationStore::new(8);
         let long_session = "x".repeat(1000);
-        let obs = store
-            .observe_command(SessionRef::new(long_session), "opencode", None, 1)
-            .expect("candidate");
-        assert!(obs.session().as_str().len() <= MAX_SESSION_REF_BYTES);
+        assert!(SessionRef::new(long_session).is_err());
 
         let draft = ObservationDraft {
-            session: SessionRef::new("s"),
+            session: SessionRef::new("s").unwrap(),
             source: EvidenceSource::CommandText,
             evidence_kind: EvidenceKind::CommandLaunchCandidate,
             classification: ObservationClass::HeuristicCandidate,
@@ -860,13 +922,86 @@ mod tests {
     }
 
     #[test]
+    fn recorded_command_requires_persisted_block() {
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let id = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "s".to_string(),
+                command: "opencode run".to_string(),
+                output: String::new(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let mut obs_store = AgentObservationStore::new(8);
+        let session = SessionRef::new("s").unwrap();
+        let obs = obs_store.observe_recorded_command(&store, session.clone(), id, 10);
+        assert!(obs.is_some());
+        assert_eq!(obs.unwrap().command(), Some(CommandRef(id)));
+    }
+
+    #[test]
+    fn wrong_session_block_is_rejected() {
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let id = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "other".to_string(),
+                command: "opencode run".to_string(),
+                output: String::new(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let mut obs_store = AgentObservationStore::new(8);
+        let session = SessionRef::new("s").unwrap();
+        assert!(obs_store
+            .observe_recorded_command(&store, session, id, 10)
+            .is_none());
+    }
+
+    #[test]
+    fn missing_block_is_rejected() {
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let mut obs_store = AgentObservationStore::new(8);
+        let session = SessionRef::new("s").unwrap();
+        assert!(obs_store
+            .observe_recorded_command(&store, session, 999, 10)
+            .is_none());
+    }
+
+    #[test]
+    fn unicode_session_ref_does_not_panic() {
+        let cases = [
+            "a".repeat(126) + "😀",
+            "b".repeat(125) + "中",
+            "c".repeat(127) + "é",
+        ];
+        for case in cases {
+            let result = SessionRef::new(case);
+            assert!(result.is_err() || result.unwrap().as_str().len() <= MAX_SESSION_REF_BYTES);
+        }
+        assert!(SessionRef::new("session-😀-中".to_string()).is_ok());
+    }
+
+    #[test]
+    fn session_ref_rejects_overlong() {
+        assert!(SessionRef::new("x".repeat(MAX_SESSION_REF_BYTES + 1)).is_err());
+    }
+
+    #[test]
     fn id_exhaustion_is_safe() {
         // Cannot allocate u64::MAX ids in a test. Instead, verify the
         // checked increment path rejects an exhausted counter.
         let mut store = AgentObservationStore::new(1);
         store.next_id = u64::MAX;
         let draft = ObservationDraft {
-            session: SessionRef::new("s"),
+            session: SessionRef::new("s").unwrap(),
             source: EvidenceSource::CommandText,
             evidence_kind: EvidenceKind::CommandLaunchCandidate,
             classification: ObservationClass::HeuristicCandidate,

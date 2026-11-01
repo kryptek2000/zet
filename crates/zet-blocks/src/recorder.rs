@@ -14,6 +14,7 @@ use std::time::Instant;
 use zet_term::{MarkerKind, Terminal};
 
 use crate::{Block, Store};
+use std::collections::VecDeque;
 
 /// Branch checked out at `cwd`, or empty when there is none to name:
 /// not a repo, no git binary, detached HEAD, or a repo with no commits
@@ -47,7 +48,9 @@ pub struct Recorder {
     /// Last nonzero-exit block (command, cwd, output, exit), drained by
     /// the window for did-you-mean offers. Preview fuel only.
     last_failed: Option<(String, String, String, i32)>,
-    last_recorded: Option<(i64, String)>,
+    recorded_events: VecDeque<(i64, String)>,
+    recorded_dropped: u64,
+    recorded_capacity: usize,
 }
 
 impl Recorder {
@@ -60,7 +63,9 @@ impl Recorder {
             t0: None,
             cmd_names: Vec::new(),
             last_failed: None,
-            last_recorded: None,
+            recorded_events: VecDeque::new(),
+            recorded_dropped: 0,
+            recorded_capacity: 128,
         }
     }
 
@@ -77,8 +82,12 @@ impl Recorder {
     /// Last recorded block since the last pump, if one settled. Used by
     /// the agent-observation adapter; the block id is the persisted
     /// identity and the command is the recorded command text.
-    pub fn drain_recorded(&mut self) -> Option<(i64, String)> {
-        self.last_recorded.take()
+    pub fn drain_recorded(&mut self) -> Vec<(i64, String)> {
+        self.recorded_events.drain(..).collect()
+    }
+
+    pub fn recorded_dropped(&self) -> u64 {
+        self.recorded_dropped
     }
 
     pub fn blocks(&self) -> rusqlite::Result<Vec<Block>> {
@@ -271,7 +280,11 @@ impl Recorder {
             ));
         }
         if let Ok(id) = self.store.append(&block) {
-            self.last_recorded = Some((id, block.command.clone()));
+            if self.recorded_events.len() >= self.recorded_capacity {
+                self.recorded_events.pop_front();
+                self.recorded_dropped = self.recorded_dropped.saturating_add(1);
+            }
+            self.recorded_events.push_back((id, block.command.clone()));
         }
     }
 }
