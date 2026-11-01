@@ -6,7 +6,7 @@
 //! Ordinary commands do not become agent observations.
 
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 /// Absolute product-level bound for retained observations.
 pub const MAX_OBSERVATION_CAPACITY: usize = 1024;
@@ -315,6 +315,7 @@ pub struct AgentObservationStore {
     observations: VecDeque<AgentObservation>,
     dropped: u64,
     recorded_dropped: u64,
+    recorded_dropped_by_session: HashMap<String, u64>,
     seen_recorded: std::collections::HashSet<(String, i64)>,
 }
 
@@ -327,6 +328,7 @@ impl AgentObservationStore {
             observations: VecDeque::new(),
             dropped: 0,
             recorded_dropped: 0,
+            recorded_dropped_by_session: HashMap::new(),
             seen_recorded: std::collections::HashSet::new(),
         }
     }
@@ -398,6 +400,14 @@ impl AgentObservationStore {
         };
 
         if self.observations.len() >= self.capacity {
+            if let Some(old_obs) = self.observations.front() {
+                if old_obs.source() == EvidenceSource::RecordedCommand {
+                    if let Some(cmd) = old_obs.command() {
+                        self.seen_recorded
+                            .remove(&(old_obs.session().as_str().to_string(), cmd.0));
+                    }
+                }
+            }
             self.observations.pop_front();
             self.dropped = self.dropped.saturating_add(1);
         }
@@ -473,12 +483,45 @@ impl AgentObservationStore {
         }
     }
 
-    pub fn record_recorder_dropped(&mut self, count: u64) {
-        self.recorded_dropped = self.recorded_dropped.max(count);
+    pub fn record_recorder_dropped(&mut self, session: SessionRef, count: u64) {
+        let key = session.as_str().to_string();
+        let previous = self
+            .recorded_dropped_by_session
+            .get(&key)
+            .copied()
+            .unwrap_or(0);
+        if count >= previous {
+            let delta = count - previous;
+            self.recorded_dropped = self.recorded_dropped.saturating_add(delta);
+        } else {
+            // Counter reset: replace the old contribution.
+            self.recorded_dropped = self
+                .recorded_dropped
+                .saturating_sub(previous)
+                .saturating_add(count);
+        }
+        self.recorded_dropped_by_session.insert(key, count);
+
+        // Bound per-session bookkeeping.
+        if self.recorded_dropped_by_session.len() > MAX_OBSERVATION_CAPACITY {
+            if let Some((evicted, evicted_count)) = self
+                .recorded_dropped_by_session
+                .iter()
+                .next()
+                .map(|(k, v)| (k.clone(), *v))
+            {
+                self.recorded_dropped_by_session.remove(&evicted);
+                self.recorded_dropped = self.recorded_dropped.saturating_sub(evicted_count);
+            }
+        }
     }
 
     pub fn recorded_dropped(&self) -> u64 {
         self.recorded_dropped
+    }
+
+    pub fn recorded_dropped_by_session(&self) -> &HashMap<String, u64> {
+        &self.recorded_dropped_by_session
     }
 
     pub fn observations(&self) -> impl Iterator<Item = &AgentObservation> {
@@ -516,10 +559,17 @@ impl AgentObservationStore {
     pub fn clear(&mut self) {
         self.observations.clear();
         self.dropped = 0;
+        self.recorded_dropped = 0;
+        self.recorded_dropped_by_session.clear();
+        self.seen_recorded.clear();
     }
 
     pub fn clear_session(&mut self, session: &SessionRef) {
         self.observations.retain(|o| o.session != *session);
+        self.seen_recorded.retain(|(s, _)| s != session.as_str());
+        if let Some(count) = self.recorded_dropped_by_session.remove(session.as_str()) {
+            self.recorded_dropped = self.recorded_dropped.saturating_sub(count);
+        }
     }
 }
 
@@ -985,6 +1035,90 @@ mod tests {
         assert!(SessionRef::new("x".repeat(MAX_SESSION_REF_BYTES + 1)).is_err());
     }
 
+    #[test]
+    fn bounded_dedup_evicts_with_observations() {
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let id = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "s".to_string(),
+                command: "opencode run".to_string(),
+                output: String::new(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let mut obs_store = AgentObservationStore::new(1);
+        let session = SessionRef::new("s").unwrap();
+        assert!(obs_store
+            .observe_recorded_command(&store, session.clone(), id, 1)
+            .is_some());
+        // Fill capacity with an ordinary command observation, evicting the recorded one.
+        obs_store.observe_command(session.clone(), "claude", 2);
+        // Duplicate delivery after eviction is allowed again (no permanent exactly-once).
+        assert!(obs_store
+            .observe_recorded_command(&store, session, id, 3)
+            .is_some());
+    }
+
+    #[test]
+    fn clear_releases_dedup_state() {
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let id = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "s".to_string(),
+                command: "opencode run".to_string(),
+                output: String::new(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let mut obs_store = AgentObservationStore::new(8);
+        let session = SessionRef::new("s").unwrap();
+        assert!(obs_store
+            .observe_recorded_command(&store, session.clone(), id, 1)
+            .is_some());
+        obs_store.clear_session(&session);
+        assert!(obs_store
+            .observe_recorded_command(&store, session, id, 2)
+            .is_some());
+    }
+
+    #[test]
+    fn multi_session_loss_is_aggregated() {
+        let mut store = AgentObservationStore::new(8);
+        let s1 = SessionRef::new("s1").unwrap();
+        let s2 = SessionRef::new("s2").unwrap();
+        store.record_recorder_dropped(s1.clone(), 2);
+        store.record_recorder_dropped(s2.clone(), 3);
+        assert_eq!(store.recorded_dropped(), 5);
+        // Repeated snapshot does not double count.
+        store.record_recorder_dropped(s1.clone(), 2);
+        assert_eq!(store.recorded_dropped(), 5);
+        // Increased count adds only the delta.
+        store.record_recorder_dropped(s1, 4);
+        assert_eq!(store.recorded_dropped(), 7);
+        // Counter reset replaces the old contribution.
+        store.record_recorder_dropped(s2.clone(), 1);
+        assert_eq!(store.recorded_dropped(), 5);
+        // Session removal removes its contribution.
+        store.clear_session(&s2);
+        assert_eq!(store.recorded_dropped(), 4);
+    }
+
+    #[test]
+    fn loss_accounting_is_bounded() {
+        let mut store = AgentObservationStore::new(2);
+        for i in 0..5 {
+            store.record_recorder_dropped(SessionRef::new(format!("s{i}")).unwrap(), 1);
+        }
+        assert!(store.recorded_dropped_by_session().len() <= MAX_OBSERVATION_CAPACITY);
+    }
     #[test]
     fn id_exhaustion_is_safe() {
         // Cannot allocate u64::MAX ids in a test. Instead, verify the

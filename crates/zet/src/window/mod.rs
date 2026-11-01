@@ -435,12 +435,8 @@ impl App {
             }
             None => (Vec::new(), None, Vec::new()),
         };
-        if !recorded.is_empty() {
-            if let Some(session) = session_id {
-                let session = match zet_agent_observe::SessionRef::new(session) {
-                    Ok(s) => s,
-                    Err(_) => return died,
-                };
+        if let Some(session) = session_id {
+            if let Ok(session) = zet_agent_observe::SessionRef::new(session) {
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
@@ -455,9 +451,18 @@ impl App {
                         );
                     }
                 }
-                if let Some(rec) = self.tabs[i].recorder.as_ref() {
+            }
+        }
+        // Forward recorder loss even when no events were drained.
+        if let Some(rec) = self.tabs[i].recorder.as_ref() {
+            if let Some(session) = self.tabs[i]
+                .recorder
+                .as_ref()
+                .map(|r| r.session().to_string())
+            {
+                if let Ok(session) = zet_agent_observe::SessionRef::new(session) {
                     self.agent_observations
-                        .record_recorder_dropped(rec.recorded_dropped());
+                        .record_recorder_dropped(session, rec.recorded_dropped());
                 }
             }
         }
