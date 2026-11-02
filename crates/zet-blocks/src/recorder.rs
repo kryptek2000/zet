@@ -50,6 +50,7 @@ pub struct Recorder {
     last_failed: Option<(String, String, String, i32)>,
     recorded_events: VecDeque<i64>,
     recorded_dropped: u64,
+    recorded_failed_persists: u64,
     recorded_capacity: usize,
 }
 
@@ -65,6 +66,7 @@ impl Recorder {
             last_failed: None,
             recorded_events: VecDeque::new(),
             recorded_dropped: 0,
+            recorded_failed_persists: 0,
             recorded_capacity: 128,
         }
     }
@@ -88,6 +90,10 @@ impl Recorder {
 
     pub fn recorded_dropped(&self) -> u64 {
         self.recorded_dropped
+    }
+
+    pub fn recorded_failed_persists(&self) -> u64 {
+        self.recorded_failed_persists
     }
 
     pub fn blocks(&self) -> rusqlite::Result<Vec<Block>> {
@@ -279,12 +285,17 @@ impl Recorder {
                 block.exit_code,
             ));
         }
-        if let Ok(id) = self.store.append(&block) {
-            if self.recorded_events.len() >= self.recorded_capacity {
-                self.recorded_events.pop_front();
-                self.recorded_dropped = self.recorded_dropped.saturating_add(1);
+        match self.store.append(&block) {
+            Ok(id) => {
+                if self.recorded_events.len() >= self.recorded_capacity {
+                    self.recorded_events.pop_front();
+                    self.recorded_dropped = self.recorded_dropped.saturating_add(1);
+                }
+                self.recorded_events.push_back(id);
             }
-            self.recorded_events.push_back(id);
+            Err(_) => {
+                self.recorded_failed_persists = self.recorded_failed_persists.saturating_add(1);
+            }
         }
     }
 }

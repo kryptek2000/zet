@@ -258,7 +258,7 @@ impl AgentObservation {
                     evidence_kind: EvidenceKind::CommandLaunchCandidate,
                     classification: ObservationClass::HeuristicCandidate,
                     strength: EvidenceStrength::Candidate,
-                    availability: EvidenceAvailability::Available,
+                    availability: EvidenceAvailability::Stale,
                     agent: dto.agent,
                     command: None,
                     command_name: dto.command_name,
@@ -347,6 +347,8 @@ pub struct AgentObservationSnapshot {
     pub dropped: u64,
     pub recorded_dropped: u64,
     pub recorded_loss_complete: bool,
+    pub recorded_persistence_failures: u64,
+    pub recorded_delivery_incomplete: u64,
     pub conflict_status: ConflictStatus,
 }
 
@@ -382,6 +384,8 @@ pub struct AgentObservationStore {
     recorded_dropped: u64,
     recorded_dropped_by_session: HashMap<String, u64>,
     recorded_loss_complete: bool,
+    recorded_persistence_failures: u64,
+    recorded_delivery_incomplete: u64,
     seen_recorded: std::collections::HashSet<(String, i64)>,
 }
 
@@ -396,6 +400,8 @@ impl AgentObservationStore {
             recorded_dropped: 0,
             recorded_dropped_by_session: HashMap::new(),
             recorded_loss_complete: true,
+            recorded_persistence_failures: 0,
+            recorded_delivery_incomplete: 0,
             seen_recorded: std::collections::HashSet::new(),
         }
     }
@@ -664,6 +670,23 @@ impl AgentObservationStore {
         self.recorded_dropped
     }
 
+    pub fn recorded_persistence_failures(&self) -> u64 {
+        self.recorded_persistence_failures
+    }
+
+    pub fn recorded_delivery_incomplete(&self) -> u64 {
+        self.recorded_delivery_incomplete
+    }
+
+    pub fn record_persistence_failures(&mut self, count: u64) {
+        self.recorded_persistence_failures =
+            self.recorded_persistence_failures.saturating_add(count);
+    }
+
+    pub fn record_delivery_incomplete(&mut self) {
+        self.recorded_delivery_incomplete = self.recorded_delivery_incomplete.saturating_add(1);
+    }
+
     pub fn recorded_dropped_by_session(&self) -> &HashMap<String, u64> {
         &self.recorded_dropped_by_session
     }
@@ -697,6 +720,8 @@ impl AgentObservationStore {
             dropped: self.dropped,
             recorded_dropped: self.recorded_dropped,
             recorded_loss_complete: self.recorded_loss_complete,
+            recorded_persistence_failures: self.recorded_persistence_failures,
+            recorded_delivery_incomplete: self.recorded_delivery_incomplete,
             conflict_status: ConflictStatus::Unknown,
         }
     }
@@ -707,6 +732,8 @@ impl AgentObservationStore {
         self.recorded_dropped = 0;
         self.recorded_dropped_by_session.clear();
         self.recorded_loss_complete = true;
+        self.recorded_persistence_failures = 0;
+        self.recorded_delivery_incomplete = 0;
         self.seen_recorded.clear();
     }
 

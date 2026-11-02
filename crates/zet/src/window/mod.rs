@@ -462,7 +462,9 @@ impl App {
             {
                 if let Ok(session) = zet_agent_observe::SessionRef::new(session) {
                     self.agent_observations
-                        .record_recorder_dropped(session, rec.recorded_dropped());
+                        .record_recorder_dropped(session.clone(), rec.recorded_dropped());
+                    self.agent_observations
+                        .record_persistence_failures(rec.recorded_failed_persists());
                 }
             }
         }
@@ -3694,6 +3696,13 @@ impl App {
         if idx >= self.tabs.len() {
             return;
         }
+        // Drain pending PTY bytes before final recorder processing.
+        if let Some(rx) = self.tabs[idx].rx.take() {
+            let chunks: Vec<Vec<u8>> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+            for chunk in chunks {
+                self.tabs[idx].term.feed(&chunk);
+            }
+        }
         let cwd = shell_cwd(&self.tabs[idx].session);
         let session_id = self.tabs[idx]
             .recorder
@@ -3702,10 +3711,12 @@ impl App {
         let mut recorder = self.tabs[idx].recorder.take();
         let mut recorded = Vec::new();
         let mut dropped = 0;
+        let mut failed_persists = 0;
         if let Some(rec) = recorder.as_mut() {
             rec.pump(&mut self.tabs[idx].term, &cwd);
             recorded = rec.drain_recorded();
             dropped = rec.recorded_dropped();
+            failed_persists = rec.recorded_failed_persists();
         }
         let store = recorder.as_ref().map(|rec| rec.store());
         if let Some(session_id) = session_id {
@@ -3726,8 +3737,14 @@ impl App {
                 }
                 self.agent_observations
                     .record_recorder_dropped(session.clone(), dropped);
+                self.agent_observations
+                    .record_persistence_failures(failed_persists);
                 self.agent_observations.retire_session(&session);
+            } else {
+                self.agent_observations.record_delivery_incomplete();
             }
+        } else {
+            self.agent_observations.record_delivery_incomplete();
         }
         // recorder dropped here
         drop(recorder);
