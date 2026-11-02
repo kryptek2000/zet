@@ -2208,7 +2208,7 @@ impl App {
             rail_h.saturating_sub(4),
             10,
             zet_gpu::renderer::RAIL_BG,
-            RAIL_BORDER,
+            if focused { RAIL_FOCUS } else { RAIL_BORDER },
         );
         r.draw_rect_px(
             origin_x,
@@ -3400,7 +3400,7 @@ impl App {
             height_px.saturating_sub(4),
             10,
             PANEL_BG,
-            PANEL_BORDER,
+            if focused { PANEL_CYAN } else { PANEL_BORDER },
         );
         r.draw_rect_px(
             origin_x,
@@ -3602,18 +3602,18 @@ impl App {
         // Session overview: real state only, kept separate from the command
         // ledger so the Inspector has a different job from the Mission Rail.
         if vp.rows > 5 {
-            Self::draw_instrument_surface(r, vp, 1, 4, PANEL_RAISED, PANEL_BORDER, 7);
-            Self::draw_ui_row(r, vp, 1, 2, "SESSION", UI_META, PANEL_MUTED);
+            Self::draw_instrument_surface(r, vp, 2, 4, PANEL_RAISED, PANEL_BORDER, 7);
+            Self::draw_ui_row(r, vp, 2, 2, "SESSION", UI_META, PANEL_MUTED);
             Self::draw_ui_row(
                 r,
                 vp,
-                1,
+                2,
                 12.min(vp.cols.saturating_sub(1)),
                 &snapshot.session,
                 UI_BODY,
                 PANEL_TEXT,
             );
-            Self::draw_ui_row(r, vp, 2, 2, "STATE", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(r, vp, 3, 2, "STATE", UI_META, PANEL_MUTED);
             let state_ink = match snapshot.state.as_str() {
                 "exited" => PANEL_RED,
                 "running" => PANEL_TEAL,
@@ -3622,13 +3622,13 @@ impl App {
             Self::draw_ui_row(
                 r,
                 vp,
-                2,
+                3,
                 12.min(vp.cols.saturating_sub(1)),
                 &snapshot.state,
                 UI_VALUE,
                 state_ink,
             );
-            Self::draw_ui_row(r, vp, 3, 2, "LAST EXIT", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(r, vp, 4, 2, "LAST EXIT", UI_META, PANEL_MUTED);
             let exit_ink = if snapshot.exit == "0" {
                 PANEL_TEAL
             } else if snapshot.exit == "—" {
@@ -3639,23 +3639,22 @@ impl App {
             Self::draw_ui_row(
                 r,
                 vp,
-                3,
+                4,
                 12.min(vp.cols.saturating_sub(1)),
                 &snapshot.exit,
                 UI_VALUE,
                 exit_ink,
             );
-            Self::draw_ui_row(r, vp, 4, 2, "CWD", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(r, vp, 5, 2, "CWD", UI_META, PANEL_MUTED);
             Self::draw_ui_row(
                 r,
                 vp,
-                4,
+                5,
                 12.min(vp.cols.saturating_sub(1)),
                 &panels::truncate_to_cells(&snapshot.cwd, vp.cols.saturating_sub(13) as usize),
                 UI_BODY,
                 PANEL_SECONDARY,
             );
-            Self::draw_ui_row(r, vp, 5, 2, "EVIDENCE / OBSERVED", UI_SECTION, PANEL_MUTED);
         }
 
         let detail_start = panels::inspector_detail_start(displayed_commands.len());
