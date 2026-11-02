@@ -5105,6 +5105,17 @@ mod layout_fit_tests {
     }
 
     #[test]
+    fn finalize_tab_for_closure_is_safe_without_recorder() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.finalize_tab_for_closure(0);
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
     fn fit_all_uses_resolved_viewport() {
         let mut app = make_test_app(
             104,

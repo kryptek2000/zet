@@ -225,7 +225,7 @@ impl AgentObservation {
                     evidence_kind: EvidenceKind::CommandLaunchCandidate,
                     classification: ObservationClass::HeuristicCandidate,
                     strength: EvidenceStrength::Candidate,
-                    availability: EvidenceAvailability::Available,
+                    availability: EvidenceAvailability::Stale,
                     agent: derived_agent,
                     command: Some(CommandRef(block_id)),
                     command_name: Some(derived_name),
@@ -1295,7 +1295,7 @@ mod tests {
         let obs = AgentObservation::from_dto(dto, Some(&store)).unwrap();
         assert_eq!(obs.agent(), &AgentKind::OpenCode);
         assert_eq!(obs.command_name(), Some("opencode"));
-        assert_eq!(obs.availability(), EvidenceAvailability::Available);
+        assert_eq!(obs.availability(), EvidenceAvailability::Stale);
         assert_eq!(obs.command(), Some(CommandRef(id)));
     }
 
