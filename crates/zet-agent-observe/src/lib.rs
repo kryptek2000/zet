@@ -23,6 +23,18 @@ pub const MAX_STALE_AFTER_MS: u64 = 86_400_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ObservationId(pub u64);
 
+/// Stable identity for an observed agent command. It combines session
+/// identity with the observation id so selections survive list reordering,
+/// history eviction, and resize.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ObservationKey {
+    pub session: String,
+    pub id: ObservationId,
+}
+
+/// Backwards-compatible alias for the stable observation key.
+pub type AgentObservationKey = ObservationKey;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct SessionRef(String);
 
@@ -51,7 +63,7 @@ impl<'de> serde::Deserialize<'de> for SessionRef {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct CommandRef(pub(crate) i64);
+pub struct CommandRef(pub i64);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AgentKind {
@@ -138,6 +150,15 @@ pub enum ConflictStatus {
     Unknown,
     None,
     Conflicting,
+}
+
+/// Conservative recorder availability derived from source-backed runtime
+/// state. An empty observation store alone never implies availability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecorderAvailability {
+    Available,
+    Unavailable,
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -274,6 +295,12 @@ impl AgentObservation {
 
     pub fn id(&self) -> ObservationId {
         self.id
+    }
+    pub fn key(&self) -> ObservationKey {
+        ObservationKey {
+            session: self.session.as_str().to_string(),
+            id: self.id,
+        }
     }
     pub fn session(&self) -> &SessionRef {
         &self.session
@@ -1510,5 +1537,104 @@ mod tests {
             store.try_record(draft),
             Err(ObservationError::IdExhausted)
         ));
+    }
+}
+
+#[cfg(test)]
+mod f3_extra_tests {
+    use super::*;
+
+    #[test]
+    fn all_loss_fields_independent_in_snapshot() {
+        let mut store = AgentObservationStore::new(8);
+        store.record_persistence_failures(2);
+        store.record_delivery_incomplete();
+        store.record_delivery_incomplete();
+        let snap = store.snapshot(0);
+        assert_eq!(snap.recorded_persistence_failures, 2);
+        assert_eq!(snap.recorded_delivery_incomplete, 2);
+        assert_eq!(snap.recorded_dropped, 0);
+        assert!(snap.recorded_loss_complete);
+    }
+
+    #[test]
+    fn historical_eviction_causes_dropped_warning() {
+        let mut store = AgentObservationStore::new(1);
+        store.observe_command(SessionRef::new("s").unwrap(), "opencode", 1);
+        store.observe_command(SessionRef::new("s").unwrap(), "claude", 2);
+        let snap = store.snapshot(2);
+        assert_eq!(snap.dropped, 1);
+        assert_eq!(snap.len, 1);
+    }
+
+    #[test]
+    fn empty_store_not_operational() {
+        let store = AgentObservationStore::new(8);
+        assert!(store.is_empty());
+        // Empty store alone does not imply recording availability.
+        assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn conflict_status_unknown_by_default() {
+        let store = AgentObservationStore::new(8);
+        let snap = store.snapshot(0);
+        assert_eq!(snap.conflict_status, ConflictStatus::Unknown);
+    }
+
+    #[test]
+    fn stale_imported_observation() {
+        let dto = AgentObservationDto {
+            id: 9,
+            session: "s".to_string(),
+            source: EvidenceSource::CommandText,
+            evidence_kind: EvidenceKind::CommandLaunchCandidate,
+            classification: ObservationClass::HeuristicCandidate,
+            strength: EvidenceStrength::Candidate,
+            availability: EvidenceAvailability::Available,
+            agent: AgentKind::OpenCode,
+            command: None,
+            command_name: Some("opencode".to_string()),
+            observed_at_ms: 100,
+            stale_after_ms: 300_000,
+        };
+        let obs = AgentObservation::from_dto(dto, None).unwrap();
+        assert_eq!(obs.availability(), EvidenceAvailability::Stale);
+    }
+
+    #[test]
+    fn stable_key_contains_session_and_id() {
+        let mut store = AgentObservationStore::new(8);
+        let obs = store
+            .observe_command(SessionRef::new("s1").unwrap(), "opencode", 1)
+            .unwrap();
+        let key = obs.key();
+        assert_eq!(key.session, "s1");
+        assert_eq!(key.id, obs.id());
+    }
+
+    #[test]
+    fn session_attribution_multiple_agents() {
+        let mut store = AgentObservationStore::new(8);
+        store.observe_command(SessionRef::new("s1").unwrap(), "opencode", 1);
+        store.observe_command(SessionRef::new("s2").unwrap(), "claude", 2);
+        let a = store.for_session(&SessionRef::new("s1").unwrap());
+        let b = store.for_session(&SessionRef::new("s2").unwrap());
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), 1);
+        assert_eq!(a[0].session().as_str(), "s1");
+        assert_eq!(b[0].session().as_str(), "s2");
+    }
+
+    #[test]
+    fn source_strength_availability() {
+        let mut store = AgentObservationStore::new(8);
+        let obs = store
+            .observe_command(SessionRef::new("s").unwrap(), "opencode", 1)
+            .unwrap();
+        assert_eq!(obs.source(), EvidenceSource::CommandText);
+        assert_eq!(obs.strength(), EvidenceStrength::Candidate);
+        assert_eq!(obs.availability(), EvidenceAvailability::Available);
+        assert_eq!(obs.evidence_kind(), EvidenceKind::CommandLaunchCandidate);
     }
 }
