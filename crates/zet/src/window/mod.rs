@@ -253,6 +253,7 @@ struct App {
     agent_observations: zet_agent_observe::AgentObservationStore,
     agent_inspector_sel: Option<usize>,
     agent_inspector_sel_id: Option<u64>,
+    agent_list_offset: usize,
     #[cfg(test)]
     pub chrome_query_count: usize,
     #[cfg(test)]
@@ -1213,6 +1214,7 @@ impl App {
         self.inspector_sel = None;
         self.agent_inspector_sel = None;
         self.agent_inspector_sel_id = None;
+        self.agent_list_offset = 0;
         self.inspector_sel_id = None;
         self.inspector_output = None;
         self.inspector_output_id = None;
@@ -1225,6 +1227,7 @@ impl App {
     fn set_inspector_view(&mut self, view: panels::InspectorView) {
         self.inspector_view = view;
         self.clear_inspector_selection();
+        self.agent_list_offset = 0;
         self.inspector_cache.mark_dirty();
         self.needs_draw = true;
     }
@@ -1291,27 +1294,42 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let count = self.agent_observations.snapshot(now_ms).observations.len();
-        let rows = self.frame_layout().inspector.map(|vp| vp.rows).unwrap_or(0);
-        let visible = count.min(rows.saturating_sub(5) as usize);
-        if visible == 0 {
+        let snapshot = self.agent_observations.snapshot(now_ms);
+        let count = snapshot.observations.len();
+        let rows = self
+            .frame_layout()
+            .inspector
+            .map(|vp| vp.rows)
+            .unwrap_or(0);
+        let visible = count.min(rows.saturating_sub(6) as usize).max(1);
+        if count == 0 {
             self.agent_inspector_sel = None;
             self.agent_inspector_sel_id = None;
+            self.agent_list_offset = 0;
             self.needs_draw = true;
             return;
         }
-        let current = self.agent_inspector_sel.filter(|p| *p < visible);
-        let next = match current {
-            Some(pos) => (pos as isize + delta).rem_euclid(visible as isize) as usize,
-            None if delta < 0 => visible - 1,
-            None => 0,
+        let current = self.agent_inspector_sel.unwrap_or(0).min(count.saturating_sub(1));
+        let next = if delta >= 0 {
+            (current + delta as usize).min(count - 1)
+        } else {
+            current.saturating_sub((-delta) as usize)
         };
-        let id = self
-            .agent_observations
-            .snapshot(now_ms)
-            .observations
-            .get(next)
-            .map(|o| o.id().0);
+        // wrap
+        let next = if delta > 0 && current == count - 1 {
+            0
+        } else if delta < 0 && current == 0 {
+            count - 1
+        } else {
+            next
+        };
+        // adjust offset
+        if next < self.agent_list_offset {
+            self.agent_list_offset = next;
+        } else if next >= self.agent_list_offset + visible {
+            self.agent_list_offset = next + 1 - visible;
+        }
+        let id = snapshot.observations.get(next).map(|o| o.id().0);
         self.agent_inspector_sel = Some(next);
         self.agent_inspector_sel_id = id;
         self.needs_draw = true;
@@ -1792,10 +1810,10 @@ impl App {
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
                     let count = self.agent_observations.snapshot(now_ms).observations.len();
-                    let visible = count.min(insp_vp.rows.saturating_sub(5) as usize);
+                    let visible = count.min(insp_vp.rows.saturating_sub(6) as usize);
                     if row >= 5 {
-                        let index = row - 5;
-                        if index < visible {
+                        let index = self.agent_list_offset + (row as usize - 5);
+                        if index < count && (row as usize - 5) < visible {
                             self.agent_inspector_sel = Some(index);
                             self.agent_inspector_sel_id = self
                                 .agent_observations
@@ -2524,6 +2542,7 @@ impl App {
         r: &mut Renderer,
         vp: zet_gpu::renderer::Viewport,
         agent_snapshot: Option<zet_agent_observe::AgentObservationSnapshot>,
+        list_offset: usize,
         selected_id: Option<i64>,
         hovered_row: Option<u32>,
         focused: bool,
@@ -2572,11 +2591,13 @@ impl App {
                 PANEL_SECONDARY,
             );
         } else {
+            let visible = vp.rows.saturating_sub(6) as usize;
             let mut row = 5u32;
             for obs in snap
                 .observations
                 .iter()
-                .take(vp.rows.saturating_sub(6) as usize)
+                .skip(list_offset)
+                .take(visible)
             {
                 let label = format!("{}  LAUNCH CANDIDATE", obs.agent().as_str().to_uppercase());
                 let ink = if selected_id == Some(obs.id().0 as i64) {
@@ -2588,6 +2609,21 @@ impl App {
                 row += 1;
                 if row >= vp.rows.saturating_sub(2) {
                     break;
+                }
+            }
+            // Selected detail
+            if let Some(sel_id) = selected_id {
+                if let Some(obs) = snap.observations.iter().find(|o| o.id().0 as i64 == sel_id) {
+                    let detail_row = vp.rows.saturating_sub(5);
+                    Self::draw_ui_row(r, vp, detail_row, 2, "OBSERVED EVIDENCE", UI_META, PANEL_MUTED);
+                    Self::draw_ui_row(r, vp, detail_row + 1, 2, obs.agent().as_str(), UI_BODY, PANEL_TEXT);
+                    let source = match obs.source() {
+                        zet_agent_observe::EvidenceSource::RecordedCommand => "RECORDED COMMAND",
+                        zet_agent_observe::EvidenceSource::CommandText => "COMMAND TEXT",
+                        _ => "UNSUPPORTED",
+                    };
+                    Self::draw_ui_row(r, vp, detail_row + 2, 2, source, UI_META, PANEL_SECONDARY);
+                    Self::draw_ui_row(r, vp, detail_row + 3, 2, "RUNNING: UNKNOWN  COMPLETE: UNKNOWN", UI_META, PANEL_MUTED);
                 }
             }
         }
@@ -2980,6 +3016,7 @@ impl App {
         vp: zet_gpu::renderer::Viewport,
         snapshot: Option<Arc<panels::InspectorSnapshot>>,
         agent_snapshot: Option<zet_agent_observe::AgentObservationSnapshot>,
+        agent_list_offset: usize,
         selected_id: Option<i64>,
         output: Option<&str>,
         output_truncated: bool,
@@ -3164,7 +3201,7 @@ impl App {
         }
 
         if agents {
-            Self::draw_agents_inspector(r, vp, agent_snapshot, selected_id, hovered_row, focused);
+            Self::draw_agents_inspector(r, vp, agent_snapshot, agent_list_offset, selected_id, hovered_row, focused);
             return;
         }
 
@@ -4970,17 +5007,22 @@ impl ApplicationHandler for App {
                                 cols: insp_layout_vp.cols,
                                 rows: insp_layout_vp.rows,
                             };
-                            let agent_snapshot = self.agent_observations.snapshot(
-                                std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_millis() as u64)
-                                    .unwrap_or(0),
-                            );
+                            let agent_snapshot = if self.inspector_view == panels::InspectorView::Agents {
+                                Some(self.agent_observations.snapshot(
+                                    std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_millis() as u64)
+                                        .unwrap_or(0),
+                                ))
+                            } else {
+                                None
+                            };
                             Self::draw_inspector(
                                 r,
                                 insp_vp,
                                 inspector_snapshot,
-                                Some(agent_snapshot),
+                                agent_snapshot,
+                                self.agent_list_offset,
                                 if self.inspector_view == panels::InspectorView::Agents {
                                     self.agent_inspector_sel_id.map(|x| x as i64)
                                 } else {
@@ -5165,6 +5207,7 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         agent_observations: zet_agent_observe::AgentObservationStore::new(256),
         agent_inspector_sel: None,
         agent_inspector_sel_id: None,
+        agent_list_offset: 0,
         #[cfg(test)]
         chrome_query_count: 0,
         #[cfg(test)]
@@ -5367,6 +5410,7 @@ mod layout_fit_tests {
             agent_observations: zet_agent_observe::AgentObservationStore::new(256),
             agent_inspector_sel: None,
             agent_inspector_sel_id: None,
+            agent_list_offset: 0,
             #[cfg(test)]
             chrome_query_count: 0,
             #[cfg(test)]
