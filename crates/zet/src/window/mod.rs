@@ -1794,7 +1794,7 @@ impl App {
                     let count = self.agent_observations.snapshot(now_ms).observations.len();
                     let visible = count.min(insp_vp.rows.saturating_sub(5) as usize);
                     if row >= 5 {
-                        let index = (row as usize) - 5;
+                        let index = row - 5;
                         if index < visible {
                             self.agent_inspector_sel = Some(index);
                             self.agent_inspector_sel_id = self
