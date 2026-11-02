@@ -2211,6 +2211,7 @@ pub fn agent_detail_lines(obs: &zet_agent_observe::AgentObservation) -> Vec<Stri
         lines.push(format!("RECORDED COMMAND REF: {}", cmd.0));
     }
     // Unknown unless proven.
+    lines.push("UNVERIFIED:".to_string());
     lines.push("RUNNING: UNKNOWN".to_string());
     lines.push("COMPLETE: UNKNOWN".to_string());
     lines.push("AUTHORIZED: UNKNOWN".to_string());
@@ -2548,5 +2549,61 @@ mod f4_panels_tests {
             )
             .unwrap();
         assert!(!agent_detail_lines(&obs).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod p4a3_panels_tests {
+    use super::*;
+
+    #[test]
+    fn recorded_observation_has_command_ref() {
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let id = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "s".to_string(),
+                command: "opencode run".to_string(),
+                output: "ok".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 5,
+            })
+            .unwrap();
+        let mut obs_store = zet_agent_observe::AgentObservationStore::new(8);
+        let session = zet_agent_observe::SessionRef::new("s").unwrap();
+        let obs = obs_store
+            .observe_recorded_command(&store, session, id, 10)
+            .unwrap();
+        assert_eq!(obs.command(), Some(zet_agent_observe::CommandRef(id)));
+        let lines = agent_detail_lines(&obs);
+        let joined = lines.join("\n");
+        assert!(joined.contains(&format!("RECORDED COMMAND REF: {}", id)));
+    }
+
+    #[test]
+    fn command_text_observation_has_no_command_ref() {
+        let mut store = zet_agent_observe::AgentObservationStore::new(8);
+        let obs = store
+            .observe_command(
+                zet_agent_observe::SessionRef::new("s").unwrap(),
+                "opencode",
+                1,
+            )
+            .unwrap();
+        assert!(obs.command().is_none());
+        let lines = agent_detail_lines(&obs);
+        let joined = lines.join("\n");
+        assert!(!joined.contains("RECORDED COMMAND REF:"));
+    }
+
+    #[test]
+    fn navigation_preserves_selection_identity() {
+        // smoke: inspector selection conversion
+        assert_eq!(
+            inspector_command_position(inspector_selection_for_command(2)),
+            Some(2)
+        );
     }
 }

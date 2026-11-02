@@ -1353,6 +1353,31 @@ impl App {
             if self.agent_inspector_sel_id.is_none() {
                 self.move_agent_inspector_selection(1);
             }
+            // Navigate to the recorded command when a verified reference exists.
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let snap = self.agent_observations.snapshot(now_ms);
+            let selected = self
+                .agent_inspector_sel
+                .and_then(|i| snap.observations.get(i));
+            if let Some(obs) = selected {
+                if let Some(cmd_ref) = obs.command() {
+                    if let Some(insp) = self.inspector_cache.snapshot() {
+                        if let Some(pos) = insp.timeline.iter().position(|c| c.id == cmd_ref.0) {
+                            self.set_inspector_view(panels::InspectorView::Timeline);
+                            self.inspector_sel = Some(panels::inspector_selection_for_command(pos));
+                            self.inspector_sel_id = Some(cmd_ref.0);
+                            self.inspector_expanded_id = Some(cmd_ref.0);
+                            self.sync_inspector_output();
+                            self.needs_draw = true;
+                            return;
+                        }
+                    }
+                }
+            }
+            // Otherwise toggle the bounded evidence detail.
             self.agent_detail_expanded = !self.agent_detail_expanded;
             self.agent_detail_offset = 0;
             self.needs_draw = true;
