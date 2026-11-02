@@ -2061,6 +2061,21 @@ impl AgentInspectorLayout {
     }
 }
 
+/// Bounded recorded-command evidence associated with an agent observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRecordedEvidence {
+    pub command: String,
+    pub session: String,
+    pub exit: String,
+    pub duration: String,
+    pub cwd: String,
+    pub git_branch: String,
+    pub output: Option<String>,
+    pub output_truncated: bool,
+    pub available: bool,
+    pub unavailable_reason: Option<String>,
+}
+
 pub fn agent_inspector_layout(
     viewport_rows: u32,
     observation_count: usize,

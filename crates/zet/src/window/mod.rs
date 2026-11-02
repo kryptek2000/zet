@@ -257,6 +257,8 @@ struct App {
     agent_list_offset: usize,
     agent_detail_expanded: bool,
     agent_detail_offset: usize,
+    agent_evidence_open: bool,
+    agent_evidence: Option<panels::AgentRecordedEvidence>,
     #[cfg(test)]
     pub chrome_query_count: usize,
     #[cfg(test)]
@@ -1221,6 +1223,8 @@ impl App {
         self.agent_list_offset = 0;
         self.agent_detail_expanded = false;
         self.agent_detail_offset = 0;
+        self.agent_evidence_open = false;
+        self.agent_evidence = None;
         self.inspector_sel_id = None;
         self.inspector_output = None;
         self.inspector_output_id = None;
@@ -1345,6 +1349,113 @@ impl App {
         self.needs_draw = true;
     }
 
+    fn open_agent_recorded_evidence(&mut self) {
+        self.agent_evidence_open = true;
+        self.agent_evidence = None;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let snap = self.agent_observations.snapshot(now_ms);
+        let obs = self
+            .agent_inspector_sel
+            .and_then(|i| snap.observations.get(i));
+        let Some(obs) = obs else {
+            self.agent_evidence = Some(panels::AgentRecordedEvidence {
+                command: String::new(),
+                session: String::new(),
+                exit: "—".to_string(),
+                duration: "—".to_string(),
+                cwd: "—".to_string(),
+                git_branch: String::new(),
+                output: None,
+                output_truncated: false,
+                available: false,
+                unavailable_reason: Some("No observation selected.".to_string()),
+            });
+            return;
+        };
+        let obs_session = obs.session().as_str().to_string();
+        let cmd_ref = match obs.command() {
+            Some(c) => c,
+            None => {
+                self.agent_evidence = Some(panels::AgentRecordedEvidence {
+                    command: String::new(),
+                    session: obs_session,
+                    exit: "—".to_string(),
+                    duration: "—".to_string(),
+                    cwd: "—".to_string(),
+                    git_branch: String::new(),
+                    output: None,
+                    output_truncated: false,
+                    available: false,
+                    unavailable_reason: Some(
+                        "No persisted recorded-command reference; command-text evidence only."
+                            .to_string(),
+                    ),
+                });
+                return;
+            }
+        };
+        // Find the recorder whose session identity matches the observation.
+        let mut found = false;
+        for tab in &self.tabs {
+            if let Some(rec) = tab.recorder.as_ref() {
+                if rec.session() != obs_session {
+                    continue;
+                }
+                let store = rec.store();
+                if let Ok(block) = store.get(cmd_ref.0) {
+                    if block.session != obs_session || block.id != cmd_ref.0 {
+                        continue;
+                    }
+                    let preview = store
+                        .output_preview(&obs_session, cmd_ref.0, 4096)
+                        .ok()
+                        .flatten();
+                    let output = preview.as_ref().map(|p| {
+                        panels::sanitize_inspector_output(&zet_blocks::scrub_secrets(&p.text), 4096)
+                    });
+                    let truncated = preview.as_ref().map(|p| p.truncated).unwrap_or(false);
+                    self.agent_evidence = Some(panels::AgentRecordedEvidence {
+                        command: zet_blocks::scrub_secrets(&block.command),
+                        session: block.session.clone(),
+                        exit: block.exit_code.to_string(),
+                        duration: format!("{}ms", block.duration_ms),
+                        cwd: panels::sanitize_inspector_text(
+                            &zet_blocks::scrub_secrets(&block.cwd),
+                            64,
+                        ),
+                        git_branch: zet_blocks::scrub_secrets(&block.git_branch),
+                        output,
+                        output_truncated: truncated,
+                        available: true,
+                        unavailable_reason: None,
+                    });
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if !found {
+            self.agent_evidence = Some(panels::AgentRecordedEvidence {
+                command: String::new(),
+                session: obs_session,
+                exit: "—".to_string(),
+                duration: "—".to_string(),
+                cwd: "—".to_string(),
+                git_branch: String::new(),
+                output: None,
+                output_truncated: false,
+                available: false,
+                unavailable_reason: Some(
+                    "Recorded command unavailable, evicted, or inaccessible for this session."
+                        .to_string(),
+                ),
+            });
+        }
+    }
+
     /// Enter inspects the selected Timeline event by expanding or collapsing
     /// its bounded output preview. With no selection, Enter selects the first
     /// visible observed event.
@@ -1353,33 +1464,7 @@ impl App {
             if self.agent_inspector_sel_id.is_none() {
                 self.move_agent_inspector_selection(1);
             }
-            // Navigate to the recorded command when a verified reference exists.
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            let snap = self.agent_observations.snapshot(now_ms);
-            let selected = self
-                .agent_inspector_sel
-                .and_then(|i| snap.observations.get(i));
-            if let Some(obs) = selected {
-                if let Some(cmd_ref) = obs.command() {
-                    if let Some(insp) = self.inspector_cache.snapshot() {
-                        if let Some(pos) = insp.timeline.iter().position(|c| c.id == cmd_ref.0) {
-                            self.set_inspector_view(panels::InspectorView::Timeline);
-                            self.inspector_sel = Some(panels::inspector_selection_for_command(pos));
-                            self.inspector_sel_id = Some(cmd_ref.0);
-                            self.inspector_expanded_id = Some(cmd_ref.0);
-                            self.sync_inspector_output();
-                            self.needs_draw = true;
-                            return;
-                        }
-                    }
-                }
-            }
-            // Otherwise toggle the bounded evidence detail.
-            self.agent_detail_expanded = !self.agent_detail_expanded;
-            self.agent_detail_offset = 0;
+            self.open_agent_recorded_evidence();
             self.needs_draw = true;
             return;
         }
@@ -2589,6 +2674,8 @@ impl App {
         focused: bool,
         expanded: bool,
         detail_offset: usize,
+        evidence_open: bool,
+        evidence: Option<&panels::AgentRecordedEvidence>,
     ) {
         use zet_gpu::renderer::{PANEL_CYAN, PANEL_MUTED, PANEL_RED, PANEL_SECONDARY, PANEL_TEXT};
         if vp.rows == 0 {
@@ -2643,6 +2730,110 @@ impl App {
                 return;
             }
         };
+
+        if evidence_open {
+            Self::draw_ui_row(
+                r,
+                vp,
+                4,
+                2,
+                "RECORDED COMMAND EVIDENCE",
+                UI_HEADER,
+                PANEL_TEXT,
+            );
+            if let Some(ev) = evidence {
+                if ev.available {
+                    Self::draw_ui_row(
+                        r,
+                        vp,
+                        5,
+                        2,
+                        &panels::truncate_to_cells(
+                            &format!("COMMAND: {}", ev.command),
+                            vp.cols.saturating_sub(4) as usize,
+                        ),
+                        UI_BODY,
+                        PANEL_TEXT,
+                    );
+                    Self::draw_ui_row(
+                        r,
+                        vp,
+                        6,
+                        2,
+                        &panels::truncate_to_cells(
+                            &format!("SESSION: {}", ev.session),
+                            vp.cols.saturating_sub(4) as usize,
+                        ),
+                        UI_META,
+                        PANEL_SECONDARY,
+                    );
+                    Self::draw_ui_row(
+                        r,
+                        vp,
+                        7,
+                        2,
+                        &panels::truncate_to_cells(
+                            &format!("EXIT: {}", ev.exit),
+                            vp.cols.saturating_sub(4) as usize,
+                        ),
+                        UI_META,
+                        PANEL_SECONDARY,
+                    );
+                    Self::draw_ui_row(
+                        r,
+                        vp,
+                        8,
+                        2,
+                        &panels::truncate_to_cells(
+                            &format!("DURATION: {}", ev.duration),
+                            vp.cols.saturating_sub(4) as usize,
+                        ),
+                        UI_META,
+                        PANEL_SECONDARY,
+                    );
+                    if let Some(out) = &ev.output {
+                        Self::draw_ui_row(
+                            r,
+                            vp,
+                            9,
+                            2,
+                            &panels::truncate_to_cells(out, vp.cols.saturating_sub(4) as usize),
+                            UI_BODY,
+                            PANEL_MUTED,
+                        );
+                    }
+                } else if let Some(reason) = &ev.unavailable_reason {
+                    Self::draw_ui_row(
+                        r,
+                        vp,
+                        5,
+                        2,
+                        &panels::truncate_to_cells(reason, vp.cols.saturating_sub(4) as usize),
+                        UI_BODY,
+                        PANEL_MUTED,
+                    );
+                }
+            }
+            Self::draw_ui_row(
+                r,
+                vp,
+                vp.rows.saturating_sub(2),
+                2,
+                "ESCAPE RETURN",
+                UI_META,
+                PANEL_MUTED,
+            );
+            let _ = (
+                selected_id,
+                hovered_row,
+                focused,
+                origin_x,
+                origin_y,
+                expanded,
+                detail_offset,
+            );
+            return;
+        }
 
         if snap.observations.is_empty() {
             Self::draw_ui_row(
@@ -3203,6 +3394,8 @@ impl App {
         expanded: bool,
         agent_expanded: bool,
         agent_detail_offset: usize,
+        agent_evidence_open: bool,
+        agent_evidence: Option<&panels::AgentRecordedEvidence>,
     ) {
         use zet_gpu::renderer::{
             PANEL_AMBER, PANEL_BG, PANEL_BORDER, PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_INSET,
@@ -3341,6 +3534,8 @@ impl App {
                 focused,
                 agent_expanded,
                 agent_detail_offset,
+                agent_evidence_open,
+                agent_evidence,
             );
             return;
         }
@@ -3412,6 +3607,8 @@ impl App {
                 focused,
                 agent_expanded,
                 agent_detail_offset,
+                agent_evidence_open,
+                agent_evidence,
             );
             return;
         }
@@ -4635,6 +4832,14 @@ impl App {
             }
             match &logical {
                 Key::Named(NamedKey::Escape) => {
+                    if self.inspector_view == panels::InspectorView::Agents
+                        && self.agent_evidence_open
+                    {
+                        self.agent_evidence_open = false;
+                        self.agent_evidence = None;
+                        self.needs_draw = true;
+                        return;
+                    }
                     self.focus = Focus::Terminal;
                     self.clear_inspector_selection();
                 }
@@ -5284,6 +5489,8 @@ impl ApplicationHandler for App {
                                 inspector_expanded,
                                 self.agent_detail_expanded,
                                 self.agent_detail_offset,
+                                self.agent_evidence_open,
+                                self.agent_evidence.as_ref(),
                             );
                         }
                     }
@@ -5461,6 +5668,8 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         agent_list_offset: 0,
         agent_detail_expanded: false,
         agent_detail_offset: 0,
+        agent_evidence_open: false,
+        agent_evidence: None,
         #[cfg(test)]
         chrome_query_count: 0,
         #[cfg(test)]
@@ -5667,6 +5876,8 @@ mod layout_fit_tests {
             agent_list_offset: 0,
             agent_detail_expanded: false,
             agent_detail_offset: 0,
+            agent_evidence_open: false,
+            agent_evidence: None,
             #[cfg(test)]
             chrome_query_count: 0,
             #[cfg(test)]
