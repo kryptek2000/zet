@@ -5413,6 +5413,18 @@ impl ApplicationHandler for App {
                 let inspector_expanded = self.inspector_expanded();
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
                     r.draw_terminal_in(&self.tabs[self.active].term, gpu_vp, sel);
+                    if self.focus == Focus::Terminal {
+                        let (cw, ch) = r.cell_px();
+                        let tx = gpu_vp.x.saturating_mul(cw);
+                        let ty = gpu_vp.y.saturating_mul(ch);
+                        let tw = gpu_vp.cols.saturating_mul(cw);
+                        let th = gpu_vp.rows.saturating_mul(ch);
+                        let glow = zet_gpu::renderer::PANEL_VIOLET;
+                        r.draw_rect_px(tx, ty, 2, th, glow);
+                        r.draw_rect_px(tx.saturating_add(tw.saturating_sub(2)), ty, 2, th, glow);
+                        r.draw_rect_px(tx, ty, tw, 2, glow);
+                        r.draw_rect_px(tx, ty.saturating_add(th.saturating_sub(2)), tw, 2, glow);
+                    }
                     if rail_cols > 0 {
                         if let Some(snapshot) = rail_snapshot.as_ref() {
                             let rail_vp = zet_gpu::renderer::Viewport {
