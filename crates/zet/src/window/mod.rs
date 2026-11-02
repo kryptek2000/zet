@@ -2527,6 +2527,7 @@ impl App {
         let _ = (selected_id, hovered_row, focused, origin_x, origin_y);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_timeline_inspector(
         r: &mut Renderer,
         vp: zet_gpu::renderer::Viewport,
