@@ -50,7 +50,12 @@ pub struct Recorder {
     last_failed: Option<(String, String, String, i32)>,
     recorded_events: VecDeque<i64>,
     recorded_dropped: u64,
+    /// Lifetime count of failed block appends. History only: callers that
+    /// report loss must consume the delta below, not this running total.
     recorded_failed_persists: u64,
+    /// Failed appends not yet reported to an observer. Drained exactly
+    /// once so a pump/finalize pair cannot double count.
+    pending_failed_persists: u64,
     recorded_capacity: usize,
 }
 
@@ -67,6 +72,7 @@ impl Recorder {
             recorded_events: VecDeque::new(),
             recorded_dropped: 0,
             recorded_failed_persists: 0,
+            pending_failed_persists: 0,
             recorded_capacity: 128,
         }
     }
@@ -92,8 +98,18 @@ impl Recorder {
         self.recorded_dropped
     }
 
+    /// Lifetime number of failed block appends, for audit and tests.
+    /// Reporting paths must use [`Self::drain_persistence_failures`].
     pub fn recorded_failed_persists(&self) -> u64 {
         self.recorded_failed_persists
+    }
+
+    /// Consume the failed appends that have not been reported yet. Each
+    /// failure is returned exactly once; repeated pumps and finalization
+    /// therefore cannot double count. Saturating, so an exhausted counter
+    /// stays exhausted instead of wrapping.
+    pub fn drain_persistence_failures(&mut self) -> u64 {
+        std::mem::take(&mut self.pending_failed_persists)
     }
 
     pub fn blocks(&self) -> rusqlite::Result<Vec<Block>> {
@@ -295,6 +311,7 @@ impl Recorder {
             }
             Err(_) => {
                 self.recorded_failed_persists = self.recorded_failed_persists.saturating_add(1);
+                self.pending_failed_persists = self.pending_failed_persists.saturating_add(1);
             }
         }
     }
@@ -308,4 +325,42 @@ fn abs_line_text(term: &Terminal, abs: usize) -> String {
         term.line_text(abs - sb)
     };
     raw.trim_end().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn failing_recorder() -> Recorder {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER zet_fail_append
+                 BEFORE INSERT ON blocks
+                 BEGIN SELECT RAISE(ABORT, 'injected append failure'); END;",
+            )
+            .unwrap();
+        Recorder::new(store, "s1")
+    }
+
+    #[test]
+    fn one_failed_append_is_drained_exactly_once() {
+        let mut rec = failing_recorder();
+        let mut term = Terminal::new(40, 10);
+        term.feed(b"$ \x1b]133;B\x07echo hi\x1b]133;C\x07\r\nhi\r\n\x1b]133;D;0\x07");
+        rec.pump(&mut term, "/tmp");
+
+        assert_eq!(rec.recorded_failed_persists(), 1);
+        assert_eq!(rec.drain_persistence_failures(), 1);
+        assert_eq!(rec.drain_persistence_failures(), 0);
+
+        // Repeated pumps and final-style pumps observe no new failure.
+        for _ in 0..500 {
+            rec.pump(&mut term, "/tmp");
+        }
+        assert_eq!(rec.drain_persistence_failures(), 0);
+        // Historical total is preserved for audit.
+        assert_eq!(rec.recorded_failed_persists(), 1);
+    }
 }

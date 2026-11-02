@@ -678,6 +678,10 @@ impl AgentObservationStore {
         self.recorded_delivery_incomplete
     }
 
+    /// Add failed block appends reported since the previous call.
+    /// `count` is a delta, not a cumulative recorder total: the recorder's
+    /// `drain_persistence_failures` consumes each failure exactly once.
+    /// Kept distinct from queue overflow and PTY-delivery incompleteness.
     pub fn record_persistence_failures(&mut self, count: u64) {
         self.recorded_persistence_failures =
             self.recorded_persistence_failures.saturating_add(count);
@@ -1419,6 +1423,70 @@ mod tests {
         assert_eq!(restored.command(), obs.command());
         assert_eq!(restored.source(), EvidenceSource::RecordedCommand);
     }
+
+    #[test]
+    fn imported_command_text_is_stale_even_with_future_timestamp() {
+        for now in [0, 1_000, u64::MAX / 2, u64::MAX] {
+            let dto = AgentObservationDto {
+                id: 9,
+                session: "s".to_string(),
+                source: EvidenceSource::CommandText,
+                evidence_kind: EvidenceKind::CommandLaunchCandidate,
+                classification: ObservationClass::HeuristicCandidate,
+                strength: EvidenceStrength::Candidate,
+                availability: EvidenceAvailability::Available,
+                agent: AgentKind::OpenCode,
+                command: None,
+                command_name: Some("opencode".to_string()),
+                observed_at_ms: u64::MAX,
+                stale_after_ms: MAX_STALE_AFTER_MS,
+            };
+            let obs = AgentObservation::from_dto(dto, None).unwrap();
+            // Imported text can never assert freshness, regardless of the
+            // untrusted timestamp or the clock the consumer supplies.
+            assert_eq!(obs.availability(), EvidenceAvailability::Stale);
+            assert_eq!(obs.effective_availability(now), EvidenceAvailability::Stale);
+            assert_eq!(
+                obs.effective_availability(u64::MAX),
+                EvidenceAvailability::Stale
+            );
+        }
+    }
+
+    #[test]
+    fn persistence_failures_stay_distinct_from_other_loss() {
+        let mut store = AgentObservationStore::new(8);
+        store.record_persistence_failures(3);
+        assert_eq!(store.recorded_persistence_failures(), 3);
+        assert_eq!(store.recorded_dropped(), 0);
+        assert_eq!(store.recorded_delivery_incomplete(), 0);
+        assert!(store.snapshot(0).recorded_loss_complete);
+
+        store.record_recorder_dropped(SessionRef::new("s").unwrap(), 2);
+        store.record_delivery_incomplete();
+        assert_eq!(store.recorded_persistence_failures(), 3);
+        assert_eq!(store.recorded_dropped(), 2);
+        assert_eq!(store.recorded_delivery_incomplete(), 1);
+    }
+
+    #[test]
+    fn sequential_session_retirement_does_not_exhaust_accounting() {
+        let mut store = AgentObservationStore::new(8);
+        let sessions = MAX_OBSERVATION_CAPACITY + 32;
+        for i in 0..sessions {
+            let session = SessionRef::new(format!("session-{i}")).unwrap();
+            store.record_recorder_dropped(session.clone(), 1);
+            store.record_persistence_failures(1);
+            store.retire_session(&session);
+        }
+        // Retirement releases the per-session delta row; the aggregate
+        // history survives and the bounded bookkeeping never fills up.
+        assert_eq!(store.recorded_dropped(), sessions as u64);
+        assert_eq!(store.recorded_persistence_failures(), sessions as u64);
+        assert!(store.recorded_dropped_by_session().is_empty());
+        assert!(store.snapshot(0).recorded_loss_complete);
+    }
+
     #[test]
     fn id_exhaustion_is_safe() {
         // Cannot allocate u64::MAX ids in a test. Instead, verify the

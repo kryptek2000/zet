@@ -4619,6 +4619,7 @@ dependencies = [
  "nix",
  "notify-rust",
  "pollster",
+ "rusqlite",
  "serde_json",
  "winit",
  "zet-agent",

@@ -25,6 +25,7 @@ use zet_pty::shell::ShellState;
 use zet_pty::Session;
 use zet_term::Terminal;
 
+mod finalize;
 pub mod layout;
 pub mod panels;
 
@@ -77,6 +78,10 @@ struct Tab {
     session_id: u64,
     rx: Option<Receiver<Vec<u8>>>,
     dead: bool,
+    /// Set by the first `finalize_tab_for_closure` call. Shutdown is
+    /// idempotent: a second pass must not re-report recorder loss,
+    /// persistence failures, or incomplete delivery.
+    finalized: bool,
     erase: u8,
     recorder: Option<zet_blocks::Recorder>,
     ghost: zet_suggest::Ghost,
@@ -169,6 +174,7 @@ impl Tab {
             session_id: terminal_session_id,
             rx: Some(rx),
             dead: false,
+            finalized: false,
             erase,
             recorder,
             ghost,
@@ -387,6 +393,9 @@ impl App {
     /// Drain one tab's PTY + record its blocks. Returns true when its
     /// shell newly exited (caller titles only the active tab).
     fn pump_tab(&mut self, i: usize) -> bool {
+        if self.tabs[i].finalized {
+            return false;
+        }
         let mut died = false;
         // Drain PTY bytes first (borrow ends), then feed the grid.
         let chunks: Vec<Vec<u8>> = match &self.tabs[i].rx {
@@ -424,17 +433,22 @@ impl App {
             .as_ref()
             .map(|rec| rec.session().to_string());
         let tab = &mut self.tabs[i];
-        let (names, failed, recorded) = match &mut tab.recorder {
+        let (names, failed, recorded, failed_persists) = match &mut tab.recorder {
             Some(rec) => {
                 rec.pump(&mut tab.term, &cwd);
                 (
                     rec.drain_cmd_names(),
                     rec.drain_failed(),
                     rec.drain_recorded(),
+                    // Consumption, not the recorder's lifetime total: a
+                    // failure must be counted exactly once across pumps.
+                    rec.drain_persistence_failures(),
                 )
             }
-            None => (Vec::new(), None, Vec::new()),
+            None => (Vec::new(), None, Vec::new(), 0),
         };
+        self.agent_observations
+            .record_persistence_failures(failed_persists);
         if let Some(session) = session_id {
             if let Ok(session) = zet_agent_observe::SessionRef::new(session) {
                 let now_ms = std::time::SystemTime::now()
@@ -462,9 +476,7 @@ impl App {
             {
                 if let Ok(session) = zet_agent_observe::SessionRef::new(session) {
                     self.agent_observations
-                        .record_recorder_dropped(session.clone(), rec.recorded_dropped());
-                    self.agent_observations
-                        .record_persistence_failures(rec.recorded_failed_persists());
+                        .record_recorder_dropped(session, rec.recorded_dropped());
                 }
             }
         }
@@ -3693,17 +3705,29 @@ impl App {
     /// no zombies) before the tab drops. The last tab closes the
     /// window instead of stranding it.
     fn finalize_tab_for_closure(&mut self, idx: usize) {
-        if idx >= self.tabs.len() {
+        if idx >= self.tabs.len() || self.tabs[idx].finalized {
             return;
         }
-        // Drain pending PTY bytes before final recorder processing.
-        if let Some(rx) = self.tabs[idx].rx.take() {
-            let chunks: Vec<Vec<u8>> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-            for chunk in chunks {
-                self.tabs[idx].term.feed(&chunk);
+        // Idempotence guard before any side effect: repeated closure must
+        // not duplicate observations, loss counters, or incomplete reports.
+        self.tabs[idx].finalized = true;
+
+        // Cwd must be read before the child is reaped. The producer is
+        // stopped first so the reader thread can reach EOF and drop its
+        // sender; only that disconnection proves delivery is complete.
+        let cwd = shell_cwd(&self.tabs[idx].session);
+        if !self.tabs[idx].dead {
+            if let Some(session) = self.tabs[idx].session.as_mut() {
+                session.shutdown();
             }
         }
-        let cwd = shell_cwd(&self.tabs[idx].session);
+        // Bounded final drain: feed whatever the reader queued through the
+        // real parser, in arrival order, without collecting the channel.
+        let drain = match self.tabs[idx].rx.take() {
+            Some(rx) => finalize::drain_receiver_bounded(&rx, &mut self.tabs[idx].term),
+            None => finalize::DrainReport::no_receiver(),
+        };
+
         let session_id = self.tabs[idx]
             .recorder
             .as_ref()
@@ -3716,9 +3740,16 @@ impl App {
             rec.pump(&mut self.tabs[idx].term, &cwd);
             recorded = rec.drain_recorded();
             dropped = rec.recorded_dropped();
-            failed_persists = rec.recorded_failed_persists();
+            // Consume only failures not already forwarded by pump_tab.
+            failed_persists = rec.drain_persistence_failures();
         }
+        self.agent_observations
+            .record_persistence_failures(failed_persists);
         let store = recorder.as_ref().map(|rec| rec.store());
+        // Exactly one incomplete-delivery observation per finalized tab:
+        // an absent recorder means no recording pipeline, and a live/late
+        // receiver means bytes may still be in flight.
+        let mut delivery_complete = drain.is_complete() && session_id.is_some();
         if let Some(session_id) = session_id {
             if let Ok(session) = zet_agent_observe::SessionRef::new(session_id) {
                 let now_ms = std::time::SystemTime::now()
@@ -3734,32 +3765,40 @@ impl App {
                             now_ms,
                         );
                     }
+                } else {
+                    delivery_complete = false;
                 }
                 self.agent_observations
                     .record_recorder_dropped(session.clone(), dropped);
-                self.agent_observations
-                    .record_persistence_failures(failed_persists);
                 self.agent_observations.retire_session(&session);
             } else {
-                self.agent_observations.record_delivery_incomplete();
+                delivery_complete = false;
             }
-        } else {
+        }
+        if !delivery_complete {
             self.agent_observations.record_delivery_incomplete();
         }
         // recorder dropped here
         drop(recorder);
     }
 
+    /// Finalize every tab before an application-level exit. Used by window
+    /// close, shell-death exit, and last-tab close so all paths agree.
+    fn finalize_all_tabs_for_exit(&mut self) {
+        for i in (0..self.tabs.len()).rev() {
+            self.finalize_tab_for_closure(i);
+        }
+    }
+
     fn close_tab(&mut self, event_loop: &ActiveEventLoop) {
-        self.finalize_tab_for_closure(self.active);
         if self.tabs.len() <= 1 {
+            self.finalize_all_tabs_for_exit();
             event_loop.exit();
             return;
         }
-        let mut tab = self.tabs.remove(self.active);
-        if let Some(s) = tab.session.as_mut() {
-            s.shutdown();
-        }
+        self.finalize_tab_for_closure(self.active);
+        let tab = self.tabs.remove(self.active);
+        drop(tab);
         self.active = self.active.min(self.tabs.len() - 1);
         self.rail_sel = self.active;
         self.inspector_cache.mark_dirty();
@@ -4567,6 +4606,12 @@ impl ApplicationHandler for App {
         event_loop.set_control_flow(ControlFlow::WaitUntil(self.last_frame + FRAME));
     }
 
+    /// Safety net for any winit shutdown path not named above. Explicit
+    /// paths finalize first; the idempotence guard makes this a no-op then.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.finalize_all_tabs_for_exit();
+    }
+
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -4575,9 +4620,7 @@ impl ApplicationHandler for App {
     ) {
         match event {
             WindowEvent::CloseRequested => {
-                for i in (0..self.tabs.len()).rev() {
-                    self.finalize_tab_for_closure(i);
-                }
+                self.finalize_all_tabs_for_exit();
                 event_loop.exit();
             }
             WindowEvent::ModifiersChanged(m) => {
@@ -4609,6 +4652,10 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 self.pump();
                 if self.tabs[self.active].dead {
+                    // Shell death is an application exit like any other:
+                    // finalize every tab through the same idempotent path
+                    // before leaving the event loop.
+                    self.finalize_all_tabs_for_exit();
                     event_loop.exit();
                     return;
                 }
@@ -5039,6 +5086,7 @@ mod tests {
 mod layout_fit_tests {
     use super::App;
     use super::Tab;
+    use zet_blocks::Store;
 
     fn make_test_tab() -> Tab {
         Tab {
@@ -5048,6 +5096,7 @@ mod layout_fit_tests {
             session_id: 0,
             rx: None,
             dead: false,
+            finalized: false,
             erase: 127,
             recorder: None,
             ghost: zet_suggest::Ghost::new(zet_blocks::Store::open_in_memory().unwrap()),
@@ -5120,6 +5169,70 @@ mod layout_fit_tests {
             pending_goal: None,
         }
     }
+
+    struct TempDir {
+        path: std::path::PathBuf,
+    }
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path =
+                std::env::temp_dir().join(format!("zet-f4-{tag}-{}-{nanos}", std::process::id()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn db(&self) -> std::path::PathBuf {
+            self.path.join("blocks.sqlite")
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// A real file-backed store whose blocks table rejects every insert.
+    fn failing_append_store(temp: &TempDir) -> Store {
+        let db = temp.db();
+        drop(Store::open(db.to_str().unwrap()).unwrap());
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER zet_f4_fail_append
+             BEFORE INSERT ON blocks
+             BEGIN SELECT RAISE(ABORT, 'injected append failure'); END;",
+        )
+        .unwrap();
+        drop(conn);
+        Store::open(db.to_str().unwrap()).unwrap()
+    }
+
+    fn recorder_tab(store: Store, session: &str) -> (Tab, std::sync::mpsc::Sender<Vec<u8>>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut tab = make_test_tab();
+        tab.recorder = Some(zet_blocks::Recorder::new(store, session));
+        tab.rx = Some(rx);
+        (tab, tx)
+    }
+
+    fn app_with_tabs(tabs: Vec<Tab>) -> App {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        app.tabs = tabs;
+        app.active = 0;
+        app
+    }
+
+    const OSC_BLOCK: &[u8] =
+        b"$ \x1b]133;B\x07opencode run\x1b]133;C\x07\r\nstarted\r\n\x1b]133;D;0\x07";
 
     #[test]
     fn finalize_tab_for_closure_is_safe_without_recorder() {
@@ -6948,6 +7061,247 @@ mod layout_fit_tests {
         assert_eq!(app.inspector_cache.last_session_id, Some(20));
         assert_eq!(app.inspector_sel, None);
         assert!(app.inspector_cache.snapshot().is_some());
+    }
+
+    #[test]
+    fn real_osc133_markers_through_pty_receiver_persist_block() {
+        let temp = TempDir::new("osc-persist");
+        let store = Store::open(temp.db().to_str().unwrap()).unwrap();
+        let (tab, tx) = recorder_tab(store, "session-osc");
+        let mut app = app_with_tabs(vec![tab]);
+
+        tx.send(OSC_BLOCK.to_vec()).unwrap();
+        drop(tx);
+        app.pump_tab(0);
+
+        let rec = app.tabs[0].recorder.as_ref().expect("recorder");
+        let blocks = rec.blocks().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].command, "opencode run");
+        assert_eq!(blocks[0].output, "started");
+        assert_eq!(blocks[0].exit_code, 0);
+        assert_eq!(blocks[0].session, "session-osc");
+
+        let session = zet_agent_observe::SessionRef::new("session-osc").unwrap();
+        let observations = app.agent_observations.for_session(&session);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(
+            observations[0].source(),
+            zet_agent_observe::EvidenceSource::RecordedCommand
+        );
+    }
+
+    #[test]
+    fn closing_tab_delivers_block_id_to_agent_observations() {
+        let temp = TempDir::new("close-observation");
+        let db = temp.db();
+        let store = Store::open(db.to_str().unwrap()).unwrap();
+        let (tab, tx) = recorder_tab(store, "session-close");
+        let mut app = app_with_tabs(vec![tab]);
+
+        tx.send(OSC_BLOCK.to_vec()).unwrap();
+        drop(tx);
+        app.finalize_tab_for_closure(0);
+
+        let session = zet_agent_observe::SessionRef::new("session-close").unwrap();
+        let observations = app.agent_observations.for_session(&session);
+        assert_eq!(observations.len(), 1);
+        let dto = observations[0].to_dto();
+        assert_eq!(
+            dto.source,
+            zet_agent_observe::EvidenceSource::RecordedCommand
+        );
+        let block_id = dto.command.expect("persisted block id");
+        assert!(block_id > 0);
+
+        // The recorder/store are released by finalization; the persisted
+        // identity the observation carries must resolve in the real store.
+        let reopened = Store::open(db.to_str().unwrap()).unwrap();
+        let block = reopened.get(block_id).unwrap();
+        assert_eq!(block.command, "opencode run");
+        assert_eq!(block.session, "session-close");
+        assert_eq!(app.agent_observations.recorded_delivery_incomplete(), 0);
+    }
+
+    #[test]
+    fn one_failed_append_counts_once_across_pumps_and_finalization() {
+        let temp = TempDir::new("failed-append");
+        let store = failing_append_store(&temp);
+        let (tab, tx) = recorder_tab(store, "session-fail");
+        let mut app = app_with_tabs(vec![tab]);
+
+        tx.send(OSC_BLOCK.to_vec()).unwrap();
+        drop(tx);
+        for _ in 0..300 {
+            app.pump_tab(0);
+        }
+
+        assert_eq!(
+            app.tabs[0]
+                .recorder
+                .as_ref()
+                .unwrap()
+                .recorded_failed_persists(),
+            1
+        );
+        assert_eq!(app.agent_observations.recorded_persistence_failures(), 1);
+        assert_eq!(app.agent_observations.recorded_dropped(), 0);
+        assert_eq!(app.agent_observations.recorded_delivery_incomplete(), 0);
+
+        app.finalize_tab_for_closure(0);
+        assert_eq!(app.agent_observations.recorded_persistence_failures(), 1);
+        assert_eq!(app.agent_observations.recorded_dropped(), 0);
+        assert_eq!(app.agent_observations.recorded_delivery_incomplete(), 0);
+    }
+
+    #[test]
+    fn shell_death_exit_finalizes_all_tabs_through_shared_path() {
+        let (tab_a, tx_a) = recorder_tab(Store::open_in_memory().unwrap(), "session-death-a");
+        let (tab_b, tx_b) = recorder_tab(Store::open_in_memory().unwrap(), "session-death-b");
+        let mut app = app_with_tabs(vec![tab_a, tab_b]);
+
+        tx_a.send(OSC_BLOCK.to_vec()).unwrap();
+        tx_b.send(OSC_BLOCK.to_vec()).unwrap();
+        drop(tx_a);
+        drop(tx_b);
+        app.tabs[0].dead = true;
+
+        app.finalize_all_tabs_for_exit();
+
+        for id in ["session-death-a", "session-death-b"] {
+            assert!(app.tabs.iter().all(|tab| tab.finalized));
+            let session = zet_agent_observe::SessionRef::new(id).unwrap();
+            let observations = app.agent_observations.for_session(&session);
+            assert_eq!(observations.len(), 1, "missing observation for {id}");
+            assert!(observations[0].to_dto().command.is_some());
+        }
+        assert_eq!(app.agent_observations.recorded_delivery_incomplete(), 0);
+    }
+
+    #[test]
+    fn multiple_tabs_close_without_losing_session_attribution() {
+        let (tab_a, tx_a) = recorder_tab(Store::open_in_memory().unwrap(), "session-attrib-a");
+        let (tab_b, tx_b) = recorder_tab(Store::open_in_memory().unwrap(), "session-attrib-b");
+        let mut app = app_with_tabs(vec![tab_a, tab_b]);
+
+        tx_a.send(
+            b"$ \x1b]133;B\x07opencode run a\x1b]133;C\x07\r\nok\r\n\x1b]133;D;0\x07".to_vec(),
+        )
+        .unwrap();
+        tx_b.send(b"$ \x1b]133;B\x07claude run b\x1b]133;C\x07\r\nok\r\n\x1b]133;D;0\x07".to_vec())
+            .unwrap();
+        drop(tx_a);
+        drop(tx_b);
+
+        app.finalize_all_tabs_for_exit();
+
+        for (id, name) in [
+            ("session-attrib-a", "opencode"),
+            ("session-attrib-b", "claude"),
+        ] {
+            let session = zet_agent_observe::SessionRef::new(id).unwrap();
+            let observations = app.agent_observations.for_session(&session);
+            assert_eq!(observations.len(), 1, "missing observation for {id}");
+            let dto = observations[0].to_dto();
+            assert_eq!(dto.session, id);
+            assert_eq!(dto.command_name.as_deref(), Some(name));
+            assert!(dto.command.is_some());
+        }
+        assert_eq!(app.agent_observations.recorded_delivery_incomplete(), 0);
+    }
+
+    #[test]
+    fn repeated_finalization_is_idempotent() {
+        let (tab, tx) = recorder_tab(Store::open_in_memory().unwrap(), "session-idem");
+        let mut app = app_with_tabs(vec![tab]);
+        tx.send(OSC_BLOCK.to_vec()).unwrap();
+        drop(tx);
+
+        let session = zet_agent_observe::SessionRef::new("session-idem").unwrap();
+        let counters = |app: &App| {
+            (
+                app.agent_observations.len(),
+                app.agent_observations.for_session(&session).len(),
+                app.agent_observations.recorded_dropped(),
+                app.agent_observations.recorded_persistence_failures(),
+                app.agent_observations.recorded_delivery_incomplete(),
+            )
+        };
+
+        app.finalize_tab_for_closure(0);
+        let first = counters(&app);
+        assert_eq!(first, (1, 1, 0, 0, 0));
+
+        for _ in 0..3 {
+            app.finalize_tab_for_closure(0);
+            app.finalize_all_tabs_for_exit();
+        }
+        assert_eq!(counters(&app), first);
+    }
+
+    #[test]
+    fn late_bytes_before_close_are_fed_and_delivery_is_complete() {
+        let temp = TempDir::new("late-bytes");
+        let db = temp.db();
+        let store = Store::open(db.to_str().unwrap()).unwrap();
+        let (tab, tx) = recorder_tab(store, "session-late");
+        let mut app = app_with_tabs(vec![tab]);
+
+        // The prompt/input marker lands on an ordinary pump; the rest of
+        // the command arrives only after that pump, right before closure.
+        tx.send(b"$ \x1b]133;B\x07".to_vec()).unwrap();
+        app.pump_tab(0);
+        assert_eq!(app.tabs[0].recorder.as_ref().unwrap().block_count(), 0);
+
+        tx.send(b"opencode run\x1b]133;C\x07\r\nlate\r\n\x1b]133;D;0\x07".to_vec())
+            .unwrap();
+        drop(tx);
+        app.finalize_tab_for_closure(0);
+
+        let session = zet_agent_observe::SessionRef::new("session-late").unwrap();
+        let observations = app.agent_observations.for_session(&session);
+        assert_eq!(observations.len(), 1);
+        let block_id = observations[0].to_dto().command.expect("block id");
+        let reopened = Store::open(db.to_str().unwrap()).unwrap();
+        assert_eq!(reopened.get(block_id).unwrap().output, "late");
+        assert_eq!(app.agent_observations.recorded_delivery_incomplete(), 0);
+    }
+
+    #[test]
+    fn live_receiver_at_close_reports_incomplete_delivery() {
+        let (tab, tx) = recorder_tab(Store::open_in_memory().unwrap(), "session-live");
+        let mut app = app_with_tabs(vec![tab]);
+        tx.send(OSC_BLOCK.to_vec()).unwrap();
+
+        // Keep the producer side alive: an empty try_recv is not EOF.
+        app.finalize_tab_for_closure(0);
+        let session = zet_agent_observe::SessionRef::new("session-live").unwrap();
+        assert_eq!(app.agent_observations.for_session(&session).len(), 1);
+        assert_eq!(app.agent_observations.recorded_delivery_incomplete(), 1);
+
+        // The idempotence guard also prevents a second false report.
+        app.finalize_tab_for_closure(0);
+        assert_eq!(app.agent_observations.recorded_delivery_incomplete(), 1);
+        drop(tx);
+    }
+
+    #[test]
+    fn deep_live_receiver_stays_bounded_and_incomplete() {
+        let (tab, tx) = recorder_tab(Store::open_in_memory().unwrap(), "session-deep");
+        let mut app = app_with_tabs(vec![tab]);
+        tx.send(OSC_BLOCK.to_vec()).unwrap();
+        for _ in 0..200 {
+            tx.send(vec![b'x'; 4096]).unwrap();
+        }
+
+        app.finalize_tab_for_closure(0);
+
+        // The completed block was still recorded; the unread tail is
+        // represented as incomplete delivery rather than silently lost.
+        let session = zet_agent_observe::SessionRef::new("session-deep").unwrap();
+        assert_eq!(app.agent_observations.for_session(&session).len(), 1);
+        assert_eq!(app.agent_observations.recorded_delivery_incomplete(), 1);
+        drop(tx);
     }
 }
 
