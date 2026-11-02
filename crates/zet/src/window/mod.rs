@@ -1296,11 +1296,7 @@ impl App {
             .unwrap_or(0);
         let snapshot = self.agent_observations.snapshot(now_ms);
         let count = snapshot.observations.len();
-        let rows = self
-            .frame_layout()
-            .inspector
-            .map(|vp| vp.rows)
-            .unwrap_or(0);
+        let rows = self.frame_layout().inspector.map(|vp| vp.rows).unwrap_or(0);
         let visible = count.min(rows.saturating_sub(6) as usize).max(1);
         if count == 0 {
             self.agent_inspector_sel = None;
@@ -1309,7 +1305,10 @@ impl App {
             self.needs_draw = true;
             return;
         }
-        let current = self.agent_inspector_sel.unwrap_or(0).min(count.saturating_sub(1));
+        let current = self
+            .agent_inspector_sel
+            .unwrap_or(0)
+            .min(count.saturating_sub(1));
         let next = if delta >= 0 {
             (current + delta as usize).min(count - 1)
         } else {
@@ -2593,12 +2592,7 @@ impl App {
         } else {
             let visible = vp.rows.saturating_sub(6) as usize;
             let mut row = 5u32;
-            for obs in snap
-                .observations
-                .iter()
-                .skip(list_offset)
-                .take(visible)
-            {
+            for obs in snap.observations.iter().skip(list_offset).take(visible) {
                 let label = format!("{}  LAUNCH CANDIDATE", obs.agent().as_str().to_uppercase());
                 let ink = if selected_id == Some(obs.id().0 as i64) {
                     PANEL_CYAN
@@ -2615,15 +2609,39 @@ impl App {
             if let Some(sel_id) = selected_id {
                 if let Some(obs) = snap.observations.iter().find(|o| o.id().0 as i64 == sel_id) {
                     let detail_row = vp.rows.saturating_sub(5);
-                    Self::draw_ui_row(r, vp, detail_row, 2, "OBSERVED EVIDENCE", UI_META, PANEL_MUTED);
-                    Self::draw_ui_row(r, vp, detail_row + 1, 2, obs.agent().as_str(), UI_BODY, PANEL_TEXT);
+                    Self::draw_ui_row(
+                        r,
+                        vp,
+                        detail_row,
+                        2,
+                        "OBSERVED EVIDENCE",
+                        UI_META,
+                        PANEL_MUTED,
+                    );
+                    Self::draw_ui_row(
+                        r,
+                        vp,
+                        detail_row + 1,
+                        2,
+                        obs.agent().as_str(),
+                        UI_BODY,
+                        PANEL_TEXT,
+                    );
                     let source = match obs.source() {
                         zet_agent_observe::EvidenceSource::RecordedCommand => "RECORDED COMMAND",
                         zet_agent_observe::EvidenceSource::CommandText => "COMMAND TEXT",
                         _ => "UNSUPPORTED",
                     };
                     Self::draw_ui_row(r, vp, detail_row + 2, 2, source, UI_META, PANEL_SECONDARY);
-                    Self::draw_ui_row(r, vp, detail_row + 3, 2, "RUNNING: UNKNOWN  COMPLETE: UNKNOWN", UI_META, PANEL_MUTED);
+                    Self::draw_ui_row(
+                        r,
+                        vp,
+                        detail_row + 3,
+                        2,
+                        "RUNNING: UNKNOWN  COMPLETE: UNKNOWN",
+                        UI_META,
+                        PANEL_MUTED,
+                    );
                 }
             }
         }
@@ -3201,7 +3219,15 @@ impl App {
         }
 
         if agents {
-            Self::draw_agents_inspector(r, vp, agent_snapshot, agent_list_offset, selected_id, hovered_row, focused);
+            Self::draw_agents_inspector(
+                r,
+                vp,
+                agent_snapshot,
+                agent_list_offset,
+                selected_id,
+                hovered_row,
+                focused,
+            );
             return;
         }
 
@@ -5007,16 +5033,19 @@ impl ApplicationHandler for App {
                                 cols: insp_layout_vp.cols,
                                 rows: insp_layout_vp.rows,
                             };
-                            let agent_snapshot = if self.inspector_view == panels::InspectorView::Agents {
-                                Some(self.agent_observations.snapshot(
-                                    std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_millis() as u64)
-                                        .unwrap_or(0),
-                                ))
-                            } else {
-                                None
-                            };
+                            let agent_snapshot =
+                                if self.inspector_view == panels::InspectorView::Agents {
+                                    Some(
+                                        self.agent_observations.snapshot(
+                                            std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .map(|d| d.as_millis() as u64)
+                                                .unwrap_or(0),
+                                        ),
+                                    )
+                                } else {
+                                    None
+                                };
                             Self::draw_inspector(
                                 r,
                                 insp_vp,
