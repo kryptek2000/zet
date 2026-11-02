@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 zet-agent = { path = "../zet-agent" }
+zet-agent-observe = { path = "../zet-agent-observe" }
 zet-models = { path = "../zet-models" }
 zet-blocks = { path = "../zet-blocks" }
 zet-pty = { path = "../zet-pty" }
@@ -30,3 +31,8 @@ serde_json = "1"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["term", "signal", "fs"] }
+
+[dev-dependencies]
+# Test-only: builds a database whose blocks trigger rejects inserts, so the
+# recorder's failed-append accounting is exercised through the real Store.
+rusqlite = { version = "0.40", features = ["bundled"] }

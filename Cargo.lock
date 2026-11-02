@@ -4619,9 +4619,11 @@ dependencies = [
  "nix",
  "notify-rust",
  "pollster",
+ "rusqlite",
  "serde_json",
  "winit",
  "zet-agent",
+ "zet-agent-observe",
  "zet-blocks",
  "zet-context",
  "zet-gpu",
@@ -4641,6 +4643,15 @@ dependencies = [
  "zet-context",
  "zet-models",
  "zet-policy",
+]
+
+[[package]]
+name = "zet-agent-observe"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "zet-blocks",
 ]
 
 [[package]]
