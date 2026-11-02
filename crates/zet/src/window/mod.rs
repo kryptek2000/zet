@@ -1292,11 +1292,7 @@ impl App {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let count = self.agent_observations.snapshot(now_ms).observations.len();
-        let rows = self
-            .frame_layout()
-            .inspector
-            .map(|vp| vp.rows)
-            .unwrap_or(0);
+        let rows = self.frame_layout().inspector.map(|vp| vp.rows).unwrap_or(0);
         let visible = count.min(rows.saturating_sub(5) as usize);
         if visible == 0 {
             self.agent_inspector_sel = None;
@@ -5369,8 +5365,8 @@ mod layout_fit_tests {
             inspector_expanded_id: None,
             inspector_cache: super::panels::InspectorCache::new(),
             agent_observations: zet_agent_observe::AgentObservationStore::new(256),
-        agent_inspector_sel: None,
-        agent_inspector_sel_id: None,
+            agent_inspector_sel: None,
+            agent_inspector_sel_id: None,
             #[cfg(test)]
             chrome_query_count: 0,
             #[cfg(test)]
