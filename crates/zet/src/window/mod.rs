@@ -2819,7 +2819,11 @@ impl App {
                         let lines: Vec<&str> = out.lines().collect();
                         let total = lines.len();
                         let max_rows = vp.rows.saturating_sub(10) as usize;
-                        let start = if total == 0 { 0 } else { evidence_offset.min(total - 1) };
+                        let start = if total == 0 {
+                            0
+                        } else {
+                            evidence_offset.min(total - 1)
+                        };
                         for line in lines.iter().skip(start).take(max_rows) {
                             if row >= vp.rows.saturating_sub(2) {
                                 break;
