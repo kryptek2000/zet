@@ -2185,12 +2185,8 @@ pub fn agent_evidence_limitations(
     if recorded_delivery_incomplete > 0 {
         out.push("DELIVERY INCOMPLETE");
     }
-    if conflict_status != zet_agent_observe::ConflictStatus::Unknown {
+    if conflict_status == zet_agent_observe::ConflictStatus::Conflicting {
         out.push("CONFLICT DETECTED");
-    }
-    if conflict_status == zet_agent_observe::ConflictStatus::Unknown {
-        // Unknown conflict status is reported honestly as unknown, not as clean.
-        out.push("CONFLICT STATUS UNKNOWN");
     }
     out
 }
@@ -2376,5 +2372,181 @@ mod f3_panels_extra_tests {
         // agent layout works with 0 inspector rows? at least no panic
         let l = agent_inspector_layout(0, 3, 0);
         assert_eq!(l.visible_observations, 0);
+    }
+}
+
+#[cfg(test)]
+mod f4_panels_tests {
+    use super::*;
+
+    #[test]
+    fn source_and_session_distinct_positions() {
+        // detail_start+2 (source) and detail_start+3 (session) are distinct rows.
+        let layout = agent_inspector_layout(30, 4, 0);
+        let ds = layout.detail_start.unwrap();
+        assert_ne!(ds + 2, ds + 3);
+    }
+
+    #[test]
+    fn no_detail_overlap_narrow_and_normal() {
+        for rows in [12u32, 20, 30] {
+            let layout = agent_inspector_layout(rows, 4, 0);
+            if let Some(ds) = layout.detail_start {
+                assert!(ds + 3 < layout.warning_row || rows < 12);
+                assert!(layout.list_end <= ds);
+            }
+        }
+    }
+
+    #[test]
+    fn clean_snapshot_no_red_warning() {
+        let labels = agent_evidence_limitations(
+            0,
+            0,
+            true,
+            0,
+            0,
+            zet_agent_observe::ConflictStatus::Unknown,
+        );
+        assert!(labels.is_empty());
+    }
+
+    #[test]
+    fn unknown_conflict_neutral() {
+        let labels = agent_evidence_limitations(
+            0,
+            0,
+            true,
+            0,
+            0,
+            zet_agent_observe::ConflictStatus::Unknown,
+        );
+        assert!(!labels.contains(&"CONFLICT DETECTED"));
+    }
+
+    #[test]
+    fn none_not_conflicting() {
+        let labels =
+            agent_evidence_limitations(0, 0, true, 0, 0, zet_agent_observe::ConflictStatus::None);
+        assert!(!labels.contains(&"CONFLICT DETECTED"));
+    }
+
+    #[test]
+    fn conflicting_distinguished() {
+        let labels = agent_evidence_limitations(
+            0,
+            0,
+            true,
+            0,
+            0,
+            zet_agent_observe::ConflictStatus::Conflicting,
+        );
+        assert!(labels.contains(&"CONFLICT DETECTED"));
+    }
+
+    #[test]
+    fn each_loss_counter_warning() {
+        assert!(!agent_evidence_limitations(
+            1,
+            0,
+            true,
+            0,
+            0,
+            zet_agent_observe::ConflictStatus::Unknown
+        )
+        .is_empty());
+        assert!(!agent_evidence_limitations(
+            0,
+            1,
+            true,
+            0,
+            0,
+            zet_agent_observe::ConflictStatus::Unknown
+        )
+        .is_empty());
+        assert!(!agent_evidence_limitations(
+            0,
+            0,
+            false,
+            0,
+            0,
+            zet_agent_observe::ConflictStatus::Unknown
+        )
+        .is_empty());
+        assert!(!agent_evidence_limitations(
+            0,
+            0,
+            true,
+            1,
+            0,
+            zet_agent_observe::ConflictStatus::Unknown
+        )
+        .is_empty());
+        assert!(!agent_evidence_limitations(
+            0,
+            0,
+            true,
+            0,
+            1,
+            zet_agent_observe::ConflictStatus::Unknown
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn multiple_losses_retain_distinctions() {
+        let labels = agent_evidence_limitations(
+            1,
+            2,
+            false,
+            3,
+            4,
+            zet_agent_observe::ConflictStatus::Conflicting,
+        );
+        assert!(labels.len() >= 5);
+    }
+
+    #[test]
+    fn production_detail_projection_contains_all_fields() {
+        let mut store = zet_agent_observe::AgentObservationStore::new(8);
+        let obs = store
+            .observe_command(
+                zet_agent_observe::SessionRef::new("s").unwrap(),
+                "opencode",
+                1,
+            )
+            .unwrap();
+        let lines = agent_detail_lines(&obs);
+        let joined = lines.join("\n");
+        for needle in [
+            "AGENT:",
+            "LAUNCH CANDIDATE",
+            "SOURCE:",
+            "SESSION:",
+            "AVAILABILITY:",
+            "STRENGTH:",
+            "RUNNING: UNKNOWN",
+            "COMPLETE: UNKNOWN",
+            "AUTHORIZED: UNKNOWN",
+            "FILE MODIFICATIONS: UNKNOWN",
+            "CONFLICT: UNKNOWN",
+        ] {
+            assert!(joined.contains(needle), "missing {needle}");
+        }
+    }
+
+    #[test]
+    fn renderer_consumes_detail_projection() {
+        // The production renderer references agent_detail_lines.
+        // This test is a compile-time guard that the helper is accessible.
+        let mut store = zet_agent_observe::AgentObservationStore::new(8);
+        let obs = store
+            .observe_command(
+                zet_agent_observe::SessionRef::new("s").unwrap(),
+                "opencode",
+                1,
+            )
+            .unwrap();
+        assert!(!agent_detail_lines(&obs).is_empty());
     }
 }

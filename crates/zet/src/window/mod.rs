@@ -255,6 +255,8 @@ struct App {
     agent_inspector_sel_id: Option<u64>,
     agent_inspector_key: Option<zet_agent_observe::ObservationKey>,
     agent_list_offset: usize,
+    agent_detail_expanded: bool,
+    agent_detail_offset: usize,
     #[cfg(test)]
     pub chrome_query_count: usize,
     #[cfg(test)]
@@ -1217,6 +1219,8 @@ impl App {
         self.agent_inspector_sel_id = None;
         self.agent_inspector_key = None;
         self.agent_list_offset = 0;
+        self.agent_detail_expanded = false;
+        self.agent_detail_offset = 0;
         self.inspector_sel_id = None;
         self.inspector_output = None;
         self.inspector_output_id = None;
@@ -1349,7 +1353,8 @@ impl App {
             if self.agent_inspector_sel_id.is_none() {
                 self.move_agent_inspector_selection(1);
             }
-            // Enter rebinds/ensures the selected evidence view.
+            self.agent_detail_expanded = !self.agent_detail_expanded;
+            self.agent_detail_offset = 0;
             self.needs_draw = true;
             return;
         }
@@ -2557,25 +2562,22 @@ impl App {
         selected_id: Option<i64>,
         hovered_row: Option<u32>,
         focused: bool,
+        expanded: bool,
+        detail_offset: usize,
     ) {
-        use zet_gpu::renderer::{
-            PANEL_CYAN, PANEL_MUTED, PANEL_RED, PANEL_SECONDARY, PANEL_TEAL, PANEL_TEXT,
-        };
+        use zet_gpu::renderer::{PANEL_CYAN, PANEL_MUTED, PANEL_RED, PANEL_SECONDARY, PANEL_TEXT};
         if vp.rows == 0 {
             return;
         }
         let (cw, ch) = r.cell_px();
         let origin_x = vp.x.saturating_mul(cw);
         let origin_y = vp.y.saturating_mul(ch);
-        let layout = panels::agent_inspector_layout(
-            vp.rows,
-            agent_snapshot
-                .as_ref()
-                .map(|s| s.observations.len())
-                .unwrap_or(0),
-            list_offset,
-        );
-        // Header (single).
+        let count = agent_snapshot
+            .as_ref()
+            .map(|s| s.observations.len())
+            .unwrap_or(0);
+        let layout = panels::agent_inspector_layout(vp.rows, count, list_offset);
+
         Self::draw_ui_row(r, vp, 0, 4, "AGENT ACTIVITY", UI_HEADER, PANEL_TEXT);
         Self::draw_ui_row(r, vp, 1, 2, "VIEW", UI_META, PANEL_MUTED);
         Self::draw_ui_row(r, vp, 1, 8, "SESSION", UI_META, PANEL_MUTED);
@@ -2627,8 +2629,60 @@ impl App {
                 UI_BODY,
                 PANEL_MUTED,
             );
-            let avail_msg = panels::agent_recording_available_message(true, true);
-            Self::draw_ui_row(r, vp, 6, 2, avail_msg, UI_META, PANEL_SECONDARY);
+            Self::draw_ui_row(
+                r,
+                vp,
+                6,
+                2,
+                "NO RECORDED EVIDENCE LOSSES",
+                UI_META,
+                PANEL_SECONDARY,
+            );
+        } else if expanded {
+            if let Some(sel_id) = selected_id {
+                if let Some(obs) = snap.observations.iter().find(|o| o.id().0 as i64 == sel_id) {
+                    let lines = panels::agent_detail_lines(obs);
+                    let start = layout.list_start;
+                    Self::draw_ui_row(r, vp, start, 2, "SELECTED EVIDENCE", UI_META, PANEL_MUTED);
+                    let mut row = start + 1;
+                    let visible_rows =
+                        layout.warning_row.saturating_sub(layout.list_start) as usize;
+                    for line in lines.iter().skip(detail_offset) {
+                        if row >= layout.warning_row {
+                            break;
+                        }
+                        if (row - (start + 1)) as usize >= visible_rows.saturating_sub(1) {
+                            break;
+                        }
+                        if row < vp.rows {
+                            Self::draw_ui_row(
+                                r,
+                                vp,
+                                row,
+                                2,
+                                &panels::truncate_to_cells(
+                                    line,
+                                    vp.cols.saturating_sub(4) as usize,
+                                ),
+                                UI_BODY,
+                                PANEL_TEXT,
+                            );
+                        }
+                        row += 1;
+                    }
+                    if row < layout.warning_row {
+                        Self::draw_ui_row(
+                            r,
+                            vp,
+                            layout.warning_row.saturating_sub(1),
+                            2,
+                            "ENTER COLLAPSE",
+                            UI_META,
+                            PANEL_MUTED,
+                        );
+                    }
+                }
+            }
         } else {
             let mut row = layout.list_start;
             for obs in snap
@@ -2651,7 +2705,6 @@ impl App {
                     break;
                 }
             }
-            // Selected detail
             if let Some(sel_id) = selected_id {
                 if let Some(obs) = snap.observations.iter().find(|o| o.id().0 as i64 == sel_id) {
                     if let Some(detail_start) = layout.detail_start {
@@ -2669,7 +2722,10 @@ impl App {
                             vp,
                             detail_start + 1,
                             2,
-                            &format!("AGENT: {}", obs.agent().as_str()),
+                            &panels::truncate_to_cells(
+                                &format!("AGENT: {}", obs.agent().as_str()),
+                                vp.cols.saturating_sub(4) as usize,
+                            ),
                             UI_BODY,
                             PANEL_TEXT,
                         );
@@ -2687,40 +2743,27 @@ impl App {
                             vp,
                             detail_start + 2,
                             2,
-                            source,
+                            &panels::truncate_to_cells(source, vp.cols.saturating_sub(4) as usize),
                             UI_META,
                             PANEL_SECONDARY,
                         );
                         Self::draw_ui_row(
                             r,
                             vp,
-                            detail_start + 2,
+                            detail_start + 3,
                             2,
-                            &format!("SESSION: {}", obs.session().as_str()),
+                            &panels::truncate_to_cells(
+                                &format!("SESSION: {}", obs.session().as_str()),
+                                vp.cols.saturating_sub(4) as usize,
+                            ),
                             UI_META,
                             PANEL_SECONDARY,
                         );
-                    }
-                    // Extra detail rows
-                    if let Some(detail_start) = layout.detail_start {
-                        let r2 = detail_start + 3;
-                        if r2 < vp.rows {
-                            Self::draw_ui_row(
-                                r,
-                                vp,
-                                r2,
-                                2,
-                                &format!("AVAILABILITY: {:?}", obs.availability()).to_uppercase(),
-                                UI_META,
-                                PANEL_MUTED,
-                            );
-                        }
                     }
                 }
             }
         }
 
-        // Evidence limitations / recorder availability
         let lim_row = layout.warning_row;
         let labels = panels::agent_evidence_limitations(
             snap.dropped,
@@ -2731,11 +2774,16 @@ impl App {
             snap.conflict_status,
         );
         if !labels.is_empty() && lim_row < vp.rows {
-            Self::draw_ui_row(r, vp, lim_row, 2, labels[0], UI_META, PANEL_RED);
-        }
-        // conflict status unknown is distinguishable
-        if snap.conflict_status == zet_agent_observe::ConflictStatus::Unknown && lim_row < vp.rows {
-            // already included as CONFLICT STATUS UNKNOWN when observations? ensure visible
+            let joined = labels.join(" | ");
+            Self::draw_ui_row(
+                r,
+                vp,
+                lim_row,
+                2,
+                &panels::truncate_to_cells(&joined, vp.cols.saturating_sub(4) as usize),
+                UI_META,
+                PANEL_RED,
+            );
         }
         let _ = (
             selected_id,
@@ -2743,10 +2791,9 @@ impl App {
             focused,
             origin_x,
             origin_y,
-            PANEL_TEAL,
+            expanded,
         );
     }
-
     #[allow(clippy::too_many_arguments)]
     fn draw_timeline_inspector(
         r: &mut Renderer,
@@ -3129,6 +3176,8 @@ impl App {
         focused: bool,
         view: panels::InspectorView,
         expanded: bool,
+        agent_expanded: bool,
+        agent_detail_offset: usize,
     ) {
         use zet_gpu::renderer::{
             PANEL_AMBER, PANEL_BG, PANEL_BORDER, PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_INSET,
@@ -3265,6 +3314,8 @@ impl App {
                 selected_id,
                 hovered_row,
                 focused,
+                agent_expanded,
+                agent_detail_offset,
             );
             return;
         }
@@ -3334,6 +3385,8 @@ impl App {
                 selected_id,
                 hovered_row,
                 focused,
+                agent_expanded,
+                agent_detail_offset,
             );
             return;
         }
@@ -4585,7 +4638,12 @@ impl App {
                         self.rail_sel = self.rail_sel.saturating_sub(1);
                     }
                     if self.focus == Focus::Inspector {
-                        if self.inspector_view == panels::InspectorView::Agents {
+                        if self.inspector_view == panels::InspectorView::Agents
+                            && self.agent_detail_expanded
+                        {
+                            self.agent_detail_offset = self.agent_detail_offset.saturating_sub(1);
+                            self.needs_draw = true;
+                        } else if self.inspector_view == panels::InspectorView::Agents {
                             self.move_agent_inspector_selection(-1);
                         } else {
                             self.move_inspector_selection(-1);
@@ -4597,7 +4655,12 @@ impl App {
                         self.rail_sel = (self.rail_sel + 1).min(self.tabs.len() - 1);
                     }
                     if self.focus == Focus::Inspector {
-                        if self.inspector_view == panels::InspectorView::Agents {
+                        if self.inspector_view == panels::InspectorView::Agents
+                            && self.agent_detail_expanded
+                        {
+                            self.agent_detail_offset = self.agent_detail_offset.saturating_add(1);
+                            self.needs_draw = true;
+                        } else if self.inspector_view == panels::InspectorView::Agents {
                             self.move_agent_inspector_selection(1);
                         } else {
                             self.move_inspector_selection(1);
@@ -5194,6 +5257,8 @@ impl ApplicationHandler for App {
                                 self.focus == Focus::Inspector,
                                 self.inspector_view,
                                 inspector_expanded,
+                                self.agent_detail_expanded,
+                                self.agent_detail_offset,
                             );
                         }
                     }
@@ -5369,6 +5434,8 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         agent_inspector_sel_id: None,
         agent_inspector_key: None,
         agent_list_offset: 0,
+        agent_detail_expanded: false,
+        agent_detail_offset: 0,
         #[cfg(test)]
         chrome_query_count: 0,
         #[cfg(test)]
@@ -5573,6 +5640,8 @@ mod layout_fit_tests {
             agent_inspector_sel_id: None,
             agent_inspector_key: None,
             agent_list_offset: 0,
+            agent_detail_expanded: false,
+            agent_detail_offset: 0,
             #[cfg(test)]
             chrome_query_count: 0,
             #[cfg(test)]
