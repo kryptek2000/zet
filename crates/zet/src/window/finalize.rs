@@ -22,9 +22,15 @@ pub(crate) const FINAL_DRAIN_MAX_CHUNKS: usize = 64;
 /// Byte cap for one shutdown pass. Bounds parser work independently of how
 /// the channel was fed (tests and future transports may use larger chunks).
 pub(crate) const FINAL_DRAIN_MAX_BYTES: usize = 256 * 1024;
-/// Wall-clock cap. Closing may wait briefly for the reader thread to see
-/// EOF after the child is reaped, but it must never freeze the UI.
+/// Wall-clock cap for one pass. Closing may wait briefly for the reader
+/// thread to see EOF after the child is reaped, but it must never freeze
+/// the UI.
 pub(crate) const FINAL_DRAIN_MAX_DURATION: Duration = Duration::from_millis(25);
+/// Total shutdown drain budget. A pass stops at the chunk/byte/time caps;
+/// the outer drain then starts another pass rather than discarding the
+/// remainder merely because a per-pass limit was reached. 100 ms is below
+/// the 250 ms idle frame, and only application/tab close pays it.
+pub(crate) const FINAL_DRAIN_TOTAL_DURATION: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DrainBudget {
@@ -73,10 +79,54 @@ impl DrainReport {
 }
 
 /// Feed queued PTY chunks through `term` until the producer disconnects or
-/// the shutdown budget is spent. Returns the work performed so callers can
-/// distinguish "producer finished" from "receiver was merely idle".
+/// the total shutdown budget is spent. Each pass is independently bounded;
+/// when a pass ends on its chunk/byte cap, the remaining queued bytes are
+/// handled by the next pass instead of being discarded. Returns the work
+/// performed so callers can distinguish "producer finished" from "receiver
+/// was merely idle".
 pub(crate) fn drain_receiver_bounded(rx: &Receiver<Vec<u8>>, term: &mut Terminal) -> DrainReport {
-    drain_with_budget(rx, term, FINAL_DRAIN_BUDGET)
+    let start = Instant::now();
+    let deadline = start
+        .checked_add(FINAL_DRAIN_TOTAL_DURATION)
+        .unwrap_or(start);
+    let mut chunks = 0usize;
+    let mut bytes = 0usize;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return DrainReport {
+                chunks,
+                bytes,
+                outcome: DrainOutcome::BudgetExhausted,
+            };
+        }
+        let pass_budget = DrainBudget {
+            max_duration: FINAL_DRAIN_BUDGET.max_duration.min(remaining),
+            ..FINAL_DRAIN_BUDGET
+        };
+        let pass = drain_with_budget(rx, term, pass_budget);
+        chunks = chunks.saturating_add(pass.chunks);
+        bytes = bytes.saturating_add(pass.bytes);
+        match pass.outcome {
+            DrainOutcome::Disconnected => {
+                return DrainReport {
+                    chunks,
+                    bytes,
+                    outcome: DrainOutcome::Disconnected,
+                };
+            }
+            DrainOutcome::LiveEmpty | DrainOutcome::BudgetExhausted => {
+                if Instant::now() >= deadline {
+                    return DrainReport {
+                        chunks,
+                        bytes,
+                        outcome: pass.outcome,
+                    };
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn drain_with_budget(
@@ -252,6 +302,23 @@ mod tests {
                 zet_term::MarkerKind::Done,
             ]
         );
+    }
+
+    #[test]
+    fn multi_pass_drain_does_not_stop_at_a_chunk_limit() {
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        send_chunks(&tx, 200, b"01234567");
+        drop(tx);
+        let mut term = Terminal::new(40, 10);
+
+        // The per-pass cap is 64 chunks, but the shutdown drain keeps going
+        // until the producer disconnects: 200 queued chunks are not thrown
+        // away merely because one pass reached its limit.
+        let report = drain_receiver_bounded(&rx, &mut term);
+        assert_eq!(report.outcome, DrainOutcome::Disconnected);
+        assert!(report.is_complete());
+        assert_eq!(report.chunks, 200);
+        assert_eq!(report.bytes, 200 * 8);
     }
 
     fn send_chunks(tx: &Sender<Vec<u8>>, count: usize, payload: &[u8]) {
