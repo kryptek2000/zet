@@ -1473,6 +1473,7 @@ pub const INSPECTOR_ACTIVITY_START: u32 = 7;
 pub enum InspectorView {
     Session,
     Timeline,
+    Agents,
 }
 
 pub fn inspector_command_row(index: usize) -> u32 {
@@ -1740,6 +1741,7 @@ pub fn inspector_visible_commands(
         InspectorView::Timeline => {
             timeline_layout(viewport_rows, command_count, expanded).visible_commands
         }
+        InspectorView::Agents => 0,
     }
 }
 
@@ -1760,6 +1762,7 @@ pub fn inspector_selection_at_row(
         InspectorView::Timeline => {
             timeline_layout(viewport_rows, command_count, expanded).command_at_row(row)
         }
+        InspectorView::Agents => None,
     };
     position.map(inspector_selection_for_command)
 }

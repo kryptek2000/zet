@@ -240,7 +240,7 @@ struct App {
     inspector_sel_id: Option<i64>,
     /// Whether the Inspector is showing the cross-session observed work
     /// timeline instead of the active session's commands.
-    inspector_timeline: bool,
+    inspector_view: panels::InspectorView,
     /// Bounded, sanitized output for the currently selected recorded
     /// command, if available.
     inspector_output: Option<String>,
@@ -1131,7 +1131,7 @@ impl App {
                     .inspector_cache
                     .snapshot()
                     .map(|snapshot| {
-                        let displayed = if self.inspector_timeline {
+                        let displayed = if self.inspector_view == panels::InspectorView::Timeline {
                             &snapshot.timeline
                         } else {
                             &snapshot.commands
@@ -1155,7 +1155,7 @@ impl App {
         }
         let snapshot = self.build_inspector_snapshot();
         if let Some(id) = self.inspector_sel_id {
-            let displayed = if self.inspector_timeline {
+            let displayed = if self.inspector_view == panels::InspectorView::Timeline {
                 &snapshot.timeline
             } else {
                 &snapshot.commands
@@ -1187,20 +1187,20 @@ impl App {
     }
 
     fn inspector_view(&self) -> panels::InspectorView {
-        if self.inspector_timeline {
-            panels::InspectorView::Timeline
-        } else {
-            panels::InspectorView::Session
-        }
+        self.inspector_view
     }
 
     fn inspector_displayed(&self) -> Option<&[panels::CommandRow]> {
         let snapshot = self.inspector_cache.snapshot()?;
-        Some(if self.inspector_timeline {
-            &snapshot.timeline
+        if self.inspector_view == panels::InspectorView::Agents {
+            None
         } else {
-            &snapshot.commands
-        })
+            Some(if self.inspector_view == panels::InspectorView::Timeline {
+                &snapshot.timeline
+            } else {
+                &snapshot.commands
+            })
+        }
     }
 
     fn inspector_expanded(&self) -> bool {
@@ -1218,8 +1218,8 @@ impl App {
 
     /// Switch views and drop every piece of stale selection/output state
     /// before the new layout is painted.
-    fn set_inspector_timeline(&mut self, timeline: bool) {
-        self.inspector_timeline = timeline;
+    fn set_inspector_view(&mut self, view: panels::InspectorView) {
+        self.inspector_view = view;
         self.clear_inspector_selection();
         self.inspector_cache.mark_dirty();
         self.needs_draw = true;
@@ -1286,7 +1286,7 @@ impl App {
     /// its bounded output preview. With no selection, Enter selects the first
     /// visible observed event.
     fn inspector_enter(&mut self) {
-        if !self.inspector_timeline {
+        if self.inspector_view != panels::InspectorView::Timeline {
             return;
         }
         if self.inspector_sel_id.is_none() {
@@ -1321,7 +1321,7 @@ impl App {
         self.inspector_output_id = selected_id;
         let preview = selected_id.and_then(|id| {
             let snapshot = self.inspector_cache.snapshot()?;
-            let displayed = if self.inspector_timeline {
+            let displayed = if self.inspector_view == panels::InspectorView::Timeline {
                 &snapshot.timeline
             } else {
                 &snapshot.commands
@@ -1636,6 +1636,7 @@ impl App {
         self.layout.inspector = !self.layout.inspector;
         if !self.layout.inspector {
             self.focus = Focus::Terminal;
+            self.inspector_view = panels::InspectorView::Session;
             self.inspector_sel = None;
             self.inspector_sel_id = None;
             self.inspector_output = None;
@@ -1732,11 +1733,15 @@ impl App {
                 // Clickable Inspector view switch.
                 if row == 1 {
                     if (8..16).contains(&col) {
-                        self.set_inspector_timeline(false);
+                        self.set_inspector_view(panels::InspectorView::Session);
                         return;
                     }
                     if (16..25).contains(&col) {
-                        self.set_inspector_timeline(true);
+                        self.set_inspector_view(panels::InspectorView::Timeline);
+                        return;
+                    }
+                    if (25..33).contains(&col) {
+                        self.set_inspector_view(panels::InspectorView::Agents);
                         return;
                     }
                 }
@@ -2439,6 +2444,59 @@ impl App {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    fn draw_agents_inspector(
+        r: &mut Renderer,
+        vp: zet_gpu::renderer::Viewport,
+        agent_snapshot: Option<zet_agent_observe::AgentObservationSnapshot>,
+        selected_id: Option<i64>,
+        hovered_row: Option<u32>,
+        focused: bool,
+    ) {
+        use zet_gpu::renderer::{PANEL_BG, PANEL_MUTED, PANEL_RED, PANEL_SECONDARY, PANEL_TEXT};
+        if vp.rows == 0 {
+            return;
+        }
+        let (cw, ch) = r.cell_px();
+        let origin_x = vp.x.saturating_mul(cw);
+        let origin_y = vp.y.saturating_mul(ch);
+        r.draw_fill(vp, PANEL_BG);
+        Self::draw_ui_row(r, vp, 2, 2, "AGENT ACTIVITY", UI_HEADER, PANEL_TEXT);
+        Self::draw_ui_row(r, vp, 3, 2, "RECORDED COMMAND CANDIDATES", UI_META, PANEL_MUTED);
+        let snap = match agent_snapshot {
+            Some(s) => s,
+            None => {
+                Self::draw_ui_row(r, vp, 5, 2, "NO OBSERVATION STORE", UI_BODY, PANEL_MUTED);
+                return;
+            }
+        };
+        if snap.observations.is_empty() {
+            Self::draw_ui_row(r, vp, 5, 2, "NO OBSERVED AGENT COMMANDS", UI_BODY, PANEL_MUTED);
+            Self::draw_ui_row(r, vp, 6, 2, "Recording available; none observed.", UI_META, PANEL_SECONDARY);
+        } else {
+            let mut row = 5u32;
+            for obs in snap.observations.iter().take(vp.rows.saturating_sub(6) as usize) {
+                let label = format!("{}  LAUNCH CANDIDATE", obs.agent().as_str().to_uppercase());
+                Self::draw_ui_row(r, vp, row, 2, &label, UI_BODY, PANEL_TEXT);
+                row += 1;
+                if row >= vp.rows.saturating_sub(2) {
+                    break;
+                }
+            }
+        }
+        // Evidence limitations
+        let lim_row = vp.rows.saturating_sub(3);
+        if snap.recorded_dropped > 0 || snap.recorded_persistence_failures > 0
+            || snap.recorded_delivery_incomplete > 0 || !snap.recorded_loss_complete
+        {
+            Self::draw_ui_row(r, vp, lim_row, 2, "EVIDENCE INCOMPLETE", UI_META, PANEL_RED);
+        }
+        if snap.conflict_status != zet_agent_observe::ConflictStatus::Unknown {
+            // no-op; currently always Unknown
+        }
+        let _ = (selected_id, hovered_row, focused, origin_x, origin_y);
+    }
+
     fn draw_timeline_inspector(
         r: &mut Renderer,
         vp: zet_gpu::renderer::Viewport,
@@ -2811,12 +2869,13 @@ impl App {
         r: &mut Renderer,
         vp: zet_gpu::renderer::Viewport,
         snapshot: Option<Arc<panels::InspectorSnapshot>>,
+        agent_snapshot: Option<zet_agent_observe::AgentObservationSnapshot>,
         selected_id: Option<i64>,
         output: Option<&str>,
         output_truncated: bool,
         hovered_row: Option<u32>,
         focused: bool,
-        timeline: bool,
+        view: panels::InspectorView,
         expanded: bool,
     ) {
         use zet_gpu::renderer::{
@@ -2824,6 +2883,8 @@ impl App {
             PANEL_MUTED, PANEL_RAISED, PANEL_RED, PANEL_SECONDARY, PANEL_TEAL, PANEL_TEXT,
             PANEL_VIOLET,
         };
+        let timeline = view == panels::InspectorView::Timeline;
+        let agents = view == panels::InspectorView::Agents;
         let (cw, ch) = r.cell_px();
         let origin_x = vp.x.saturating_mul(cw);
         let origin_y = vp.y.saturating_mul(ch);
@@ -2861,7 +2922,9 @@ impl App {
             vp,
             0,
             4,
-            if timeline {
+            if agents {
+                "AGENT ACTIVITY"
+            } else if timeline {
                 "OBSERVED WORK TIMELINE"
             } else {
                 "CONTEXTUAL INSPECTOR"
@@ -2887,6 +2950,15 @@ impl App {
             "TIMELINE",
             UI_META,
             if timeline { PANEL_CYAN } else { PANEL_MUTED },
+        );
+        Self::draw_ui_row(
+            r,
+            vp,
+            1,
+            25,
+            "AGENTS",
+            UI_META,
+            if agents { PANEL_CYAN } else { PANEL_MUTED },
         );
         let title = if timeline {
             "OBSERVED WORK TIMELINE"
@@ -2978,6 +3050,11 @@ impl App {
                 hovered_row,
                 focused,
             );
+            return;
+        }
+
+        if agents {
+            Self::draw_agents_inspector(r, vp, agent_snapshot, selected_id, hovered_row, focused);
             return;
         }
 
@@ -4206,8 +4283,18 @@ impl App {
                 Key::Character(ch)
                     if self.focus == Focus::Inspector && (ch == "t" || ch == "T") =>
                 {
-                    let timeline = !self.inspector_timeline;
-                    self.set_inspector_timeline(timeline);
+                    let view = if self.inspector_view == panels::InspectorView::Timeline { panels::InspectorView::Session } else { panels::InspectorView::Timeline };
+                    self.set_inspector_view(view);
+                }
+                Key::Character(ch)
+                    if self.focus == Focus::Inspector && (ch == "a" || ch == "A") =>
+                {
+                    let view = if self.inspector_view == panels::InspectorView::Agents {
+                        panels::InspectorView::Session
+                    } else {
+                        panels::InspectorView::Agents
+                    };
+                    self.set_inspector_view(view);
                 }
                 Key::Named(NamedKey::ArrowUp) => {
                     if self.focus == Focus::Rail && !self.tabs.is_empty() {
@@ -4769,16 +4856,25 @@ impl ApplicationHandler for App {
                                 cols: insp_layout_vp.cols,
                                 rows: insp_layout_vp.rows,
                             };
+                            let agent_snapshot = self
+                                .agent_observations
+                                .snapshot(
+                                    std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_millis() as u64)
+                                        .unwrap_or(0),
+                                );
                             Self::draw_inspector(
                                 r,
                                 insp_vp,
                                 inspector_snapshot,
+                                Some(agent_snapshot),
                                 self.inspector_sel_id,
                                 inspector_output,
                                 self.inspector_output_truncated,
                                 inspector_hover_row,
                                 self.focus == Focus::Inspector,
-                                self.inspector_timeline,
+                                self.inspector_view,
                                 inspector_expanded,
                             );
                         }
@@ -4944,7 +5040,7 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         chrome: panels::ChromeCache::new(),
         inspector_sel: None,
         inspector_sel_id: None,
-        inspector_timeline: false,
+        inspector_view: panels::InspectorView::Session,
         inspector_output: None,
         inspector_output_id: None,
         inspector_output_truncated: false,
@@ -5144,7 +5240,7 @@ mod layout_fit_tests {
             chrome: super::panels::ChromeCache::new(),
             inspector_sel: None,
             inspector_sel_id: None,
-            inspector_timeline: false,
+            inspector_view: super::panels::InspectorView::Session,
             inspector_output: None,
             inspector_output_id: None,
             inspector_output_truncated: false,
@@ -6470,7 +6566,7 @@ mod layout_fit_tests {
             40,
             crate::window::layout::LayoutMode::MissionControl.layout(),
         );
-        app.inspector_timeline = false;
+        app.inspector_view = super::panels::InspectorView::Session;
         app.inspector_sel = Some(4);
         app.inspector_sel_id = Some(1);
         app.inspector_output = Some("old".to_string());
@@ -6478,9 +6574,9 @@ mod layout_fit_tests {
         app.inspector_output_truncated = true;
         app.inspector_expanded_id = Some(1);
 
-        app.set_inspector_timeline(true);
+        app.set_inspector_view(super::panels::InspectorView::Timeline);
 
-        assert!(app.inspector_timeline);
+        assert_eq!(app.inspector_view, super::panels::InspectorView::Timeline);
         assert_eq!(app.inspector_sel, None);
         assert_eq!(app.inspector_sel_id, None);
         assert_eq!(app.inspector_output, None);
@@ -6521,7 +6617,7 @@ mod layout_fit_tests {
             .unwrap();
         let recorder = zet_blocks::Recorder::new(store, "session-a");
         app.tabs[0].recorder = Some(recorder);
-        app.inspector_timeline = true;
+        app.inspector_view = super::panels::InspectorView::Timeline;
         app.refresh_inspector();
         app.inspector_sel = Some(5);
         app.inspector_sel_id = Some(second);
@@ -6604,7 +6700,7 @@ mod layout_fit_tests {
             .unwrap();
         let recorder = zet_blocks::Recorder::new(store, "session-a");
         app.tabs[0].recorder = Some(recorder);
-        app.inspector_timeline = true;
+        app.inspector_view = super::panels::InspectorView::Timeline;
         app.refresh_inspector();
         app.inspector_sel = Some(4);
         app.inspector_sel_id = Some(id);
@@ -6625,7 +6721,7 @@ mod layout_fit_tests {
             40,
             crate::window::layout::LayoutMode::MissionControl.layout(),
         );
-        app.inspector_timeline = false;
+        app.inspector_view = super::panels::InspectorView::Session;
         app.inspector_sel = Some(4);
         app.inspector_sel_id = Some(7);
         app.inspector_output = Some("old".to_string());
@@ -6634,9 +6730,9 @@ mod layout_fit_tests {
         app.inspector_expanded_id = Some(7);
 
         // Exercise the production toggle path used by T and the mouse.
-        app.set_inspector_timeline(true);
+        app.set_inspector_view(super::panels::InspectorView::Timeline);
 
-        assert!(app.inspector_timeline);
+        assert_eq!(app.inspector_view, super::panels::InspectorView::Timeline);
         assert_eq!(app.inspector_sel, None);
         assert_eq!(app.inspector_sel_id, None);
         assert_eq!(app.inspector_output, None);
@@ -6647,8 +6743,8 @@ mod layout_fit_tests {
         app.inspector_sel_id = Some(7);
         app.inspector_output = Some("old".to_string());
         app.inspector_expanded_id = Some(7);
-        app.set_inspector_timeline(false);
-        assert!(!app.inspector_timeline);
+        app.set_inspector_view(super::panels::InspectorView::Session);
+        assert_eq!(app.inspector_view, super::panels::InspectorView::Session);
         assert_eq!(app.inspector_sel, None);
         assert_eq!(app.inspector_output, None);
         assert_eq!(app.inspector_expanded_id, None);
@@ -6725,7 +6821,7 @@ mod layout_fit_tests {
             })
             .unwrap();
         app.tabs[0].recorder = Some(zet_blocks::Recorder::new(store, "session-a"));
-        app.inspector_timeline = true;
+        app.inspector_view = super::panels::InspectorView::Timeline;
         app.refresh_inspector();
         app.focus = super::Focus::Inspector;
 
@@ -6804,7 +6900,7 @@ mod layout_fit_tests {
             );
         }
         app.tabs[0].recorder = Some(zet_blocks::Recorder::new(store, "session-a"));
-        app.inspector_timeline = true;
+        app.inspector_view = super::panels::InspectorView::Timeline;
         app.refresh_inspector();
         app.focus = super::Focus::Inspector;
 
@@ -6876,7 +6972,7 @@ mod layout_fit_tests {
             );
         }
         app.tabs[0].recorder = Some(zet_blocks::Recorder::new(store, "session-a"));
-        app.inspector_timeline = true;
+        app.inspector_view = super::panels::InspectorView::Timeline;
         app.refresh_inspector();
         let rows = app.frame_layout().inspector.unwrap().rows;
         let layout = super::panels::timeline_layout(rows, 8, false);
@@ -6956,7 +7052,7 @@ mod layout_fit_tests {
                 .unwrap();
         }
         app.tabs[0].recorder = Some(zet_blocks::Recorder::new(store, "session-a"));
-        app.inspector_timeline = true;
+        app.inspector_view = super::panels::InspectorView::Timeline;
         app.refresh_inspector();
         app.inspector_sel = Some(4);
         app.inspector_sel_id = Some(1);
@@ -7029,7 +7125,7 @@ mod layout_fit_tests {
             winit::keyboard::ModifiersState::empty(),
             None,
         );
-        assert!(app.inspector_timeline);
+        assert_eq!(app.inspector_view, super::panels::InspectorView::Timeline);
         let after = app.frame_layout();
         assert_eq!(after.term, before.term);
         assert_eq!(after.inspector, before.inspector);
