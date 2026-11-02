@@ -2462,7 +2462,15 @@ impl App {
         let origin_y = vp.y.saturating_mul(ch);
         r.draw_fill(vp, PANEL_BG);
         Self::draw_ui_row(r, vp, 2, 2, "AGENT ACTIVITY", UI_HEADER, PANEL_TEXT);
-        Self::draw_ui_row(r, vp, 3, 2, "RECORDED COMMAND CANDIDATES", UI_META, PANEL_MUTED);
+        Self::draw_ui_row(
+            r,
+            vp,
+            3,
+            2,
+            "RECORDED COMMAND CANDIDATES",
+            UI_META,
+            PANEL_MUTED,
+        );
         let snap = match agent_snapshot {
             Some(s) => s,
             None => {
@@ -2471,11 +2479,31 @@ impl App {
             }
         };
         if snap.observations.is_empty() {
-            Self::draw_ui_row(r, vp, 5, 2, "NO OBSERVED AGENT COMMANDS", UI_BODY, PANEL_MUTED);
-            Self::draw_ui_row(r, vp, 6, 2, "Recording available; none observed.", UI_META, PANEL_SECONDARY);
+            Self::draw_ui_row(
+                r,
+                vp,
+                5,
+                2,
+                "NO OBSERVED AGENT COMMANDS",
+                UI_BODY,
+                PANEL_MUTED,
+            );
+            Self::draw_ui_row(
+                r,
+                vp,
+                6,
+                2,
+                "Recording available; none observed.",
+                UI_META,
+                PANEL_SECONDARY,
+            );
         } else {
             let mut row = 5u32;
-            for obs in snap.observations.iter().take(vp.rows.saturating_sub(6) as usize) {
+            for obs in snap
+                .observations
+                .iter()
+                .take(vp.rows.saturating_sub(6) as usize)
+            {
                 let label = format!("{}  LAUNCH CANDIDATE", obs.agent().as_str().to_uppercase());
                 Self::draw_ui_row(r, vp, row, 2, &label, UI_BODY, PANEL_TEXT);
                 row += 1;
@@ -2486,8 +2514,10 @@ impl App {
         }
         // Evidence limitations
         let lim_row = vp.rows.saturating_sub(3);
-        if snap.recorded_dropped > 0 || snap.recorded_persistence_failures > 0
-            || snap.recorded_delivery_incomplete > 0 || !snap.recorded_loss_complete
+        if snap.recorded_dropped > 0
+            || snap.recorded_persistence_failures > 0
+            || snap.recorded_delivery_incomplete > 0
+            || !snap.recorded_loss_complete
         {
             Self::draw_ui_row(r, vp, lim_row, 2, "EVIDENCE INCOMPLETE", UI_META, PANEL_RED);
         }
@@ -4283,7 +4313,11 @@ impl App {
                 Key::Character(ch)
                     if self.focus == Focus::Inspector && (ch == "t" || ch == "T") =>
                 {
-                    let view = if self.inspector_view == panels::InspectorView::Timeline { panels::InspectorView::Session } else { panels::InspectorView::Timeline };
+                    let view = if self.inspector_view == panels::InspectorView::Timeline {
+                        panels::InspectorView::Session
+                    } else {
+                        panels::InspectorView::Timeline
+                    };
                     self.set_inspector_view(view);
                 }
                 Key::Character(ch)
@@ -4856,14 +4890,12 @@ impl ApplicationHandler for App {
                                 cols: insp_layout_vp.cols,
                                 rows: insp_layout_vp.rows,
                             };
-                            let agent_snapshot = self
-                                .agent_observations
-                                .snapshot(
-                                    std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_millis() as u64)
-                                        .unwrap_or(0),
-                                );
+                            let agent_snapshot = self.agent_observations.snapshot(
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis() as u64)
+                                    .unwrap_or(0),
+                            );
                             Self::draw_inspector(
                                 r,
                                 insp_vp,
