@@ -251,6 +251,8 @@ struct App {
     inspector_expanded_id: Option<i64>,
     inspector_cache: panels::InspectorCache,
     agent_observations: zet_agent_observe::AgentObservationStore,
+    agent_inspector_sel: Option<usize>,
+    agent_inspector_sel_id: Option<u64>,
     #[cfg(test)]
     pub chrome_query_count: usize,
     #[cfg(test)]
@@ -1209,6 +1211,8 @@ impl App {
 
     fn clear_inspector_selection(&mut self) {
         self.inspector_sel = None;
+        self.agent_inspector_sel = None;
+        self.agent_inspector_sel_id = None;
         self.inspector_sel_id = None;
         self.inspector_output = None;
         self.inspector_output_id = None;
@@ -1282,10 +1286,51 @@ impl App {
         self.needs_draw = true;
     }
 
+    fn move_agent_inspector_selection(&mut self, delta: isize) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let count = self.agent_observations.snapshot(now_ms).observations.len();
+        let rows = self
+            .frame_layout()
+            .inspector
+            .map(|vp| vp.rows)
+            .unwrap_or(0);
+        let visible = count.min(rows.saturating_sub(5) as usize);
+        if visible == 0 {
+            self.agent_inspector_sel = None;
+            self.agent_inspector_sel_id = None;
+            self.needs_draw = true;
+            return;
+        }
+        let current = self.agent_inspector_sel.filter(|p| *p < visible);
+        let next = match current {
+            Some(pos) => (pos as isize + delta).rem_euclid(visible as isize) as usize,
+            None if delta < 0 => visible - 1,
+            None => 0,
+        };
+        let id = self
+            .agent_observations
+            .snapshot(now_ms)
+            .observations
+            .get(next)
+            .map(|o| o.id().0);
+        self.agent_inspector_sel = Some(next);
+        self.agent_inspector_sel_id = id;
+        self.needs_draw = true;
+    }
+
     /// Enter inspects the selected Timeline event by expanding or collapsing
     /// its bounded output preview. With no selection, Enter selects the first
     /// visible observed event.
     fn inspector_enter(&mut self) {
+        if self.inspector_view == panels::InspectorView::Agents {
+            if self.agent_inspector_sel_id.is_none() {
+                self.move_agent_inspector_selection(1);
+            }
+            return;
+        }
         if self.inspector_view != panels::InspectorView::Timeline {
             return;
         }
@@ -1744,6 +1789,40 @@ impl App {
                         self.set_inspector_view(panels::InspectorView::Agents);
                         return;
                     }
+                }
+                if self.inspector_view == panels::InspectorView::Agents {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    let count = self.agent_observations.snapshot(now_ms).observations.len();
+                    let visible = count.min(insp_vp.rows.saturating_sub(5) as usize);
+                    if row >= 5 {
+                        let index = (row as usize) - 5;
+                        if index < visible {
+                            self.agent_inspector_sel = Some(index);
+                            self.agent_inspector_sel_id = self
+                                .agent_observations
+                                .snapshot(now_ms)
+                                .observations
+                                .get(index)
+                                .map(|o| o.id().0);
+                        } else {
+                            self.agent_inspector_sel = None;
+                            self.agent_inspector_sel_id = None;
+                        }
+                    } else {
+                        self.agent_inspector_sel = None;
+                        self.agent_inspector_sel_id = None;
+                    }
+                    self.inspector_sel = None;
+                    self.inspector_sel_id = None;
+                    self.inspector_output = None;
+                    self.inspector_output_id = None;
+                    self.inspector_output_truncated = false;
+                    self.inspector_expanded_id = None;
+                    self.needs_draw = true;
+                    return;
                 }
                 let cmd_count = self
                     .inspector_displayed()
@@ -2453,14 +2532,13 @@ impl App {
         hovered_row: Option<u32>,
         focused: bool,
     ) {
-        use zet_gpu::renderer::{PANEL_BG, PANEL_MUTED, PANEL_RED, PANEL_SECONDARY, PANEL_TEXT};
+        use zet_gpu::renderer::{PANEL_CYAN, PANEL_MUTED, PANEL_RED, PANEL_SECONDARY, PANEL_TEXT};
         if vp.rows == 0 {
             return;
         }
         let (cw, ch) = r.cell_px();
         let origin_x = vp.x.saturating_mul(cw);
         let origin_y = vp.y.saturating_mul(ch);
-        r.draw_fill(vp, PANEL_BG);
         Self::draw_ui_row(r, vp, 2, 2, "AGENT ACTIVITY", UI_HEADER, PANEL_TEXT);
         Self::draw_ui_row(
             r,
@@ -2505,7 +2583,12 @@ impl App {
                 .take(vp.rows.saturating_sub(6) as usize)
             {
                 let label = format!("{}  LAUNCH CANDIDATE", obs.agent().as_str().to_uppercase());
-                Self::draw_ui_row(r, vp, row, 2, &label, UI_BODY, PANEL_TEXT);
+                let ink = if selected_id == Some(obs.id().0 as i64) {
+                    PANEL_CYAN
+                } else {
+                    PANEL_TEXT
+                };
+                Self::draw_ui_row(r, vp, row, 2, &label, UI_BODY, ink);
                 row += 1;
                 if row >= vp.rows.saturating_sub(2) {
                     break;
@@ -4902,7 +4985,11 @@ impl ApplicationHandler for App {
                                 insp_vp,
                                 inspector_snapshot,
                                 Some(agent_snapshot),
-                                self.inspector_sel_id,
+                                if self.inspector_view == panels::InspectorView::Agents {
+                                    self.agent_inspector_sel_id.map(|x| x as i64)
+                                } else {
+                                    self.inspector_sel_id
+                                },
                                 inspector_output,
                                 self.inspector_output_truncated,
                                 inspector_hover_row,
@@ -5080,6 +5167,8 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         inspector_expanded_id: None,
         inspector_cache: panels::InspectorCache::new(),
         agent_observations: zet_agent_observe::AgentObservationStore::new(256),
+        agent_inspector_sel: None,
+        agent_inspector_sel_id: None,
         #[cfg(test)]
         chrome_query_count: 0,
         #[cfg(test)]
@@ -5280,6 +5369,8 @@ mod layout_fit_tests {
             inspector_expanded_id: None,
             inspector_cache: super::panels::InspectorCache::new(),
             agent_observations: zet_agent_observe::AgentObservationStore::new(256),
+        agent_inspector_sel: None,
+        agent_inspector_sel_id: None,
             #[cfg(test)]
             chrome_query_count: 0,
             #[cfg(test)]
