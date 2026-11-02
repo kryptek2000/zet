@@ -259,6 +259,7 @@ struct App {
     agent_detail_offset: usize,
     agent_evidence_open: bool,
     agent_evidence: Option<panels::AgentRecordedEvidence>,
+    agent_evidence_offset: usize,
     #[cfg(test)]
     pub chrome_query_count: usize,
     #[cfg(test)]
@@ -1225,6 +1226,7 @@ impl App {
         self.agent_detail_offset = 0;
         self.agent_evidence_open = false;
         self.agent_evidence = None;
+        self.agent_evidence_offset = 0;
         self.inspector_sel_id = None;
         self.inspector_output = None;
         self.inspector_output_id = None;
@@ -1235,6 +1237,9 @@ impl App {
     /// Switch views and drop every piece of stale selection/output state
     /// before the new layout is painted.
     fn set_inspector_view(&mut self, view: panels::InspectorView) {
+        self.agent_evidence_open = false;
+        self.agent_evidence = None;
+        self.agent_evidence_offset = 0;
         self.inspector_view = view;
         self.clear_inspector_selection();
         self.agent_list_offset = 0;
@@ -1352,6 +1357,7 @@ impl App {
     fn open_agent_recorded_evidence(&mut self) {
         self.agent_evidence_open = true;
         self.agent_evidence = None;
+        self.agent_evidence_offset = 0;
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -1464,7 +1470,9 @@ impl App {
             if self.agent_inspector_sel_id.is_none() {
                 self.move_agent_inspector_selection(1);
             }
-            self.open_agent_recorded_evidence();
+            // Enter toggles the accepted observation detail card.
+            self.agent_detail_expanded = !self.agent_detail_expanded;
+            self.agent_detail_offset = 0;
             self.needs_draw = true;
             return;
         }
@@ -1928,6 +1936,11 @@ impl App {
                     }
                 }
                 if self.inspector_view == panels::InspectorView::Agents {
+                    if self.agent_evidence_open {
+                        self.focus = Focus::Inspector;
+                        self.needs_draw = true;
+                        return;
+                    }
                     let now_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
@@ -2676,6 +2689,7 @@ impl App {
         detail_offset: usize,
         evidence_open: bool,
         evidence: Option<&panels::AgentRecordedEvidence>,
+        evidence_offset: usize,
     ) {
         use zet_gpu::renderer::{PANEL_CYAN, PANEL_MUTED, PANEL_RED, PANEL_SECONDARY, PANEL_TEXT};
         if vp.rows == 0 {
@@ -2695,6 +2709,15 @@ impl App {
         Self::draw_ui_row(r, vp, 1, 8, "SESSION", UI_META, PANEL_MUTED);
         Self::draw_ui_row(r, vp, 1, 16, "TIMELINE", UI_META, PANEL_MUTED);
         Self::draw_ui_row(r, vp, 1, 25, "AGENTS", UI_META, PANEL_CYAN);
+        Self::draw_ui_row(
+            r,
+            vp,
+            1,
+            34,
+            "ENTER DETAILS  E EVIDENCE  ESC CLOSE",
+            UI_META,
+            PANEL_MUTED,
+        );
         Self::draw_ui_row(
             r,
             vp,
@@ -2791,16 +2814,50 @@ impl App {
                         UI_META,
                         PANEL_SECONDARY,
                     );
+                    let mut row = 9u32;
                     if let Some(out) = &ev.output {
-                        Self::draw_ui_row(
-                            r,
-                            vp,
-                            9,
-                            2,
-                            &panels::truncate_to_cells(out, vp.cols.saturating_sub(4) as usize),
-                            UI_BODY,
-                            PANEL_MUTED,
-                        );
+                        let lines: Vec<&str> = out.lines().collect();
+                        let total = lines.len();
+                        let max_rows = vp.rows.saturating_sub(10) as usize;
+                        let start = if total == 0 { 0 } else { evidence_offset.min(total - 1) };
+                        for line in lines.iter().skip(start).take(max_rows) {
+                            if row >= vp.rows.saturating_sub(2) {
+                                break;
+                            }
+                            Self::draw_ui_row(
+                                r,
+                                vp,
+                                row,
+                                2,
+                                &panels::truncate_to_cells(
+                                    line,
+                                    vp.cols.saturating_sub(4) as usize,
+                                ),
+                                UI_BODY,
+                                PANEL_MUTED,
+                            );
+                            row += 1;
+                        }
+                        if total > start + max_rows && row < vp.rows.saturating_sub(2) {
+                            Self::draw_ui_row(
+                                r,
+                                vp,
+                                row,
+                                2,
+                                &format!("+{} MORE", total - (start + max_rows)),
+                                UI_META,
+                                PANEL_MUTED,
+                            );
+                            row += 1;
+                        }
+                    } else {
+                        if row < vp.rows.saturating_sub(2) {
+                            Self::draw_ui_row(r, vp, row, 2, "NO OUTPUT", UI_META, PANEL_MUTED);
+                            row += 1;
+                        }
+                    }
+                    if ev.output_truncated && row < vp.rows.saturating_sub(2) {
+                        Self::draw_ui_row(r, vp, row, 2, "OUTPUT TRUNCATED", UI_META, PANEL_RED);
                     }
                 } else if let Some(reason) = &ev.unavailable_reason {
                     Self::draw_ui_row(
@@ -3396,6 +3453,7 @@ impl App {
         agent_detail_offset: usize,
         agent_evidence_open: bool,
         agent_evidence: Option<&panels::AgentRecordedEvidence>,
+        agent_evidence_offset: usize,
     ) {
         use zet_gpu::renderer::{
             PANEL_AMBER, PANEL_BG, PANEL_BORDER, PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_INSET,
@@ -3536,6 +3594,7 @@ impl App {
                 agent_detail_offset,
                 agent_evidence_open,
                 agent_evidence,
+                agent_evidence_offset,
             );
             return;
         }
@@ -3609,6 +3668,7 @@ impl App {
                 agent_detail_offset,
                 agent_evidence_open,
                 agent_evidence,
+                agent_evidence_offset,
             );
             return;
         }
@@ -4863,12 +4923,26 @@ impl App {
                     };
                     self.set_inspector_view(view);
                 }
+                Key::Character(ch)
+                    if self.focus == Focus::Inspector && (ch == "e" || ch == "E") =>
+                {
+                    if self.inspector_view == panels::InspectorView::Agents {
+                        self.open_agent_recorded_evidence();
+                        self.needs_draw = true;
+                    }
+                }
                 Key::Named(NamedKey::ArrowUp) => {
                     if self.focus == Focus::Rail && !self.tabs.is_empty() {
                         self.rail_sel = self.rail_sel.saturating_sub(1);
                     }
                     if self.focus == Focus::Inspector {
                         if self.inspector_view == panels::InspectorView::Agents
+                            && self.agent_evidence_open
+                        {
+                            self.agent_evidence_offset =
+                                self.agent_evidence_offset.saturating_sub(1);
+                            self.needs_draw = true;
+                        } else if self.inspector_view == panels::InspectorView::Agents
                             && self.agent_detail_expanded
                         {
                             self.agent_detail_offset = self.agent_detail_offset.saturating_sub(1);
@@ -4886,6 +4960,12 @@ impl App {
                     }
                     if self.focus == Focus::Inspector {
                         if self.inspector_view == panels::InspectorView::Agents
+                            && self.agent_evidence_open
+                        {
+                            self.agent_evidence_offset =
+                                self.agent_evidence_offset.saturating_add(1);
+                            self.needs_draw = true;
+                        } else if self.inspector_view == panels::InspectorView::Agents
                             && self.agent_detail_expanded
                         {
                             self.agent_detail_offset = self.agent_detail_offset.saturating_add(1);
@@ -5491,6 +5571,7 @@ impl ApplicationHandler for App {
                                 self.agent_detail_offset,
                                 self.agent_evidence_open,
                                 self.agent_evidence.as_ref(),
+                                self.agent_evidence_offset,
                             );
                         }
                     }
@@ -5670,6 +5751,7 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         agent_detail_offset: 0,
         agent_evidence_open: false,
         agent_evidence: None,
+        agent_evidence_offset: 0,
         #[cfg(test)]
         chrome_query_count: 0,
         #[cfg(test)]
@@ -5878,6 +5960,7 @@ mod layout_fit_tests {
             agent_detail_offset: 0,
             agent_evidence_open: false,
             agent_evidence: None,
+            agent_evidence_offset: 0,
             #[cfg(test)]
             chrome_query_count: 0,
             #[cfg(test)]

@@ -2225,6 +2225,9 @@ pub fn agent_detail_lines(obs: &zet_agent_observe::AgentObservation) -> Vec<Stri
     if let Some(cmd) = obs.command() {
         lines.push(format!("RECORDED COMMAND REF: {}", cmd.0));
     }
+    if let Some(name) = obs.command_name() {
+        lines.push(format!("RETAINED COMMAND NAME: {}", name));
+    }
     // Unknown unless proven.
     lines.push("UNVERIFIED:".to_string());
     lines.push("RUNNING: UNKNOWN".to_string());
