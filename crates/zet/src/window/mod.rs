@@ -1462,10 +1462,42 @@ impl App {
         }
     }
 
+    fn agent_evidence_max_offset(&self) -> usize {
+        let viewport = self.frame_layout().inspector;
+        let rows = viewport.map(|vp| vp.rows).unwrap_or(0);
+        let cols = viewport.map(|vp| vp.cols).unwrap_or(0);
+        panels::agent_evidence_layout(
+            rows,
+            cols,
+            self.agent_evidence.as_ref(),
+            self.agent_evidence_offset,
+        )
+        .max_offset
+    }
+
+    fn scroll_agent_evidence(&mut self, delta: isize) {
+        let max = self.agent_evidence_max_offset();
+        // Clamp a stale offset left by a resize before applying either
+        // direction, so one Up press recovers instead of requiring many.
+        let current = self.agent_evidence_offset.min(max);
+        self.agent_evidence_offset = if delta < 0 {
+            current.saturating_sub((-delta) as usize)
+        } else {
+            current.saturating_add(delta as usize).min(max)
+        };
+        self.needs_draw = true;
+    }
+
     /// Enter inspects the selected Timeline event by expanding or collapsing
     /// its bounded output preview. With no selection, Enter selects the first
     /// visible observed event.
     fn inspector_enter(&mut self) {
+        // While the recorded-evidence surface owns the panel, Enter must not
+        // mutate the hidden AGENTS detail state.
+        if self.agent_evidence_open {
+            self.needs_draw = true;
+            return;
+        }
         if self.inspector_view == panels::InspectorView::Agents {
             if self.agent_inspector_sel_id.is_none() {
                 self.move_agent_inspector_selection(1);
@@ -2712,30 +2744,27 @@ impl App {
         Self::draw_ui_row(
             r,
             vp,
-            1,
-            34,
-            "ENTER DETAILS  E EVIDENCE  ESC CLOSE",
-            UI_META,
-            PANEL_MUTED,
-        );
-        Self::draw_ui_row(
-            r,
-            vp,
             2,
             2,
             "CANDIDATE EVIDENCE, NOT VERIFIED STATE",
             UI_META,
             PANEL_MUTED,
         );
-        Self::draw_ui_row(
-            r,
-            vp,
-            3,
-            2,
-            "RECORDED COMMAND CANDIDATES",
-            UI_META,
-            PANEL_MUTED,
-        );
+        let (hint_col, hint) = panels::agent_shortcut_hint(vp.cols);
+        if hint_col == 2 {
+            Self::draw_ui_row(r, vp, 3, hint_col, hint, UI_META, PANEL_MUTED);
+        } else {
+            Self::draw_ui_row(
+                r,
+                vp,
+                3,
+                2,
+                "RECORDED COMMAND CANDIDATES",
+                UI_META,
+                PANEL_MUTED,
+            );
+            Self::draw_ui_row(r, vp, 3, hint_col, hint, UI_META, PANEL_MUTED);
+        }
 
         let snap = match agent_snapshot {
             Some(s) => s,
@@ -2755,135 +2784,28 @@ impl App {
         };
 
         if evidence_open {
-            Self::draw_ui_row(
-                r,
-                vp,
-                4,
-                2,
-                "RECORDED COMMAND EVIDENCE",
-                UI_HEADER,
-                PANEL_TEXT,
-            );
-            if let Some(ev) = evidence {
-                if ev.available {
-                    Self::draw_ui_row(
-                        r,
-                        vp,
-                        5,
-                        2,
-                        &panels::truncate_to_cells(
-                            &format!("COMMAND: {}", ev.command),
-                            vp.cols.saturating_sub(4) as usize,
-                        ),
-                        UI_BODY,
-                        PANEL_TEXT,
-                    );
-                    Self::draw_ui_row(
-                        r,
-                        vp,
-                        6,
-                        2,
-                        &panels::truncate_to_cells(
-                            &format!("SESSION: {}", ev.session),
-                            vp.cols.saturating_sub(4) as usize,
-                        ),
-                        UI_META,
-                        PANEL_SECONDARY,
-                    );
-                    Self::draw_ui_row(
-                        r,
-                        vp,
-                        7,
-                        2,
-                        &panels::truncate_to_cells(
-                            &format!("EXIT: {}", ev.exit),
-                            vp.cols.saturating_sub(4) as usize,
-                        ),
-                        UI_META,
-                        PANEL_SECONDARY,
-                    );
-                    Self::draw_ui_row(
-                        r,
-                        vp,
-                        8,
-                        2,
-                        &panels::truncate_to_cells(
-                            &format!("DURATION: {}", ev.duration),
-                            vp.cols.saturating_sub(4) as usize,
-                        ),
-                        UI_META,
-                        PANEL_SECONDARY,
-                    );
-                    let mut row = 9u32;
-                    if let Some(out) = &ev.output {
-                        let lines: Vec<&str> = out.lines().collect();
-                        let total = lines.len();
-                        let max_rows = vp.rows.saturating_sub(10) as usize;
-                        let start = if total == 0 {
-                            0
-                        } else {
-                            evidence_offset.min(total - 1)
-                        };
-                        for line in lines.iter().skip(start).take(max_rows) {
-                            if row >= vp.rows.saturating_sub(2) {
-                                break;
-                            }
-                            Self::draw_ui_row(
-                                r,
-                                vp,
-                                row,
-                                2,
-                                &panels::truncate_to_cells(
-                                    line,
-                                    vp.cols.saturating_sub(4) as usize,
-                                ),
-                                UI_BODY,
-                                PANEL_MUTED,
-                            );
-                            row += 1;
-                        }
-                        if total > start + max_rows && row < vp.rows.saturating_sub(2) {
-                            Self::draw_ui_row(
-                                r,
-                                vp,
-                                row,
-                                2,
-                                &format!("+{} MORE", total - (start + max_rows)),
-                                UI_META,
-                                PANEL_MUTED,
-                            );
-                            row += 1;
-                        }
-                    } else {
-                        if row < vp.rows.saturating_sub(2) {
-                            Self::draw_ui_row(r, vp, row, 2, "NO OUTPUT", UI_META, PANEL_MUTED);
-                            row += 1;
-                        }
-                    }
-                    if ev.output_truncated && row < vp.rows.saturating_sub(2) {
-                        Self::draw_ui_row(r, vp, row, 2, "OUTPUT TRUNCATED", UI_META, PANEL_RED);
-                    }
-                } else if let Some(reason) = &ev.unavailable_reason {
-                    Self::draw_ui_row(
-                        r,
-                        vp,
-                        5,
-                        2,
-                        &panels::truncate_to_cells(reason, vp.cols.saturating_sub(4) as usize),
-                        UI_BODY,
-                        PANEL_MUTED,
-                    );
+            let evidence_layout =
+                panels::agent_evidence_layout(vp.rows, vp.cols, evidence, evidence_offset);
+            for evidence_row in &evidence_layout.rows {
+                if evidence_row.row >= vp.rows {
+                    continue;
                 }
+                let (font, ink) = match evidence_row.kind {
+                    panels::AgentEvidenceRowKind::Title => (UI_HEADER, PANEL_TEXT),
+                    panels::AgentEvidenceRowKind::Command => (UI_BODY, PANEL_TEXT),
+                    panels::AgentEvidenceRowKind::Session
+                    | panels::AgentEvidenceRowKind::Exit
+                    | panels::AgentEvidenceRowKind::Duration => (UI_META, PANEL_SECONDARY),
+                    panels::AgentEvidenceRowKind::Output => (UI_BODY, PANEL_MUTED),
+                    panels::AgentEvidenceRowKind::EmptyOutput
+                    | panels::AgentEvidenceRowKind::Unavailable => (UI_META, PANEL_MUTED),
+                    panels::AgentEvidenceRowKind::More => (UI_META, PANEL_MUTED),
+                    panels::AgentEvidenceRowKind::Truncated => (UI_META, PANEL_RED),
+                    panels::AgentEvidenceRowKind::Footer => (UI_META, PANEL_MUTED),
+                    panels::AgentEvidenceRowKind::Notice => (UI_META, PANEL_SECONDARY),
+                };
+                Self::draw_ui_row(r, vp, evidence_row.row, 2, &evidence_row.text, font, ink);
             }
-            Self::draw_ui_row(
-                r,
-                vp,
-                vp.rows.saturating_sub(2),
-                2,
-                "ESCAPE RETURN",
-                UI_META,
-                PANEL_MUTED,
-            );
             let _ = (
                 selected_id,
                 hovered_row,
@@ -4930,7 +4852,9 @@ impl App {
                 Key::Character(ch)
                     if self.focus == Focus::Inspector && (ch == "e" || ch == "E") =>
                 {
-                    if self.inspector_view == panels::InspectorView::Agents {
+                    if self.inspector_view == panels::InspectorView::Agents
+                        && !self.agent_evidence_open
+                    {
                         self.open_agent_recorded_evidence();
                         self.needs_draw = true;
                     }
@@ -4943,9 +4867,7 @@ impl App {
                         if self.inspector_view == panels::InspectorView::Agents
                             && self.agent_evidence_open
                         {
-                            self.agent_evidence_offset =
-                                self.agent_evidence_offset.saturating_sub(1);
-                            self.needs_draw = true;
+                            self.scroll_agent_evidence(-1);
                         } else if self.inspector_view == panels::InspectorView::Agents
                             && self.agent_detail_expanded
                         {
@@ -4966,9 +4888,7 @@ impl App {
                         if self.inspector_view == panels::InspectorView::Agents
                             && self.agent_evidence_open
                         {
-                            self.agent_evidence_offset =
-                                self.agent_evidence_offset.saturating_add(1);
-                            self.needs_draw = true;
+                            self.scroll_agent_evidence(1);
                         } else if self.inspector_view == panels::InspectorView::Agents
                             && self.agent_detail_expanded
                         {
@@ -8225,4 +8145,1090 @@ fn aperture_header_descriptor_uses_real_glyph_metrics() {
     let (descriptor_x, descriptor_max_width, _) = App::aperture_header_layout(100, 22, 24, 102);
     assert_eq!(descriptor_max_width, 0);
     assert!(descriptor_x > 0);
+}
+
+#[cfg(test)]
+mod p4a3_r3_acceptance {
+    use super::panels::InspectorView;
+    use super::{panels, App, Focus, Tab};
+    use winit::keyboard::{Key, NamedKey};
+    use zet_blocks::{Block, Recorder, Store};
+
+    fn now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    fn make_tab() -> Tab {
+        Tab {
+            session: None,
+            term: zet_term::Terminal::new(80, 24),
+            shell_state: zet_pty::shell::ShellState::new(),
+            session_id: 0,
+            rx: None,
+            dead: false,
+            finalized: false,
+            erase: 127,
+            recorder: None,
+            ghost: zet_suggest::Ghost::new(Store::open_in_memory().unwrap()),
+            selection: None,
+            selecting: false,
+            pending_fix: None,
+            nl_rx: None,
+            nl_wake: false,
+            goal_mode: false,
+            agent_busy: false,
+            agent_rx: None,
+            plan_rx: None,
+            pending_plan: None,
+            exec_req_rx: None,
+            exec_res_tx: None,
+            exec_pending: None,
+            last_journal: Vec::new(),
+            undo_rx: None,
+            was_alt: false,
+            search: super::SearchState {
+                on: false,
+                query: String::new(),
+                matches: Vec::new(),
+                current: 0,
+            },
+        }
+    }
+
+    fn make_app(cols: usize, rows: usize) -> App {
+        App {
+            window: None,
+            renderer: None,
+            tabs: vec![make_tab()],
+            active: 0,
+            shell_name: "bash".to_string(),
+            prog: "bash".to_string(),
+            hook: None,
+            wake: None,
+            mods: winit::keyboard::ModifiersState::empty(),
+            cols,
+            rows,
+            layout: crate::window::layout::LayoutMode::MissionControl.layout(),
+            focus: Focus::Inspector,
+            rail_sel: 0,
+            chrome: panels::ChromeCache::new(),
+            inspector_sel: None,
+            inspector_sel_id: None,
+            inspector_view: InspectorView::Agents,
+            inspector_output: None,
+            inspector_output_id: None,
+            inspector_output_truncated: false,
+            inspector_expanded_id: None,
+            inspector_cache: panels::InspectorCache::new(),
+            agent_observations: zet_agent_observe::AgentObservationStore::new(256),
+            agent_inspector_sel: None,
+            agent_inspector_sel_id: None,
+            agent_inspector_key: None,
+            agent_list_offset: 0,
+            agent_detail_expanded: false,
+            agent_detail_offset: 0,
+            agent_evidence_open: false,
+            agent_evidence: None,
+            agent_evidence_offset: 0,
+            chrome_query_count: 0,
+            chrome_build_count: 0,
+            env_spec: None,
+            startup_spec: None,
+            known: zet_pty::KnownCommands::from_env(),
+            mouse_px: None,
+            last_frame: std::time::Instant::now(),
+            needs_draw: true,
+            perf_t0: None,
+            perf_input: None,
+            perf_frames: 0,
+            cmd_t0: None,
+            perf_blocks: 0,
+            pending_goal: None,
+        }
+    }
+
+    fn append_block(
+        store: &Store,
+        session: &str,
+        command: &str,
+        output: &str,
+        exit: i32,
+        ms: u64,
+    ) -> i64 {
+        store
+            .append(&Block {
+                id: 0,
+                session: session.to_string(),
+                command: command.to_string(),
+                output: output.to_string(),
+                exit_code: exit,
+                cwd: "/tmp/work".to_string(),
+                git_branch: String::new(),
+                duration_ms: ms,
+            })
+            .unwrap()
+    }
+
+    fn observe(app: &mut App, store: &Store, session: &str, block_id: i64) {
+        app.agent_observations
+            .observe_recorded_command(
+                store,
+                zet_agent_observe::SessionRef::new(session).unwrap(),
+                block_id,
+                now(),
+            )
+            .expect("observation recorded");
+    }
+
+    fn select_index(app: &mut App, index: usize) {
+        let n = app.agent_observations.len();
+        assert!(index < n, "index {index} out of {n} observations");
+        let snap = app.agent_observations.snapshot(now());
+        let obs = &snap.observations[index];
+        app.agent_inspector_sel = Some(index);
+        app.agent_inspector_sel_id = Some(obs.id().0);
+        app.agent_inspector_key = Some(obs.key());
+    }
+
+    fn press(app: &mut App, key: NamedKey) {
+        app.handle_key_parts(
+            Key::Named(key),
+            None,
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+    }
+
+    fn press_character(app: &mut App, ch: &str) {
+        app.handle_key_parts(
+            Key::Character(ch.into()),
+            Some(ch),
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+    }
+
+    fn press_escape(app: &mut App) {
+        press(app, NamedKey::Escape);
+    }
+    fn press_enter(app: &mut App) {
+        press(app, NamedKey::Enter);
+    }
+    fn press_arrow_down(app: &mut App) {
+        press(app, NamedKey::ArrowDown);
+    }
+    fn press_arrow_up(app: &mut App) {
+        press(app, NamedKey::ArrowUp);
+    }
+    fn press_e(app: &mut App) {
+        press_character(app, "e");
+    }
+    fn app_with_n_recorded(n: usize, session: &str) -> App {
+        let store = Store::open_in_memory().unwrap();
+        let mut app = make_app(120, 40);
+        for i in 0..n {
+            let id = append_block(
+                &store,
+                session,
+                &format!("opencode cmd{i:0>2} out-marker-{i}"),
+                &format!("output of {i}"),
+                (i % 5) as i32,
+                (i as u64 + 1) * 10,
+            );
+            observe(&mut app, &store, session, id);
+        }
+        app.tabs[0].recorder = Some(Recorder::new(store, session));
+        app
+    }
+
+    fn evidence(output: Option<&str>, output_truncated: bool) -> panels::AgentRecordedEvidence {
+        panels::AgentRecordedEvidence {
+            command: "opencode recorded command".to_string(),
+            session: "session-a".to_string(),
+            exit: "0".to_string(),
+            duration: "12ms".to_string(),
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            output: output.map(str::to_string),
+            output_truncated,
+            available: true,
+            unavailable_reason: None,
+        }
+    }
+
+    fn evidence_layout(
+        vp_rows: u32,
+        output: Option<&str>,
+        output_truncated: bool,
+        offset: usize,
+    ) -> panels::AgentEvidenceLayout {
+        let ev = evidence(output, output_truncated);
+        panels::agent_evidence_layout(vp_rows, 32, Some(&ev), offset)
+    }
+
+    // ---------- R2-B1: overlay interaction isolation ----------
+
+    #[test]
+    fn r2_b1_click_inside_evidence_preserves_selection() {
+        let mut app = app_with_n_recorded(8, "session-a");
+        select_index(&mut app, 7);
+        let sel = app.agent_inspector_sel;
+        let sel_id = app.agent_inspector_sel_id;
+        let key = app.agent_inspector_key.clone();
+        press_e(&mut app);
+        assert!(app.agent_evidence_open);
+
+        let vp = app.frame_layout().inspector.expect("inspector viewport");
+        let (cw, ch) = (10u32, 20u32);
+        let x = (vp.x as f64 + 0.5) * cw as f64;
+        let y = (vp.y as f64 + 10.5) * ch as f64; // inside the evidence text area
+        app.handle_mouse_click(x, y, cw, ch);
+
+        assert!(app.agent_evidence_open, "overlay must stay open");
+        assert_eq!(app.agent_inspector_sel, sel, "selection must not change");
+        assert_eq!(app.agent_inspector_sel_id, sel_id);
+        assert_eq!(app.agent_inspector_key, key);
+        assert!(app.agent_evidence.is_some(), "evidence must stay displayed");
+    }
+
+    #[test]
+    fn r2_b1_blind_click_empty_zone_preserves_selection() {
+        let mut app = app_with_n_recorded(3, "session-a");
+        select_index(&mut app, 2);
+        let sel_id = app.agent_inspector_sel_id;
+        press_e(&mut app);
+
+        let vp = app.frame_layout().inspector.expect("inspector viewport");
+        let (cw, ch) = (10u32, 20u32);
+        let x = (vp.x as f64 + 0.5) * cw as f64;
+        let y = (vp.y as f64 + (vp.rows as f64 - 4.0)) * ch as f64;
+        app.handle_mouse_click(x, y, cw, ch);
+
+        assert_eq!(app.agent_inspector_sel_id, sel_id, "selection must survive");
+        assert!(app.agent_evidence_open && app.agent_evidence.is_some());
+    }
+
+    #[test]
+    fn r2_b1_arrows_scroll_output_only_not_selection() {
+        let store = Store::open_in_memory().unwrap();
+        let mut app = make_app(120, 40);
+        let long: String = (0..40).map(|i| format!("row {i}\n")).collect();
+        let id = append_block(&store, "session-a", "opencode long", &long, 0, 5);
+        observe(&mut app, &store, "session-a", id);
+        app.tabs[0].recorder = Some(Recorder::new(store, "session-a"));
+        select_index(&mut app, 0);
+        let sel = app.agent_inspector_sel;
+        let sel_id = app.agent_inspector_sel_id;
+        press_e(&mut app);
+        for _ in 0..3 {
+            press_arrow_down(&mut app);
+        }
+        assert_eq!(app.agent_evidence_offset, 3, "output scroll moves");
+        assert_eq!(
+            app.agent_inspector_sel, sel,
+            "selection untouched by ArrowDown under overlay"
+        );
+        assert_eq!(app.agent_inspector_sel_id, sel_id);
+        for _ in 0..5 {
+            press_arrow_up(&mut app);
+        }
+        assert_eq!(app.agent_evidence_offset, 0, "saturates at 0");
+        assert_eq!(app.agent_inspector_sel, sel);
+    }
+
+    #[test]
+    fn r2_b1_escape_restores_observation_and_list_offset() {
+        let mut app = app_with_n_recorded(8, "session-a");
+        select_index(&mut app, 7);
+        let sel = app.agent_inspector_sel;
+        let sel_id = app.agent_inspector_sel_id;
+        let key = app.agent_inspector_key.clone();
+        let list_offset = app.agent_list_offset;
+        press_e(&mut app);
+        assert!(app.agent_evidence_open);
+        press_arrow_down(&mut app);
+        press_arrow_down(&mut app);
+        press_escape(&mut app);
+
+        assert!(!app.agent_evidence_open);
+        assert!(app.agent_evidence.is_none());
+        assert_eq!(app.agent_inspector_sel, sel);
+        assert_eq!(app.agent_inspector_sel_id, sel_id);
+        assert_eq!(app.agent_inspector_key, key);
+        assert_eq!(app.agent_list_offset, list_offset, "list offset restored");
+        assert_eq!(app.focus, Focus::Inspector);
+    }
+
+    /// DESIRED (brief R2-B1): while evidence is open, Enter must not silently
+    /// flip the hidden observation-detail state. Production source
+    /// (mod.rs:1466-1475) toggles agent_detail_expanded unconditionally.
+    #[test]
+    fn r2_b1_enter_must_not_toggle_hidden_details_under_overlay() {
+        let mut app = app_with_n_recorded(8, "session-a");
+        select_index(&mut app, 7);
+        press_e(&mut app);
+        assert!(app.agent_evidence_open);
+        assert!(!app.agent_detail_expanded, "precondition: detail closed");
+
+        press_enter(&mut app);
+        assert!(
+            app.agent_evidence_open,
+            "Enter must not close the evidence surface"
+        );
+        assert!(
+            !app.agent_detail_expanded,
+            "Enter while evidence is open must not mutate the hidden AGENTS detail state"
+        );
+        press_escape(&mut app);
+        assert!(
+            !app.agent_detail_expanded,
+            "Escape must not reveal an unintended detail expansion"
+        );
+    }
+
+    #[test]
+    fn r2_b1_e_key_preserves_original_evidence_under_overlay() {
+        let mut app = app_with_n_recorded(8, "session-a");
+        select_index(&mut app, 6);
+        press_e(&mut app);
+        let first = app.agent_evidence.clone().unwrap();
+        for _ in 0..4 {
+            press_arrow_down(&mut app);
+        }
+        let offset = app.agent_evidence_offset;
+        press_e(&mut app);
+        assert_eq!(
+            app.agent_evidence.as_ref(),
+            Some(&first),
+            "E must not replace the original evidence"
+        );
+        assert_eq!(
+            app.agent_evidence_offset, offset,
+            "E must not reset an active evidence viewport"
+        );
+        press_escape(&mut app);
+        assert_eq!(app.agent_inspector_sel, Some(6));
+    }
+
+    #[test]
+    fn r2_b1_view_switch_clicks_clear_evidence_honestly() {
+        let mut app = app_with_n_recorded(8, "session-a");
+        select_index(&mut app, 7);
+        press_e(&mut app);
+        assert!(app.agent_evidence_open);
+
+        let vp = app.frame_layout().inspector.expect("inspector viewport");
+        let (cw, ch) = (10u32, 20u32);
+        let top = vp.y as f64 * ch as f64;
+        // Row 1 (view selector) columns: SESSION 8..16, TIMELINE 16..25, AGENTS 25..33.
+        for (col_range, view_name) in [
+            (12usize, "SESSION"),
+            (20usize, "TIMELINE"),
+            (29usize, "AGENTS"),
+        ] {
+            let x = (vp.x as f64 + col_range as f64) * cw as f64 + 5.0;
+            let y = top + 1.5 * ch as f64;
+            app.handle_mouse_click(x, y, cw, ch);
+            assert!(
+                !app.agent_evidence_open && app.agent_evidence.is_none(),
+                "view switch to {view_name} must clear the overlay"
+            );
+            // return to agents for the next iteration
+            if app.inspector_view != InspectorView::Agents {
+                app.set_inspector_view(InspectorView::Agents);
+            }
+        }
+    }
+
+    #[test]
+    fn r2_b1_keyboard_view_switches_clear_evidence() {
+        let mut app = app_with_n_recorded(8, "session-a");
+        select_index(&mut app, 7);
+        press_e(&mut app);
+        press_character(&mut app, "t"); // Agents -> Timeline
+        assert!(!app.agent_evidence_open);
+        assert_eq!(app.inspector_view, InspectorView::Timeline);
+        press_character(&mut app, "a"); // Timeline -> Agents
+        assert!(!app.agent_evidence_open && app.agent_evidence.is_none());
+        assert_eq!(app.inspector_view, InspectorView::Agents);
+    }
+
+    /// Witness: with the selection cleared (the draw-time key rebind clears it
+    /// after eviction), Enter follows the accepted P4-A2 semantics: auto-select
+    /// then expand details — a visible replacement, not a stale overlay.
+    #[test]
+    fn r2_b1_evicted_selection_enter_expands_details_witness() {
+        let mut app = app_with_n_recorded(4, "session-a");
+        select_index(&mut app, 3);
+        app.agent_inspector_sel = None;
+        app.agent_inspector_sel_id = None;
+        app.agent_inspector_key = None;
+        press_enter(&mut app);
+        assert!(app.agent_detail_expanded, "P4-A2 semantics reached");
+        assert!(
+            app.agent_inspector_sel.is_some(),
+            "a concrete observation is now selected and its truthful details are shown"
+        );
+    }
+
+    // ---------- R2-B2: readable recorded output ----------
+
+    #[test]
+    fn r2_b2_offset_bounded_scroll_is_desired() {
+        let store = Store::open_in_memory().unwrap();
+        let mut app = make_app(120, 40);
+        let long: String = (0..40).map(|i| format!("row {i}\n")).collect();
+        let id = append_block(&store, "session-a", "opencode long output", &long, 0, 5);
+        observe(&mut app, &store, "session-a", id);
+        app.tabs[0].recorder = Some(Recorder::new(store, "session-a"));
+        select_index(&mut app, 0);
+        press_e(&mut app);
+        let vp = app.frame_layout().inspector.expect("inspector viewport");
+        let max = panels::agent_evidence_layout(vp.rows, vp.cols, app.agent_evidence.as_ref(), 0)
+            .max_offset;
+        for _ in 0..60 {
+            press_arrow_down(&mut app);
+        }
+        assert_eq!(
+            app.agent_evidence_offset, max,
+            "ArrowDown must clamp at the last valid window"
+        );
+        let at_bottom = panels::agent_evidence_layout(
+            vp.rows,
+            vp.cols,
+            app.agent_evidence.as_ref(),
+            app.agent_evidence_offset,
+        );
+        assert!(
+            at_bottom.rows.iter().any(|row| row.kind == panels::AgentEvidenceRowKind::Output && row.text == "row 39"),
+            "the final output line must be reachable"
+        );
+        for _ in 0..=max {
+            press_arrow_up(&mut app);
+        }
+        assert_eq!(
+            app.agent_evidence_offset, 0,
+            "bounded reverse navigation reaches the top"
+        );
+    }
+
+    /// DESIRED: the +N MORE indicator must appear whenever output lines were
+    /// dropped from view (brief risk B). The mirror mirrors the production
+    /// arithmetic; the sweep asserts the actual renderer behaviour.
+    #[test]
+    fn r2_b2_plus_more_indicator_must_appear_when_lines_are_dropped() {
+        let mut failures: Vec<String> = Vec::new();
+        for vp_rows in 12u32..=60 {
+            for total in 1usize..=60 {
+                let text: String = (0..total).map(|i| format!("line {i}\n")).collect();
+                let layout = evidence_layout(vp_rows, Some(&text), false, 0);
+                if layout.hidden_output_lines > 0 && !layout.more_visible {
+                    failures.push(format!(
+                        "vp_rows={vp_rows}: {}/{} lines painted, +N MORE not rendered",
+                        layout.visible_output_lines, total
+                    ));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "R3-B1: +N MORE must appear whenever output remains outside the viewport; {} failures, first: {}",
+            failures.len(),
+            failures.first().map(String::as_str).unwrap_or("")
+        );
+    }
+
+    /// DESIRED (brief risk A): OUTPUT TRUNCATED must appear whenever the
+    /// 4096-byte preview cut content off — not only when spare rows remain.
+    #[test]
+    fn r2_b2_truncated_indicator_must_appear_when_preview_cut() {
+        let mut failures: Vec<String> = Vec::new();
+        for vp_rows in 12u32..=60 {
+            for total in 1usize..=60 {
+                let text: String = (0..total)
+                    .map(|i| format!("line {i} of a truncated build log\n"))
+                    .collect();
+                let layout = evidence_layout(vp_rows, Some(&text), true, 0);
+                if !layout.truncated_visible {
+                    failures.push(format!(
+                        "vp_rows={vp_rows}: output fills viewport ({}/{} painted) and OUTPUT TRUNCATED is not rendered",
+                        layout.visible_output_lines, total
+                    ));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "R3-B1: OUTPUT TRUNCATED must remain visible whenever the recorder preview was cut; {} failures, first: {}",
+            failures.len(),
+            failures.first().map(String::as_str).unwrap_or("")
+        );
+    }
+
+    #[test]
+    fn r2_b2_standard_120x24_viewport_hides_both_indicators() {
+        let vp = crate::window::layout::resolve(
+            120,
+            24,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+            3,
+        )
+        .inspector
+        .expect("standard Mission Control Inspector");
+        assert_eq!(vp.rows, 21, "precondition: standard 120x24 Inspector rows");
+        assert_eq!(vp.cols, 32, "precondition: standard Inspector columns");
+        let text: String = (0..40).map(|i| format!("row {i}\n")).collect();
+        let ev = evidence(Some(&text), true);
+        let layout = panels::agent_evidence_layout(vp.rows, vp.cols, Some(&ev), 0);
+        assert!(layout.visible_output_lines < 40);
+        assert!(layout.more_visible, "120x24: +N MORE must be visible");
+        assert!(
+            layout.truncated_visible,
+            "120x24: OUTPUT TRUNCATED must be visible"
+        );
+        assert_eq!(layout.footer_row, Some(19));
+        assert_eq!(
+            layout
+                .row(panels::AgentEvidenceRowKind::Footer)
+                .map(|row| row.row),
+            Some(19)
+        );
+    }
+
+    #[test]
+    fn r2_b2_single_long_line_readable_through_wrapping() {
+        let text = "x".repeat(4096);
+        let wrapped = panels::wrap_output_to_cells(&text, 28);
+        assert!(
+            wrapped.len() > 1,
+            "a long line must wrap rather than silently lose its tail"
+        );
+        assert_eq!(
+            wrapped.concat(),
+            text,
+            "wrapping must preserve every character"
+        );
+        let layout = evidence_layout(40, Some(&text), true, 0);
+        assert!(
+            layout.truncated_visible,
+            "single-line truncated output still shows the indicator"
+        );
+        let bottom = evidence_layout(40, Some(&text), true, layout.max_offset);
+        assert!(
+            bottom
+                .rows
+                .iter()
+                .any(|row| row.kind == panels::AgentEvidenceRowKind::Output
+                    && row.text.ends_with('x')),
+            "the final wrapped line must be reachable by scrolling"
+        );
+    }
+
+    #[test]
+    fn r2_b2_empty_string_output_gets_no_too_short_row() {
+        let layout = evidence_layout(40, Some(""), false, 0);
+        assert!(layout.empty_output_visible);
+        assert_eq!(
+            layout
+                .row(panels::AgentEvidenceRowKind::EmptyOutput)
+                .map(|row| row.text.as_str()),
+            Some("EMPTY OUTPUT")
+        );
+        assert!(
+            !layout
+                .rows
+                .iter()
+                .any(|row| row.kind == panels::AgentEvidenceRowKind::Output),
+            "zero-byte output must not paint a blank output row"
+        );
+    }
+
+    #[test]
+    fn r2_b2_footer_must_not_overwrite_fields_at_min_rows() {
+        for rows in 7u32..=30 {
+            let layout = evidence_layout(rows, Some("output line\n"), false, 0);
+            let mut seen = std::collections::BTreeSet::new();
+            for row in &layout.rows {
+                assert!(
+                    row.row < rows,
+                    "row {} outside {rows}-row viewport",
+                    row.row
+                );
+                assert!(
+                    seen.insert(row.row),
+                    "duplicate paint row {} at {rows} rows",
+                    row.row
+                );
+            }
+            assert_eq!(layout.footer_row, Some(rows - 2));
+            if rows >= 8 {
+                assert!(layout.row(panels::AgentEvidenceRowKind::Footer).is_some());
+            }
+        }
+        let layout = evidence_layout(10, Some("output line\n"), false, 0);
+        assert_eq!(layout.footer_row, Some(8));
+        assert!(
+            layout.row(panels::AgentEvidenceRowKind::Duration).is_none(),
+            "DURATION must be omitted before it can collide with the footer"
+        );
+    }
+
+    /// Discoverability (brief R2-B3 concern): production layout sweep for the
+    /// row-1 col-34 hint "ENTER DETAILS  E EVIDENCE  ESC CLOSE".
+    #[test]
+    fn r2_b3_shortcut_hint_discoverability_sweep() {
+        for cols in [32u32, 40, 60, 100, 120, 140, 160, 200, 240] {
+            let (col, hint) = panels::agent_shortcut_hint(cols);
+            assert!(
+                col + panels::text_cells(hint) as u32 <= cols,
+                "{cols}-col Inspector clips hint {hint:?} at col {col}"
+            );
+        }
+        let (col, hint) = panels::agent_shortcut_hint(32);
+        assert_eq!(col, 2);
+        assert_eq!(hint, "ENTER DETAIL  E EVIDENCE");
+    }
+
+    // ---------- R2-B3: observation detail restoration ----------
+
+    #[test]
+    fn r2_b3_enter_expands_then_collapses_detail_card() {
+        let mut app = app_with_n_recorded(5, "session-a");
+        select_index(&mut app, 2);
+        press_enter(&mut app);
+        assert!(
+            app.agent_detail_expanded,
+            "Enter expands the accepted detail card"
+        );
+        assert!(
+            !app.agent_evidence_open,
+            "Enter no longer opens the evidence overlay"
+        );
+        press_enter(&mut app);
+        assert!(
+            !app.agent_detail_expanded,
+            "Enter collapses the same details"
+        );
+    }
+
+    #[test]
+    fn r2_b3_detail_lines_carries_provenance_and_unknowns() {
+        let store = Store::open_in_memory().unwrap();
+        let mut app = make_app(120, 40);
+        let id = append_block(
+            &store,
+            "session-a",
+            "opencode cmd recorded ref check",
+            "out",
+            0,
+            9,
+        );
+        observe(&mut app, &store, "session-a", id);
+
+        let recorded_lines =
+            panels::agent_detail_lines(&app.agent_observations.snapshot(now()).observations[0]);
+        let recorded = recorded_lines.join("\n");
+        for token in [
+            "LAUNCH CANDIDATE",
+            "SOURCE: RECORDED COMMAND",
+            "SESSION: session-a",
+            "AVAILABILITY",
+            "STRENGTH",
+            "RECORDED COMMAND REF",
+            "RUNNING: UNKNOWN",
+            "COMPLETE: UNKNOWN",
+            "AUTHORIZED: UNKNOWN",
+            "FILE MODIFICATIONS: UNKNOWN",
+            "CONFLICT: UNKNOWN",
+        ] {
+            assert!(
+                recorded.contains(token),
+                "detail card should contain {token}"
+            );
+        }
+        assert!(
+            recorded.contains("RETAINED COMMAND NAME: opencode"),
+            "the retained (first) command name is labeled as retained, not as invented full command text"
+        );
+
+        // CommandText candidate
+        app.agent_observations
+            .observe_command(
+                zet_agent_observe::SessionRef::new("session-b").unwrap(),
+                "opencode summarize the recorded command first",
+                now(),
+            )
+            .unwrap();
+        let snap = app.agent_observations.snapshot(now());
+        let text_obs = snap
+            .observations
+            .iter()
+            .find(|o| o.session().as_str() == "session-b")
+            .unwrap();
+        let text_lines = panels::agent_detail_lines(text_obs).join("\n");
+        assert!(text_lines.contains("LAUNCH CANDIDATE"));
+        assert!(text_lines.contains("SOURCE: COMMAND TEXT"));
+        assert!(
+            text_lines.contains("RETAINED COMMAND NAME: opencode"),
+            "CommandText candidates must expose the retained command NAME"
+        );
+        assert!(
+            !text_lines.contains("RECORDED COMMAND REF"),
+            "CommandText must not claim a persisted reference"
+        );
+        assert!(
+            !text_lines.contains("COMMAND: opencode summarize the recorded command first"),
+            "the invented full command text must not be presented as recorded evidence"
+        );
+    }
+
+    #[test]
+    fn r2_b3_e_opens_evidence_and_escape_returns() {
+        let mut app = app_with_n_recorded(5, "session-a");
+        select_index(&mut app, 4);
+        press_e(&mut app);
+        assert!(app.agent_evidence_open);
+        let ev = app.agent_evidence.as_ref().unwrap();
+        assert!(ev.available && ev.command.contains("cmd04"));
+        press_escape(&mut app);
+        assert!(!app.agent_evidence_open);
+        assert_eq!(app.agent_inspector_sel, Some(4));
+        // Enter from here expands the observation details (not evidence):
+        press_enter(&mut app);
+        assert!(app.agent_detail_expanded);
+    }
+
+    #[test]
+    fn r2_b3_e_on_command_text_reports_not_persisted() {
+        let mut app = make_app(120, 40);
+        app.agent_observations
+            .observe_command(
+                zet_agent_observe::SessionRef::new("session-a").unwrap(),
+                "opencode summarize things",
+                now(),
+            )
+            .unwrap();
+        select_index(&mut app, 0);
+        press_e(&mut app);
+        let ev = app.agent_evidence.as_ref().unwrap();
+        assert!(!ev.available);
+        assert!(
+            ev.unavailable_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("No persisted recorded-command reference"),
+            "explicit not-persisted state required, got {:?}",
+            ev.unavailable_reason
+        );
+    }
+
+    // ---------- §5: preserve previous integrity repairs ----------
+
+    #[test]
+    fn b1_colliding_ids_serve_the_observation_session_not_the_active_tab() {
+        let store_a = Store::open_in_memory().unwrap();
+        let store_b = Store::open_in_memory().unwrap();
+        let id_a = append_block(
+            &store_a,
+            "session-a",
+            "opencode run from-a",
+            "a output",
+            3,
+            111,
+        );
+        let _id_b = append_block(
+            &store_b,
+            "session-b",
+            "opencode run from-b",
+            "b output",
+            9,
+            999,
+        );
+        assert_eq!(id_a, 1);
+
+        let mut app = make_app(120, 40);
+        observe(&mut app, &store_a, "session-a", id_a);
+        let mut tab_a = make_tab();
+        let mut tab_b = make_tab();
+        tab_a.recorder = Some(Recorder::new(store_a, "session-a"));
+        tab_b.recorder = Some(Recorder::new(store_b, "session-b"));
+        app.tabs = vec![tab_a, tab_b];
+        app.active = 1;
+
+        select_index(&mut app, 0);
+        press_e(&mut app);
+        assert!(app.agent_evidence_open);
+        let ev = app.agent_evidence.as_ref().expect("evidence computed");
+        assert!(ev.available);
+        assert_eq!(ev.session, "session-a");
+        assert_eq!(ev.command, "opencode run from-a");
+        assert_eq!(ev.exit, "3");
+        assert_eq!(ev.duration, "111ms");
+    }
+
+    #[test]
+    fn b1_no_matching_session_recorder_never_substitutes_evidence() {
+        let store_a = Store::open_in_memory().unwrap();
+        let store_b = Store::open_in_memory().unwrap();
+        let id_a = append_block(&store_a, "session-a", "opencode run from-a", "a", 0, 5);
+        let _ = append_block(&store_b, "session-b", "opencode evicted from-b", "b", 0, 5);
+
+        let mut app = make_app(120, 40);
+        observe(&mut app, &store_a, "session-a", id_a);
+        app.tabs[0].recorder = Some(Recorder::new(store_b, "session-b"));
+        select_index(&mut app, 0);
+        press_e(&mut app);
+        let ev = app.agent_evidence.as_ref().unwrap();
+        assert!(!ev.available);
+        assert!(ev
+            .unavailable_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("unavailable"));
+    }
+
+    #[test]
+    fn b1_missing_block_truthfully_unavailable() {
+        let store_a = Store::open_in_memory().unwrap();
+        let id_a = append_block(&store_a, "session-a", "opencode run from-a", "a", 0, 5);
+        let mut app = make_app(120, 40);
+        observe(&mut app, &store_a, "session-a", id_a);
+        app.tabs[0].recorder = Some(Recorder::new(store_a, "session-a"));
+        select_index(&mut app, 0);
+        let empty_store = Store::open_in_memory().unwrap();
+        app.tabs[0].recorder = Some(Recorder::new(empty_store, "session-a"));
+        press_e(&mut app);
+        let ev = app.agent_evidence.as_ref().unwrap();
+        assert!(!ev.available && ev.unavailable_reason.is_some());
+    }
+
+    #[test]
+    fn b3_older_than_recent_eight_is_reachable_and_accurate() {
+        let store = Store::open_in_memory().unwrap();
+        let mut app = make_app(120, 40);
+        for i in 0..12 {
+            let id = append_block(
+                &store,
+                "session-a",
+                &format!("opencode cmd{i:0>2} out-marker-{i}"),
+                &format!("output of {i}"),
+                i % 5,
+                (i as u64 + 1) * 10,
+            );
+            if id == 1 {
+                observe(&mut app, &store, "session-a", id);
+            }
+        }
+        app.tabs[0].recorder = Some(Recorder::new(store, "session-a"));
+        let timeline = app.tabs[0]
+            .recorder
+            .as_ref()
+            .unwrap()
+            .store()
+            .timeline(8)
+            .unwrap();
+        assert_eq!(timeline.len(), 8);
+        assert!(timeline.iter().all(|b| b.id != 1));
+        select_index(&mut app, 0);
+        press_e(&mut app);
+        let ev = app.agent_evidence.as_ref().expect("evidence present");
+        assert!(ev.available);
+        assert_eq!(ev.command, "opencode cmd00 out-marker-0");
+        assert_eq!(ev.exit, "0");
+        assert_eq!(ev.duration, "10ms");
+        assert_eq!(ev.output.as_deref(), Some("output of 0"));
+    }
+
+    // ---------- Integrity ----------
+
+    #[test]
+    fn security_scrub_covers_new_evidence_surface() {
+        let store = Store::open_in_memory().unwrap();
+        let mut app = make_app(120, 40);
+        let id = append_block(
+            &store,
+            "session-a",
+            "opencode run with sk-abcdef1234567890abcdef",
+            "token sk-abcdef1234567890abcdef in output",
+            0,
+            7,
+        );
+        observe(&mut app, &store, "session-a", id);
+        app.tabs[0].recorder = Some(Recorder::new(store, "session-a"));
+        select_index(&mut app, 0);
+        press_e(&mut app);
+        let ev = app.agent_evidence.as_ref().unwrap();
+        assert!(ev.available);
+        assert!(!ev.command.contains("abcdef1234567890"));
+        let out = ev.output.as_deref().unwrap_or_default();
+        assert!(!out.contains("abcdef1234567890"));
+    }
+
+    // ---------- R3 layout, status and bounds ----------
+
+    #[test]
+    fn r3_b6_e_under_overlay_cannot_replace_the_originating_observation() {
+        let mut app = app_with_n_recorded(8, "session-a");
+        select_index(&mut app, 6);
+        press_e(&mut app);
+        let original = app.agent_evidence.clone().unwrap();
+        // Even if hidden selection state is disturbed, E must not swap the
+        // visible evidence for an unrelated observation.
+        app.agent_inspector_sel = Some(0);
+        app.agent_inspector_sel_id = Some(1);
+        press_e(&mut app);
+        assert_eq!(
+            app.agent_evidence.as_ref(),
+            Some(&original),
+            "E under an open evidence surface must not replace its origin"
+        );
+    }
+
+    #[test]
+    fn r3_b1_multiline_output_paints_multiple_rows() {
+        let text: String = (0..40).map(|i| format!("line {i}\n")).collect();
+        let layout = evidence_layout(21, Some(&text), true, 0);
+        let output_rows = layout
+            .rows
+            .iter()
+            .filter(|row| row.kind == panels::AgentEvidenceRowKind::Output)
+            .count();
+        assert!(
+            output_rows > 1,
+            "multiline output must not collapse to one row"
+        );
+        assert_eq!(output_rows, layout.output_capacity);
+        assert!(layout.more_visible && layout.truncated_visible);
+    }
+
+    #[test]
+    fn r3_b1_fully_occupied_output_keeps_status_and_footer() {
+        let text: String = (0..80).map(|i| format!("line {i}\n")).collect();
+        let layout = evidence_layout(21, Some(&text), true, 0);
+        let output_rows = layout
+            .rows
+            .iter()
+            .filter(|row| row.kind == panels::AgentEvidenceRowKind::Output)
+            .count();
+        assert_eq!(output_rows, layout.output_capacity);
+        let status = layout
+            .row(panels::AgentEvidenceRowKind::Truncated)
+            .expect("truncation status row");
+        assert!(status.text.contains("OUTPUT TRUNCATED"));
+        assert!(status.text.contains("MORE"));
+        let footer = layout
+            .row(panels::AgentEvidenceRowKind::Footer)
+            .expect("footer row");
+        assert_eq!(footer.row, 19);
+        assert!(footer.text.contains("ESC RETURN"));
+        assert!(footer.text.contains("UP/DOWN"));
+    }
+
+    #[test]
+    fn r3_b3_tiny_viewports_never_overlap_status_or_footer() {
+        let text: String = (0..40).map(|i| format!("line {i}\n")).collect();
+        for rows in 7u32..=12 {
+            let layout = evidence_layout(rows, Some(&text), true, 0);
+            let mut seen = std::collections::BTreeSet::new();
+            for row in &layout.rows {
+                assert!(
+                    row.row < rows,
+                    "row {} outside {rows}-row viewport",
+                    row.row
+                );
+                assert!(
+                    seen.insert(row.row),
+                    "overlap at row {} in {rows}-row viewport",
+                    row.row
+                );
+            }
+            assert_eq!(layout.footer_row, Some(rows - 2));
+            assert!(
+                layout.truncated_visible,
+                "truncation must survive at {rows} rows"
+            );
+            assert!(
+                layout
+                    .row(panels::AgentEvidenceRowKind::Footer)
+                    .is_some_and(|row| row.row == rows - 2),
+                "footer must survive at {rows} rows"
+            );
+        }
+    }
+
+    #[test]
+    fn r3_b4_empty_and_unavailable_output_are_distinct() {
+        let empty = evidence_layout(40, Some(""), false, 0);
+        assert!(empty.empty_output_visible);
+        assert_eq!(
+            empty
+                .row(panels::AgentEvidenceRowKind::EmptyOutput)
+                .map(|row| row.text.as_str()),
+            Some("EMPTY OUTPUT")
+        );
+
+        let unavailable = evidence_layout(40, None, false, 0);
+        assert!(!unavailable.empty_output_visible);
+        assert_eq!(
+            unavailable
+                .row(panels::AgentEvidenceRowKind::Unavailable)
+                .map(|row| row.text.as_str()),
+            Some("OUTPUT UNAVAILABLE")
+        );
+    }
+
+    #[test]
+    fn r3_b2_scroll_bounds_after_shrink() {
+        let store = Store::open_in_memory().unwrap();
+        let mut app = make_app(120, 40);
+        let long: String = (0..80).map(|i| format!("row {i}\n")).collect();
+        let id = append_block(&store, "session-a", "opencode very long", &long, 0, 5);
+        observe(&mut app, &store, "session-a", id);
+        app.tabs[0].recorder = Some(Recorder::new(store, "session-a"));
+        select_index(&mut app, 0);
+        press_e(&mut app);
+        for _ in 0..100 {
+            press_arrow_down(&mut app);
+        }
+        let old = app.agent_evidence_offset;
+        assert!(old > 0);
+        app.rows = 60;
+        press_arrow_down(&mut app);
+        let vp = app.frame_layout().inspector.unwrap();
+        let max = panels::agent_evidence_layout(vp.rows, vp.cols, app.agent_evidence.as_ref(), 0)
+            .max_offset;
+        assert!(
+            max < old,
+            "precondition: taller Inspector reduces max offset"
+        );
+        assert!(
+            app.agent_evidence_offset <= max,
+            "offset {} must clamp to new max {} after resize",
+            app.agent_evidence_offset,
+            max
+        );
+    }
+
+    #[test]
+    fn r3_b7_layout_rows_are_the_paint_plan() {
+        let text: String = (0..12).map(|i| format!("line {i}\n")).collect();
+        let layout = evidence_layout(21, Some(&text), true, 0);
+        let status = layout
+            .row(panels::AgentEvidenceRowKind::Truncated)
+            .expect("status");
+        let footer = layout
+            .row(panels::AgentEvidenceRowKind::Footer)
+            .expect("footer");
+        assert!(status.row < footer.row);
+        assert!(layout.rows.iter().all(|row| row.row < 21 && row.row >= 4));
+        assert_eq!(
+            layout.rows.last().map(|row| row.kind),
+            Some(panels::AgentEvidenceRowKind::Footer)
+        );
+    }
 }
