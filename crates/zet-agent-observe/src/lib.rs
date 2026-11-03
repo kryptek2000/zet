@@ -1638,3 +1638,67 @@ mod f3_extra_tests {
         assert_eq!(obs.evidence_kind(), EvidenceKind::CommandLaunchCandidate);
     }
 }
+
+#[cfg(test)]
+mod p4a3_tests {
+    use super::*;
+
+    #[test]
+    fn association_requires_recorded_reference() {
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let id = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "s".to_string(),
+                command: "opencode run".to_string(),
+                output: String::new(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let mut obs_store = AgentObservationStore::new(8);
+        let session = SessionRef::new("s").unwrap();
+        let obs = obs_store
+            .observe_recorded_command(&store, session, id, 10)
+            .unwrap();
+        assert_eq!(obs.source(), EvidenceSource::RecordedCommand);
+        assert!(obs.command().is_some());
+    }
+
+    #[test]
+    fn command_text_has_no_recorded_reference() {
+        let mut store = AgentObservationStore::new(8);
+        let obs = store
+            .observe_command(SessionRef::new("s").unwrap(), "opencode", 1)
+            .unwrap();
+        assert_eq!(obs.source(), EvidenceSource::CommandText);
+        assert!(obs.command().is_none());
+    }
+
+    #[test]
+    fn exit_code_not_task_completion() {
+        // Observation strength remains Candidate regardless of exit code.
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let id = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "s".to_string(),
+                command: "opencode run".to_string(),
+                output: String::new(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 1,
+            })
+            .unwrap();
+        let mut obs_store = AgentObservationStore::new(8);
+        let session = SessionRef::new("s").unwrap();
+        let obs = obs_store
+            .observe_recorded_command(&store, session, id, 10)
+            .unwrap();
+        assert_eq!(obs.strength(), EvidenceStrength::Candidate);
+        assert_eq!(obs.classification(), ObservationClass::HeuristicCandidate);
+    }
+}

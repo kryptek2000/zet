@@ -2061,6 +2061,356 @@ impl AgentInspectorLayout {
     }
 }
 
+/// Bounded recorded-command evidence associated with an agent observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRecordedEvidence {
+    pub command: String,
+    pub session: String,
+    pub exit: String,
+    pub duration: String,
+    pub cwd: String,
+    pub git_branch: String,
+    pub output: Option<String>,
+    pub output_truncated: bool,
+    pub available: bool,
+    pub unavailable_reason: Option<String>,
+}
+
+/// One row in the recorded-evidence surface. The renderer paints exactly
+/// these rows; status and footer rows are reserved by the layout rather than
+/// discovered after output has consumed the viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentEvidenceRowKind {
+    Title,
+    Command,
+    Session,
+    Exit,
+    Duration,
+    Output,
+    EmptyOutput,
+    Unavailable,
+    More,
+    Truncated,
+    Footer,
+    Notice,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentEvidenceRow {
+    pub row: u32,
+    pub kind: AgentEvidenceRowKind,
+    pub text: String,
+}
+
+/// Pure, bounded plan for the recorded-evidence surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentEvidenceLayout {
+    pub rows: Vec<AgentEvidenceRow>,
+    pub output_start: Option<u32>,
+    pub output_capacity: usize,
+    pub total_output_lines: usize,
+    pub start: usize,
+    pub visible_output_lines: usize,
+    pub hidden_output_lines: usize,
+    pub max_offset: usize,
+    pub footer_row: Option<u32>,
+    pub truncated_visible: bool,
+    pub more_visible: bool,
+    pub empty_output_visible: bool,
+}
+
+impl AgentEvidenceLayout {
+    pub fn row(&self, kind: AgentEvidenceRowKind) -> Option<&AgentEvidenceRow> {
+        self.rows.iter().find(|row| row.kind == kind)
+    }
+}
+
+/// Wrap one logical output line into viewport-width chunks. This keeps the
+/// tail of long error text reachable through the same vertical scroll as
+/// ordinary multiline output. Control characters are expected to have been
+/// sanitized by the recorder/display path already.
+pub fn wrap_output_to_cells(text: &str, max_cells: usize) -> Vec<String> {
+    let max_cells = max_cells.max(1);
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for raw in text.lines() {
+        if raw.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut line = String::new();
+        let mut used = 0usize;
+        for c in raw.chars() {
+            let cells = char_cells(c);
+            if cells > max_cells {
+                if !line.is_empty() {
+                    out.push(std::mem::take(&mut line));
+                    used = 0;
+                }
+                out.push("…".to_string());
+                continue;
+            }
+            if used > 0 && used + cells > max_cells {
+                out.push(std::mem::take(&mut line));
+                used = 0;
+            }
+            line.push(c);
+            used += cells;
+        }
+        out.push(line);
+    }
+    out
+}
+
+/// The bounded recorded-evidence row plan consumed directly by the renderer.
+///
+/// Rows 0..=3 are owned by the outer Inspector header. Evidence starts at row
+/// 4. The footer is always at `rows - 2`; one status row at `rows - 3` is
+/// reserved before output is budgeted, so `+N MORE` and
+/// `OUTPUT TRUNCATED` cannot be starved by output.
+pub fn agent_evidence_layout(
+    viewport_rows: u32,
+    viewport_cols: u32,
+    evidence: Option<&AgentRecordedEvidence>,
+    offset: usize,
+) -> AgentEvidenceLayout {
+    let width = viewport_cols.saturating_sub(4).max(1) as usize;
+    let mut layout = AgentEvidenceLayout {
+        rows: Vec::new(),
+        output_start: None,
+        output_capacity: 0,
+        total_output_lines: 0,
+        start: 0,
+        visible_output_lines: 0,
+        hidden_output_lines: 0,
+        max_offset: 0,
+        footer_row: None,
+        truncated_visible: false,
+        more_visible: false,
+        empty_output_visible: false,
+    };
+    if viewport_rows == 0 {
+        return layout;
+    }
+    if viewport_rows < 7 {
+        let row = viewport_rows.saturating_sub(2);
+        layout.rows.push(AgentEvidenceRow {
+            row,
+            kind: AgentEvidenceRowKind::Notice,
+            text: truncate_to_cells("INSUFFICIENT SPACE  ESC", width),
+        });
+        layout.footer_row = Some(row);
+        return layout;
+    }
+
+    let footer_row = viewport_rows - 2;
+    let status_row = viewport_rows - 3;
+    layout.footer_row = Some(footer_row);
+
+    if status_row > 5 {
+        layout.rows.push(AgentEvidenceRow {
+            row: 4,
+            kind: AgentEvidenceRowKind::Title,
+            text: truncate_to_cells("RECORDED COMMAND EVIDENCE", width),
+        });
+    }
+
+    // At very short heights identity wins over the title: row 4 carries the
+    // command (or unavailable session) when the title cannot fit.
+    let metadata_start = if status_row > 5 { 5u32 } else { 4u32 };
+    let output_start = 9u32;
+    let output_capacity = status_row.saturating_sub(output_start) as usize;
+    layout.output_start = Some(output_start);
+    layout.output_capacity = output_capacity;
+
+    let mut status = String::new();
+    if let Some(ev) = evidence {
+        if ev.available {
+            for (row, kind, text) in [
+                (
+                    metadata_start,
+                    AgentEvidenceRowKind::Command,
+                    format!("COMMAND: {}", ev.command),
+                ),
+                (
+                    metadata_start + 1,
+                    AgentEvidenceRowKind::Session,
+                    format!("SESSION: {}", ev.session),
+                ),
+                (
+                    metadata_start + 2,
+                    AgentEvidenceRowKind::Exit,
+                    format!("EXIT: {}", ev.exit),
+                ),
+                (
+                    metadata_start + 3,
+                    AgentEvidenceRowKind::Duration,
+                    format!("DURATION: {}", ev.duration),
+                ),
+            ] {
+                if row < status_row {
+                    layout.rows.push(AgentEvidenceRow {
+                        row,
+                        kind,
+                        text: truncate_to_cells(&text, width),
+                    });
+                }
+            }
+
+            if let Some(text) = ev.output.as_deref() {
+                if text.is_empty() {
+                    layout.empty_output_visible = true;
+                    if output_capacity > 0 {
+                        layout.rows.push(AgentEvidenceRow {
+                            row: output_start,
+                            kind: AgentEvidenceRowKind::EmptyOutput,
+                            text: truncate_to_cells("EMPTY OUTPUT", width),
+                        });
+                    } else {
+                        status = "EMPTY OUTPUT".to_string();
+                    }
+                } else {
+                    let lines = wrap_output_to_cells(text, width);
+                    layout.total_output_lines = lines.len();
+                    if output_capacity > 0 && lines.len() > output_capacity {
+                        layout.max_offset = lines.len().saturating_sub(output_capacity);
+                    }
+                    layout.start = if output_capacity == 0 {
+                        0
+                    } else {
+                        offset.min(layout.max_offset)
+                    };
+                    layout.visible_output_lines = lines
+                        .len()
+                        .saturating_sub(layout.start)
+                        .min(output_capacity);
+                    layout.hidden_output_lines =
+                        lines.len().saturating_sub(layout.visible_output_lines);
+                    for (i, line) in lines
+                        .iter()
+                        .skip(layout.start)
+                        .take(output_capacity)
+                        .enumerate()
+                    {
+                        layout.rows.push(AgentEvidenceRow {
+                            row: output_start + i as u32,
+                            kind: AgentEvidenceRowKind::Output,
+                            text: line.clone(),
+                        });
+                    }
+                }
+            } else {
+                if output_capacity > 0 {
+                    layout.rows.push(AgentEvidenceRow {
+                        row: output_start,
+                        kind: AgentEvidenceRowKind::Unavailable,
+                        text: truncate_to_cells("OUTPUT UNAVAILABLE", width),
+                    });
+                } else {
+                    status = "OUTPUT UNAVAILABLE".to_string();
+                }
+            }
+        } else {
+            let mut row = metadata_start;
+            if !ev.session.is_empty() && row < status_row {
+                layout.rows.push(AgentEvidenceRow {
+                    row,
+                    kind: AgentEvidenceRowKind::Session,
+                    text: truncate_to_cells(&format!("SESSION: {}", ev.session), width),
+                });
+                row += 1;
+            }
+            let reason = ev
+                .unavailable_reason
+                .as_deref()
+                .unwrap_or("Recorded evidence unavailable.");
+            let wrapped = wrap_output_to_cells(reason, width);
+            if wrapped.is_empty() && row < status_row {
+                layout.rows.push(AgentEvidenceRow {
+                    row,
+                    kind: AgentEvidenceRowKind::Unavailable,
+                    text: "UNAVAILABLE".to_string(),
+                });
+            }
+            for line in wrapped {
+                if row >= status_row {
+                    status = "UNAVAILABLE".to_string();
+                    break;
+                }
+                layout.rows.push(AgentEvidenceRow {
+                    row,
+                    kind: AgentEvidenceRowKind::Unavailable,
+                    text: line,
+                });
+                row += 1;
+            }
+        }
+    } else if status_row > 4 {
+        layout.rows.push(AgentEvidenceRow {
+            row: 5,
+            kind: AgentEvidenceRowKind::Unavailable,
+            text: truncate_to_cells("NO EVIDENCE AVAILABLE", width),
+        });
+    }
+
+    let mut status_parts = Vec::new();
+    if layout.hidden_output_lines > 0 {
+        status_parts.push(format!("+{} MORE", layout.hidden_output_lines));
+    }
+    if evidence.map(|ev| ev.output_truncated).unwrap_or(false) {
+        status_parts.push("OUTPUT TRUNCATED".to_string());
+    }
+    if status.is_empty() {
+        status = status_parts.join("  ");
+    } else if !status_parts.is_empty() {
+        status = format!("{}  {}", status, status_parts.join("  "));
+    }
+    if !status.is_empty() && status_row >= 4 {
+        let text = truncate_to_cells(&status, width);
+        layout.truncated_visible = text.contains("OUTPUT TRUNCATED");
+        layout.more_visible = text.contains(" MORE");
+        layout.rows.push(AgentEvidenceRow {
+            row: status_row,
+            kind: if text.contains("OUTPUT TRUNCATED") {
+                AgentEvidenceRowKind::Truncated
+            } else if text.contains(" MORE") {
+                AgentEvidenceRowKind::More
+            } else {
+                AgentEvidenceRowKind::Notice
+            },
+            text,
+        });
+    }
+
+    let footer_hint = if layout.hidden_output_lines > 0 {
+        "ESC RETURN  UP/DOWN"
+    } else {
+        "ESC RETURN"
+    };
+    layout.rows.push(AgentEvidenceRow {
+        row: footer_row,
+        kind: AgentEvidenceRowKind::Footer,
+        text: truncate_to_cells(footer_hint, width),
+    });
+    layout
+}
+
+/// Viewport-aware affordance for the AGENTS list. The full hint is kept at
+/// wide widths; at the 32-column Inspector floor a shorter hint starts at
+/// column 2 so it remains fully visible.
+pub fn agent_shortcut_hint(viewport_cols: u32) -> (u32, &'static str) {
+    const FULL: &str = "ENTER DETAILS  E EVIDENCE";
+    const SHORT: &str = "ENTER DETAIL  E EVIDENCE";
+    let full_col = 34u32;
+    if viewport_cols >= full_col + text_cells(FULL) as u32 {
+        (full_col, FULL)
+    } else {
+        (2, SHORT)
+    }
+}
+
 pub fn agent_inspector_layout(
     viewport_rows: u32,
     observation_count: usize,
@@ -2210,7 +2560,11 @@ pub fn agent_detail_lines(obs: &zet_agent_observe::AgentObservation) -> Vec<Stri
     if let Some(cmd) = obs.command() {
         lines.push(format!("RECORDED COMMAND REF: {}", cmd.0));
     }
+    if let Some(name) = obs.command_name() {
+        lines.push(format!("RETAINED COMMAND NAME: {}", name));
+    }
     // Unknown unless proven.
+    lines.push("UNVERIFIED:".to_string());
     lines.push("RUNNING: UNKNOWN".to_string());
     lines.push("COMPLETE: UNKNOWN".to_string());
     lines.push("AUTHORIZED: UNKNOWN".to_string());
@@ -2548,5 +2902,61 @@ mod f4_panels_tests {
             )
             .unwrap();
         assert!(!agent_detail_lines(&obs).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod p4a3_panels_tests {
+    use super::*;
+
+    #[test]
+    fn recorded_observation_has_command_ref() {
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let id = store
+            .append(&zet_blocks::Block {
+                id: 0,
+                session: "s".to_string(),
+                command: "opencode run".to_string(),
+                output: "ok".to_string(),
+                exit_code: 0,
+                cwd: "/tmp".to_string(),
+                git_branch: String::new(),
+                duration_ms: 5,
+            })
+            .unwrap();
+        let mut obs_store = zet_agent_observe::AgentObservationStore::new(8);
+        let session = zet_agent_observe::SessionRef::new("s").unwrap();
+        let obs = obs_store
+            .observe_recorded_command(&store, session, id, 10)
+            .unwrap();
+        assert_eq!(obs.command(), Some(zet_agent_observe::CommandRef(id)));
+        let lines = agent_detail_lines(&obs);
+        let joined = lines.join("\n");
+        assert!(joined.contains(&format!("RECORDED COMMAND REF: {}", id)));
+    }
+
+    #[test]
+    fn command_text_observation_has_no_command_ref() {
+        let mut store = zet_agent_observe::AgentObservationStore::new(8);
+        let obs = store
+            .observe_command(
+                zet_agent_observe::SessionRef::new("s").unwrap(),
+                "opencode",
+                1,
+            )
+            .unwrap();
+        assert!(obs.command().is_none());
+        let lines = agent_detail_lines(&obs);
+        let joined = lines.join("\n");
+        assert!(!joined.contains("RECORDED COMMAND REF:"));
+    }
+
+    #[test]
+    fn navigation_preserves_selection_identity() {
+        // smoke: inspector selection conversion
+        assert_eq!(
+            inspector_command_position(inspector_selection_for_command(2)),
+            Some(2)
+        );
     }
 }
