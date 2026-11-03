@@ -3003,6 +3003,28 @@ impl App {
                 PANEL_RED,
             );
         }
+        if focused {
+            let fx = origin_x.saturating_add(3);
+            let fy = origin_y.saturating_add(2);
+            let fw = vp.cols.saturating_mul(cw).saturating_sub(6);
+            let fh = vp.rows.saturating_mul(ch).saturating_sub(4);
+            r.draw_rect_px(fx, fy, 2, fh, PANEL_CYAN);
+            r.draw_rect_px(
+                fx.saturating_add(fw.saturating_sub(2)),
+                fy,
+                2,
+                fh,
+                PANEL_CYAN,
+            );
+            r.draw_rect_px(fx, fy, fw, 2, PANEL_CYAN);
+            r.draw_rect_px(
+                fx,
+                fy.saturating_add(fh.saturating_sub(2)),
+                fw,
+                2,
+                PANEL_CYAN,
+            );
+        }
         let _ = (
             selected_id,
             hovered_row,
@@ -3421,40 +3443,7 @@ impl App {
             PANEL_BG,
             PANEL_BORDER,
         );
-        if focused {
-            let fx = origin_x.saturating_add(3);
-            let fy = origin_y.saturating_add(2);
-            let fw = vp.cols.saturating_mul(cw).saturating_sub(6);
-            let fh = height_px.saturating_sub(4);
-            r.draw_rect_px(fx, fy, 2, fh, PANEL_CYAN);
-            r.draw_rect_px(
-                fx.saturating_add(fw.saturating_sub(2)),
-                fy,
-                2,
-                fh,
-                PANEL_CYAN,
-            );
-            r.draw_rect_px(fx, fy, fw, 2, PANEL_CYAN);
-            r.draw_rect_px(
-                fx,
-                fy.saturating_add(fh.saturating_sub(2)),
-                fw,
-                2,
-                PANEL_CYAN,
-            );
-        }
-
-        r.draw_rect_px(
-            origin_x,
-            origin_y,
-            if focused { 2 } else { 1 },
-            height_px,
-            if focused {
-                PANEL_CYAN
-            } else {
-                PANEL_BORDER_STRONG
-            },
-        );
+        r.draw_rect_px(origin_x, origin_y, 1, height_px, PANEL_BORDER_STRONG);
 
         r.draw_aperture_mark_px(
             origin_x.saturating_add(8),
@@ -4146,6 +4135,29 @@ impl App {
                 &panels::truncate_to_cells(&provenance, vp.cols.saturating_sub(14) as usize),
                 UI_META,
                 PANEL_SECONDARY,
+            );
+        }
+
+        if focused {
+            let fx = origin_x.saturating_add(3);
+            let fy = origin_y.saturating_add(2);
+            let fw = vp.cols.saturating_mul(cw).saturating_sub(6);
+            let fh = height_px.saturating_sub(4);
+            r.draw_rect_px(fx, fy, 2, fh, PANEL_CYAN);
+            r.draw_rect_px(
+                fx.saturating_add(fw.saturating_sub(2)),
+                fy,
+                2,
+                fh,
+                PANEL_CYAN,
+            );
+            r.draw_rect_px(fx, fy, fw, 2, PANEL_CYAN);
+            r.draw_rect_px(
+                fx,
+                fy.saturating_add(fh.saturating_sub(2)),
+                fw,
+                2,
+                PANEL_CYAN,
             );
         }
     }
