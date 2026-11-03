@@ -26,8 +26,8 @@ use zet_pty::Session;
 use zet_term::Terminal;
 
 mod finalize;
-mod mouse_report;
 pub mod layout;
+mod mouse_report;
 pub mod panels;
 
 const HOOKS: [(&str, &str); 2] = [

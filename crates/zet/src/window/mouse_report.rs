@@ -105,15 +105,9 @@ mod tests {
     #[test]
     fn off_viewport_pointer_never_forwards_to_pty() {
         for mode in [1000, 1002, 1003] {
-            assert_eq!(
-                wheel_action(mode, true, true, 3, None),
-                WheelAction::Ignore
-            );
+            assert_eq!(wheel_action(mode, true, true, 3, None), WheelAction::Ignore);
         }
-        assert_eq!(
-            wheel_action(0, false, true, -3, None),
-            WheelAction::Ignore
-        );
+        assert_eq!(wheel_action(0, false, true, -3, None), WheelAction::Ignore);
     }
 
     #[test]
@@ -124,7 +118,10 @@ mod tests {
         );
         assert_eq!(
             wheel_action(0, false, true, -3, at(10, 5)),
-            WheelAction::AltArrows { up: false, count: 3 }
+            WheelAction::AltArrows {
+                up: false,
+                count: 3
+            }
         );
     }
 
@@ -159,7 +156,10 @@ mod tests {
         );
         assert_eq!(
             wheel_action(0, false, true, isize::MIN, at(1, 2)),
-            WheelAction::AltArrows { up: false, count: 10 }
+            WheelAction::AltArrows {
+                up: false,
+                count: 10
+            }
         );
     }
 
