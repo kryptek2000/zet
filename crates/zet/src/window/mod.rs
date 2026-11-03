@@ -821,6 +821,23 @@ impl App {
         )
     }
 
+    /// Terminal-relative cell for mouse protocol reporting. This intentionally
+    /// uses a zero scrollback offset, unlike `mouse_cell()` which is used for
+    /// text selection.
+    fn terminal_mouse_cell(&self) -> Option<zet_gpu::selection::CellPos> {
+        let (x, y) = self.mouse_px?;
+        let r = self.renderer.as_ref()?;
+        let (cw, ch) = r.cell_px();
+        let vp = self.frame_layout().term;
+        let gpu_vp = zet_gpu::renderer::Viewport {
+            x: vp.x,
+            y: vp.y,
+            cols: vp.cols,
+            rows: vp.rows,
+        };
+        zet_gpu::renderer::viewport_hit_test(x, y, gpu_vp, cw, ch, 0)
+    }
+
     /// Copy the mouse selection to the clipboard (no-op when empty).
     fn copy_selection(&mut self) {
         let Some(sel) = &self.tabs[self.active].selection else {
@@ -5610,11 +5627,11 @@ impl ApplicationHandler for App {
                 let mouse_mode = self.tabs[self.active].term.mouse_mode();
                 if mouse_mode != 0 && lines != 0 {
                     // Only forward when the pointer is actually over the terminal.
-                    if let Some(cell) = self.mouse_cell() {
+                    if let Some(cell) = self.terminal_mouse_cell() {
                         let col = (cell.col + 1).max(1);
                         let row = (cell.row + 1).max(1);
                         let button = if lines >= 0 { 64 } else { 65 };
-                        let count = lines.abs().min(10) as usize;
+                        let count = lines.abs().clamp(1, 10) as usize;
                         let sgr = self.tabs[self.active].term.mouse_sgr();
                         if let Some(s) = &mut self.tabs[self.active].session {
                             for _ in 0..count {
@@ -5624,8 +5641,8 @@ impl ApplicationHandler for App {
                                 } else {
                                     // Legacy X10 encoding: ESC [ M Cb Cx Cy
                                     let cb = (button + 32) as u8;
-                                    let cx = (col as u16 + 31).min(255) as u8;
-                                    let cy = (row as u16 + 31).min(255) as u8;
+                                    let cx = (col as u16 + 32).min(255) as u8;
+                                    let cy = (row as u16 + 32).min(255) as u8;
                                     let seq = [0x1b, b'[', b'M', cb, cx, cy];
                                     let _ = s.write_all(&seq);
                                 }
@@ -5635,6 +5652,10 @@ impl ApplicationHandler for App {
                     return;
                 }
                 if self.tabs[self.active].term.alt_active() {
+                    // Suppress arrow-key fallback when pointer is not over terminal.
+                    if self.terminal_mouse_cell().is_none() {
+                        return;
+                    }
                     // Fallback for alternate-screen apps without mouse reporting.
                     if let Some(s) = &mut self.tabs[self.active].session {
                         let seq = if lines >= 0 { b"\x1b[A" } else { b"\x1b[B" };
