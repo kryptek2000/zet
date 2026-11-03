@@ -5608,8 +5608,24 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::PixelDelta(p) => (p.y / 20.0).round() as isize,
                 };
                 if self.tabs[self.active].term.alt_active() {
-                    // App owns the screen (vim/helix): wheel becomes
-                    // arrow keys, the xterm alternateScroll convention.
+                    let mouse_mode = self.tabs[self.active].term.mouse_mode();
+                    if mouse_mode != 0 {
+                        let cell = self
+                            .mouse_cell()
+                            .unwrap_or(zet_gpu::selection::CellPos { col: 0, row: 0 });
+                        let col = (cell.col + 1).max(1);
+                        let row = (cell.row + 1).max(1);
+                        let button = if lines >= 0 { 64 } else { 65 };
+                        let count = lines.abs().clamp(1, 10);
+                        if let Some(s) = &mut self.tabs[self.active].session {
+                            for _ in 0..count {
+                                let seq = format!("\x1b[<{};{};{}M", button, col, row);
+                                let _ = s.write_all(seq.as_bytes());
+                            }
+                        }
+                        return;
+                    }
+                    // Fallback for alternate-screen apps without mouse reporting.
                     if let Some(s) = &mut self.tabs[self.active].session {
                         let seq = if lines >= 0 { b"\x1b[A" } else { b"\x1b[B" };
                         for _ in 0..lines.abs().min(10) {
