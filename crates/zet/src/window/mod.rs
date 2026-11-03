@@ -26,6 +26,7 @@ use zet_pty::Session;
 use zet_term::Terminal;
 
 mod finalize;
+mod mouse_report;
 pub mod layout;
 pub mod panels;
 
@@ -5624,56 +5625,43 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, y) => (y * 3.0).round() as isize,
                     MouseScrollDelta::PixelDelta(p) => (p.y / 20.0).round() as isize,
                 };
-                let mouse_mode = self.tabs[self.active].term.mouse_mode();
-                if mouse_mode != 0 && lines != 0 {
-                    // Only forward when the pointer is actually over the terminal.
-                    if let Some(cell) = self.terminal_mouse_cell() {
-                        let col = (cell.col + 1).max(1);
-                        let row = (cell.row + 1).max(1);
-                        let button = if lines >= 0 { 64 } else { 65 };
-                        let count = lines.abs().clamp(1, 10) as usize;
-                        let sgr = self.tabs[self.active].term.mouse_sgr();
+                let term = &self.tabs[self.active].term;
+                let action = mouse_report::wheel_action(
+                    term.mouse_mode(),
+                    term.mouse_sgr(),
+                    term.alt_active(),
+                    lines,
+                    self.terminal_mouse_cell(),
+                );
+                match action {
+                    mouse_report::WheelAction::Report(events) => {
                         if let Some(s) = &mut self.tabs[self.active].session {
-                            for _ in 0..count {
-                                if sgr {
-                                    let seq = format!("\x1b[<{};{};{}M", button, col, row);
-                                    let _ = s.write_all(seq.as_bytes());
-                                } else {
-                                    // Legacy X10 encoding: ESC [ M Cb Cx Cy
-                                    let cb = (button + 32) as u8;
-                                    let cx = (col as u16 + 32).min(255) as u8;
-                                    let cy = (row as u16 + 32).min(255) as u8;
-                                    let seq = [0x1b, b'[', b'M', cb, cx, cy];
-                                    let _ = s.write_all(&seq);
-                                }
+                            for bytes in events {
+                                let _ = s.write_all(&bytes);
                             }
                         }
                     }
-                    return;
-                }
-                if self.tabs[self.active].term.alt_active() {
-                    // Suppress arrow-key fallback when pointer is not over terminal.
-                    if self.terminal_mouse_cell().is_none() {
-                        return;
-                    }
-                    // Fallback for alternate-screen apps without mouse reporting.
-                    if let Some(s) = &mut self.tabs[self.active].session {
-                        let seq = if lines >= 0 { b"\x1b[A" } else { b"\x1b[B" };
-                        for _ in 0..lines.abs().min(10) {
-                            let _ = s.write_all(seq);
+                    mouse_report::WheelAction::AltArrows { up, count } => {
+                        if let Some(s) = &mut self.tabs[self.active].session {
+                            let seq: &[u8] = if up { b"\x1b[A" } else { b"\x1b[B" };
+                            for _ in 0..count {
+                                let _ = s.write_all(seq);
+                            }
                         }
                     }
-                    return;
-                }
-                // Scrolling drops the selection (it belongs to the old view).
-                self.tabs[self.active].selection = None;
-                self.tabs[self.active].selecting = false;
-                if lines >= 0 {
-                    self.tabs[self.active].term.scroll_view_up(lines as usize);
-                } else {
-                    self.tabs[self.active]
-                        .term
-                        .scroll_view_down((-lines) as usize);
+                    mouse_report::WheelAction::Scroll(lines) => {
+                        // Scrollback selection belongs to the previous view.
+                        self.tabs[self.active].selection = None;
+                        self.tabs[self.active].selecting = false;
+                        if lines > 0 {
+                            self.tabs[self.active].term.scroll_view_up(lines as usize);
+                        } else {
+                            self.tabs[self.active]
+                                .term
+                                .scroll_view_down(lines.saturating_abs() as usize);
+                        }
+                    }
+                    mouse_report::WheelAction::Ignore => {}
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
