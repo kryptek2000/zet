@@ -2208,7 +2208,7 @@ impl App {
             rail_h.saturating_sub(4),
             10,
             zet_gpu::renderer::RAIL_BG,
-            if focused { RAIL_FOCUS } else { RAIL_BORDER },
+            RAIL_BORDER,
         );
         r.draw_rect_px(
             origin_x,
@@ -2258,6 +2258,29 @@ impl App {
             PANEL_BORDER_STRONG,
         );
 
+        if focused {
+            let fx = origin_x.saturating_add(2);
+            let fy = origin_y.saturating_add(2);
+            let fw = rail_w.saturating_sub(4);
+            let fh = rail_h.saturating_sub(4);
+            r.draw_rect_px(fx, fy, 2, fh, RAIL_FOCUS);
+            r.draw_rect_px(
+                fx.saturating_add(fw.saturating_sub(2)),
+                fy,
+                2,
+                fh,
+                RAIL_FOCUS,
+            );
+            r.draw_rect_px(fx, fy, fw, 2, RAIL_FOCUS);
+            r.draw_rect_px(
+                fx,
+                fy.saturating_add(fh.saturating_sub(2)),
+                fw,
+                2,
+                RAIL_FOCUS,
+            );
+        }
+
         // Content viewport (leaving 1 column for border)
         let content_cols = vp.cols.saturating_sub(1).max(1);
         let content = zet_gpu::renderer::Viewport {
@@ -2270,7 +2293,7 @@ impl App {
             vp.x + vp.cols.saturating_sub(1),
             vp.y,
             vp.y + vp.rows,
-            if focused { RAIL_FOCUS } else { RAIL_BORDER },
+            RAIL_BORDER,
         );
 
         let rows = panels::rail_rows(vp.rows, snapshot.sessions.len(), snapshot.commands.len());
@@ -3400,8 +3423,31 @@ impl App {
             height_px.saturating_sub(4),
             10,
             PANEL_BG,
-            if focused { PANEL_CYAN } else { PANEL_BORDER },
+            PANEL_BORDER,
         );
+        if focused {
+            let fx = origin_x.saturating_add(3);
+            let fy = origin_y.saturating_add(2);
+            let fw = vp.cols.saturating_mul(cw).saturating_sub(6);
+            let fh = height_px.saturating_sub(4);
+            r.draw_rect_px(fx, fy, 2, fh, PANEL_CYAN);
+            r.draw_rect_px(
+                fx.saturating_add(fw.saturating_sub(2)),
+                fy,
+                2,
+                fh,
+                PANEL_CYAN,
+            );
+            r.draw_rect_px(fx, fy, fw, 2, PANEL_CYAN);
+            r.draw_rect_px(
+                fx,
+                fy.saturating_add(fh.saturating_sub(2)),
+                fw,
+                2,
+                PANEL_CYAN,
+            );
+        }
+
         r.draw_rect_px(
             origin_x,
             origin_y,
