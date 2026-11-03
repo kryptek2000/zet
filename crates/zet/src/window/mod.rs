@@ -5607,24 +5607,34 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, y) => (y * 3.0).round() as isize,
                     MouseScrollDelta::PixelDelta(p) => (p.y / 20.0).round() as isize,
                 };
-                if self.tabs[self.active].term.alt_active() {
-                    let mouse_mode = self.tabs[self.active].term.mouse_mode();
-                    if mouse_mode != 0 {
-                        let cell = self
-                            .mouse_cell()
-                            .unwrap_or(zet_gpu::selection::CellPos { col: 0, row: 0 });
+                let mouse_mode = self.tabs[self.active].term.mouse_mode();
+                if mouse_mode != 0 && lines != 0 {
+                    // Only forward when the pointer is actually over the terminal.
+                    if let Some(cell) = self.mouse_cell() {
                         let col = (cell.col + 1).max(1);
                         let row = (cell.row + 1).max(1);
                         let button = if lines >= 0 { 64 } else { 65 };
-                        let count = lines.abs().clamp(1, 10);
+                        let count = lines.abs().min(10) as usize;
+                        let sgr = self.tabs[self.active].term.mouse_sgr();
                         if let Some(s) = &mut self.tabs[self.active].session {
                             for _ in 0..count {
-                                let seq = format!("\x1b[<{};{};{}M", button, col, row);
-                                let _ = s.write_all(seq.as_bytes());
+                                if sgr {
+                                    let seq = format!("\x1b[<{};{};{}M", button, col, row);
+                                    let _ = s.write_all(seq.as_bytes());
+                                } else {
+                                    // Legacy X10 encoding: ESC [ M Cb Cx Cy
+                                    let cb = (button + 32) as u8;
+                                    let cx = (col as u16 + 31).min(255) as u8;
+                                    let cy = (row as u16 + 31).min(255) as u8;
+                                    let seq = [0x1b, b'[', b'M', cb, cx, cy];
+                                    let _ = s.write_all(&seq);
+                                }
                             }
                         }
-                        return;
                     }
+                    return;
+                }
+                if self.tabs[self.active].term.alt_active() {
                     // Fallback for alternate-screen apps without mouse reporting.
                     if let Some(s) = &mut self.tabs[self.active].session {
                         let seq = if lines >= 0 { b"\x1b[A" } else { b"\x1b[B" };
