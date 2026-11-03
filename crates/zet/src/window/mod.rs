@@ -3003,28 +3003,6 @@ impl App {
                 PANEL_RED,
             );
         }
-        if focused {
-            let fx = origin_x.saturating_add(3);
-            let fy = origin_y.saturating_add(2);
-            let fw = vp.cols.saturating_mul(cw).saturating_sub(6);
-            let fh = vp.rows.saturating_mul(ch).saturating_sub(4);
-            r.draw_rect_px(fx, fy, 2, fh, PANEL_CYAN);
-            r.draw_rect_px(
-                fx.saturating_add(fw.saturating_sub(2)),
-                fy,
-                2,
-                fh,
-                PANEL_CYAN,
-            );
-            r.draw_rect_px(fx, fy, fw, 2, PANEL_CYAN);
-            r.draw_rect_px(
-                fx,
-                fy.saturating_add(fh.saturating_sub(2)),
-                fw,
-                2,
-                PANEL_CYAN,
-            );
-        }
         let _ = (
             selected_id,
             hovered_row,
@@ -4135,29 +4113,6 @@ impl App {
                 &panels::truncate_to_cells(&provenance, vp.cols.saturating_sub(14) as usize),
                 UI_META,
                 PANEL_SECONDARY,
-            );
-        }
-
-        if focused {
-            let fx = origin_x.saturating_add(3);
-            let fy = origin_y.saturating_add(2);
-            let fw = vp.cols.saturating_mul(cw).saturating_sub(6);
-            let fh = height_px.saturating_sub(4);
-            r.draw_rect_px(fx, fy, 2, fh, PANEL_CYAN);
-            r.draw_rect_px(
-                fx.saturating_add(fw.saturating_sub(2)),
-                fy,
-                2,
-                fh,
-                PANEL_CYAN,
-            );
-            r.draw_rect_px(fx, fy, fw, 2, PANEL_CYAN);
-            r.draw_rect_px(
-                fx,
-                fy.saturating_add(fh.saturating_sub(2)),
-                fw,
-                2,
-                PANEL_CYAN,
             );
         }
     }
@@ -5562,6 +5517,29 @@ impl ApplicationHandler for App {
                                 self.agent_evidence.as_ref(),
                                 self.agent_evidence_offset,
                             );
+                            if self.focus == Focus::Inspector {
+                                let (cw, ch) = r.cell_px();
+                                let fx = insp_vp.x.saturating_mul(cw).saturating_add(3);
+                                let fy = insp_vp.y.saturating_mul(ch).saturating_add(2);
+                                let fw = insp_vp.cols.saturating_mul(cw).saturating_sub(6);
+                                let fh = insp_vp.rows.saturating_mul(ch).saturating_sub(4);
+                                r.draw_rect_px(fx, fy, 2, fh, zet_gpu::renderer::PANEL_CYAN);
+                                r.draw_rect_px(
+                                    fx.saturating_add(fw.saturating_sub(2)),
+                                    fy,
+                                    2,
+                                    fh,
+                                    zet_gpu::renderer::PANEL_CYAN,
+                                );
+                                r.draw_rect_px(fx, fy, fw, 2, zet_gpu::renderer::PANEL_CYAN);
+                                r.draw_rect_px(
+                                    fx,
+                                    fy.saturating_add(fh.saturating_sub(2)),
+                                    fw,
+                                    2,
+                                    zet_gpu::renderer::PANEL_CYAN,
+                                );
+                            }
                         }
                     }
                     if bar > 0 {
