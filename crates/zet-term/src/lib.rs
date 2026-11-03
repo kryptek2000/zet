@@ -181,6 +181,8 @@ pub struct Terminal {
     /// 200~/201~ so newlines insert instead of executing. The window
     /// must honor it on every text-insertion path.
     bracketed_paste: bool,
+    mouse_mode: u16,
+    mouse_sgr: bool,
     pen: Pen,
     state: State,
     osc_buf: Vec<u8>,
@@ -253,6 +255,8 @@ impl Terminal {
             scroll_top: 0,
             scroll_bottom: rows - 1,
             bracketed_paste: false,
+            mouse_mode: 0,
+            mouse_sgr: false,
             pen: Pen {
                 fg: Color::Default,
                 bg: Color::Default,
@@ -558,6 +562,16 @@ impl Terminal {
                     }
                     if p == 2004 {
                         self.bracketed_paste = show;
+                    }
+                    if p == 1000 || p == 1002 || p == 1003 {
+                        if show {
+                            self.mouse_mode = p;
+                        } else if self.mouse_mode == p {
+                            self.mouse_mode = 0;
+                        }
+                    }
+                    if p == 1006 {
+                        self.mouse_sgr = show;
                     }
                 }
                 for &p in params {
@@ -956,6 +970,14 @@ impl Terminal {
     /// and main-buffer text. The scrollback itself is preserved underneath.
     pub fn alt_active(&self) -> bool {
         self.alt_active
+    }
+
+    pub fn mouse_mode(&self) -> u16 {
+        self.mouse_mode
+    }
+
+    pub fn mouse_sgr(&self) -> bool {
+        self.mouse_sgr
     }
 
     /// Absolute-row base for the visible grid: scrollback length on the

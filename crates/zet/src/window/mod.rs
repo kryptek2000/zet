@@ -27,6 +27,7 @@ use zet_term::Terminal;
 
 mod finalize;
 pub mod layout;
+mod mouse_report;
 pub mod panels;
 
 const HOOKS: [(&str, &str); 2] = [
@@ -819,6 +820,23 @@ impl App {
             ch,
             self.tabs[self.active].term.visible_base(),
         )
+    }
+
+    /// Terminal-relative cell for mouse protocol reporting. This intentionally
+    /// uses a zero scrollback offset, unlike `mouse_cell()` which is used for
+    /// text selection.
+    fn terminal_mouse_cell(&self) -> Option<zet_gpu::selection::CellPos> {
+        let (x, y) = self.mouse_px?;
+        let r = self.renderer.as_ref()?;
+        let (cw, ch) = r.cell_px();
+        let vp = self.frame_layout().term;
+        let gpu_vp = zet_gpu::renderer::Viewport {
+            x: vp.x,
+            y: vp.y,
+            cols: vp.cols,
+            rows: vp.rows,
+        };
+        zet_gpu::renderer::viewport_hit_test(x, y, gpu_vp, cw, ch, 0)
     }
 
     /// Copy the mouse selection to the clipboard (no-op when empty).
@@ -5607,26 +5625,43 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, y) => (y * 3.0).round() as isize,
                     MouseScrollDelta::PixelDelta(p) => (p.y / 20.0).round() as isize,
                 };
-                if self.tabs[self.active].term.alt_active() {
-                    // App owns the screen (vim/helix): wheel becomes
-                    // arrow keys, the xterm alternateScroll convention.
-                    if let Some(s) = &mut self.tabs[self.active].session {
-                        let seq = if lines >= 0 { b"\x1b[A" } else { b"\x1b[B" };
-                        for _ in 0..lines.abs().min(10) {
-                            let _ = s.write_all(seq);
+                let term = &self.tabs[self.active].term;
+                let action = mouse_report::wheel_action(
+                    term.mouse_mode(),
+                    term.mouse_sgr(),
+                    term.alt_active(),
+                    lines,
+                    self.terminal_mouse_cell(),
+                );
+                match action {
+                    mouse_report::WheelAction::Report(events) => {
+                        if let Some(s) = &mut self.tabs[self.active].session {
+                            for bytes in events {
+                                let _ = s.write_all(&bytes);
+                            }
                         }
                     }
-                    return;
-                }
-                // Scrolling drops the selection (it belongs to the old view).
-                self.tabs[self.active].selection = None;
-                self.tabs[self.active].selecting = false;
-                if lines >= 0 {
-                    self.tabs[self.active].term.scroll_view_up(lines as usize);
-                } else {
-                    self.tabs[self.active]
-                        .term
-                        .scroll_view_down((-lines) as usize);
+                    mouse_report::WheelAction::AltArrows { up, count } => {
+                        if let Some(s) = &mut self.tabs[self.active].session {
+                            let seq: &[u8] = if up { b"\x1b[A" } else { b"\x1b[B" };
+                            for _ in 0..count {
+                                let _ = s.write_all(seq);
+                            }
+                        }
+                    }
+                    mouse_report::WheelAction::Scroll(lines) => {
+                        // Scrollback selection belongs to the previous view.
+                        self.tabs[self.active].selection = None;
+                        self.tabs[self.active].selecting = false;
+                        if lines > 0 {
+                            self.tabs[self.active].term.scroll_view_up(lines as usize);
+                        } else {
+                            self.tabs[self.active]
+                                .term
+                                .scroll_view_down(lines.saturating_abs() as usize);
+                        }
+                    }
+                    mouse_report::WheelAction::Ignore => {}
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
