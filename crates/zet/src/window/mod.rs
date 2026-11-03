@@ -2258,29 +2258,6 @@ impl App {
             PANEL_BORDER_STRONG,
         );
 
-        if focused {
-            let fx = origin_x.saturating_add(2);
-            let fy = origin_y.saturating_add(2);
-            let fw = rail_w.saturating_sub(4);
-            let fh = rail_h.saturating_sub(4);
-            r.draw_rect_px(fx, fy, 2, fh, RAIL_FOCUS);
-            r.draw_rect_px(
-                fx.saturating_add(fw.saturating_sub(2)),
-                fy,
-                2,
-                fh,
-                RAIL_FOCUS,
-            );
-            r.draw_rect_px(fx, fy, fw, 2, RAIL_FOCUS);
-            r.draw_rect_px(
-                fx,
-                fy.saturating_add(fh.saturating_sub(2)),
-                fw,
-                2,
-                RAIL_FOCUS,
-            );
-        }
-
         // Content viewport (leaving 1 column for border)
         let content_cols = vp.cols.saturating_sub(1).max(1);
         let content = zet_gpu::renderer::Viewport {
@@ -2289,12 +2266,8 @@ impl App {
             cols: content_cols,
             rows: vp.rows,
         };
-        r.draw_rule(
-            vp.x + vp.cols.saturating_sub(1),
-            vp.y,
-            vp.y + vp.rows,
-            RAIL_BORDER,
-        );
+        let divider_x = (vp.x + vp.cols.saturating_sub(1)) * cw;
+        r.draw_rect_px(divider_x, origin_y, 2, rail_h, RAIL_BORDER);
 
         let rows = panels::rail_rows(vp.rows, snapshot.sessions.len(), snapshot.commands.len());
         let footer_row = vp.rows.saturating_sub(1);
@@ -2627,6 +2600,29 @@ impl App {
                     RAIL_DIM_INK,
                 );
             }
+        }
+
+        if focused {
+            let fx = origin_x.saturating_add(2);
+            let fy = origin_y.saturating_add(2);
+            let fw = rail_w.saturating_sub(4);
+            let fh = rail_h.saturating_sub(4);
+            r.draw_rect_px(fx, fy, 2, fh, RAIL_FOCUS);
+            r.draw_rect_px(
+                fx.saturating_add(fw.saturating_sub(2)),
+                fy,
+                2,
+                fh,
+                RAIL_FOCUS,
+            );
+            r.draw_rect_px(fx, fy, fw, 2, RAIL_FOCUS);
+            r.draw_rect_px(
+                fx,
+                fy.saturating_add(fh.saturating_sub(2)),
+                fw,
+                2,
+                RAIL_FOCUS,
+            );
         }
     }
 
