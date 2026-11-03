@@ -2270,7 +2270,7 @@ impl App {
             vp.x + vp.cols.saturating_sub(1),
             vp.y,
             vp.y + vp.rows,
-            RAIL_BORDER,
+            if focused { RAIL_FOCUS } else { RAIL_BORDER },
         );
 
         let rows = panels::rail_rows(vp.rows, snapshot.sessions.len(), snapshot.commands.len());
