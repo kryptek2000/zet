@@ -539,6 +539,21 @@ pub const SESSION_GAP_ROWS: usize = 1;
 /// Keeping this in the pure layout model makes drawing and hit-testing agree.
 pub const COMMAND_CARD_ROWS: usize = 2;
 
+/// Column for the exit label and, when it can sit clear of the exit, the
+/// right-aligned duration in a rail command detail row.
+pub const RAIL_EXIT_COL: u32 = 5;
+
+pub fn rail_command_detail_columns(cols: u32, exit: &str, duration: &str) -> (u32, Option<u32>) {
+    let exit_text = format!("exit {}", single_line(exit));
+    let exit_end = RAIL_EXIT_COL
+        .saturating_add(text_cells(&exit_text) as u32)
+        .saturating_add(1);
+    let duration_cells = text_cells(&single_line(duration)) as u32;
+    let duration_col = cols.saturating_sub(duration_cells.saturating_add(1));
+    let duration_col = (duration_cells > 0 && duration_col > exit_end).then_some(duration_col);
+    (RAIL_EXIT_COL, duration_col)
+}
+
 /// Deterministic rail row layout shared by rendering and hit testing.
 ///
 /// Expanded rails get a brand row, a mode row, a spacer, the sessions
@@ -648,7 +663,10 @@ pub fn rail_row_layout(
 
 #[cfg(test)]
 mod rail_row_tests {
-    use super::{rail_command_at_row, rail_rows, rail_session_at_row, RailRow, COMMAND_CARD_ROWS};
+    use super::{
+        rail_command_at_row, rail_command_detail_columns, rail_rows, rail_session_at_row,
+        text_cells, RailRow, COMMAND_CARD_ROWS, RAIL_EXIT_COL,
+    };
 
     #[test]
     fn one_session_has_two_rows_and_footer_last() {
@@ -814,6 +832,24 @@ mod rail_row_tests {
         for rows in 0u32..=20 {
             assert_eq!(rail_session_at_row(rows.saturating_sub(1), 3, rows), None);
         }
+    }
+
+    #[test]
+    fn command_detail_columns_never_overlap_and_keep_duration_when_readable() {
+        let (exit_col, duration_col) = rail_command_detail_columns(22, "0", "7ms");
+        assert_eq!(exit_col, RAIL_EXIT_COL);
+        let duration_col = duration_col.expect("duration fits");
+        let exit_end = exit_col + text_cells("exit 0") as u32;
+        assert!(duration_col > exit_end);
+        assert!(duration_col + text_cells("7ms") as u32 <= 22);
+
+        let (_, duration_col) = rail_command_detail_columns(12, "255", "123456789ms");
+        assert_eq!(
+            duration_col, None,
+            "crowded detail must drop metadata, not overlap"
+        );
+        let (_, duration_col) = rail_command_detail_columns(22, "0", "");
+        assert_eq!(duration_col, None);
     }
 }
 
@@ -1075,6 +1111,26 @@ mod inspector_layout_tests {
             TimelineAvailability::Recorded.empty_message(),
             TimelineAvailability::Unavailable.empty_message()
         );
+    }
+
+    #[test]
+    fn refined_inspector_descriptors_stay_clear_at_supported_widths() {
+        let views = [
+            ("CONTEXTUAL INSPECTOR", "SESSION-SCOPED / OBSERVED"),
+            ("OBSERVED WORK TIMELINE", "CROSS-SESSION / OBSERVED"),
+            ("AGENT ACTIVITY", "LAUNCH CANDIDATES ONLY"),
+        ];
+        for (title, descriptor) in views {
+            assert_eq!(
+                inspector_header_descriptor_col(32, title, descriptor),
+                None,
+                "32-col Inspector must keep the title and descriptor clear: {title}"
+            );
+            let col = inspector_header_descriptor_col(80, title, descriptor)
+                .unwrap_or_else(|| panic!("descriptor should fit at 80 cols: {title}"));
+            assert!(col > 4 + text_cells(title) as u32);
+            assert!(col + text_cells(descriptor) as u32 <= 78);
+        }
     }
 
     #[test]

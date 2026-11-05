@@ -100,6 +100,16 @@ impl From<LayoutMode> for Layout {
     }
 }
 
+/// Truthful chrome label for the effective (not requested) panel state.
+pub fn chrome_mode_label(rail: bool, inspector: bool) -> &'static str {
+    match (rail, inspector) {
+        (true, true) => "MISSION CONTROL",
+        (true, false) => "WORKSPACE",
+        (false, true) => "EVIDENCE VIEW",
+        (false, false) => "TERMINAL FOCUS",
+    }
+}
+
 /// A cell rectangle inside the window grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Viewport {
@@ -303,6 +313,14 @@ fn proportional_panel_cols(cols: u32, percent: u32, minimum: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chrome_mode_label_tracks_effective_panels() {
+        assert_eq!(chrome_mode_label(false, false), "TERMINAL FOCUS");
+        assert_eq!(chrome_mode_label(true, false), "WORKSPACE");
+        assert_eq!(chrome_mode_label(false, true), "EVIDENCE VIEW");
+        assert_eq!(chrome_mode_label(true, true), "MISSION CONTROL");
+    }
 
     #[test]
     fn terminal_focus_is_the_full_width_grid() {
