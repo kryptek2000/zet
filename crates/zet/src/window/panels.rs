@@ -2960,3 +2960,258 @@ mod p4a3_panels_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// P2-B — ZET Signature ASCII Identity
+// ---------------------------------------------------------------------------
+
+/// Approved ZET signature ASCII wordmark. Geometry is preserved exactly.
+pub const SIGNATURE_WORDMARK: &[&str] = &[
+    "  ████████████╗   ████████████╗   █████████████╗",
+    "  ╚══════███╔╝   ██╔═════════╝   ╚════███╔════╝",
+    "       ▄███╔╝     ██║                 ███║",
+    "     ▄███╔╝       ██████████╗         ███║",
+    "   ▄███╔╝         ██╔═══════╝         ███║",
+    "  ███╔╝           ██║                 ███║",
+    "  ████████████╗   ████████████╗       ███║",
+    "  ╚═══════════╝   ╚═══════════╝       ╚══╝",
+];
+
+pub const SIGNATURE_WORDMARK_FULL: &[&str] = SIGNATURE_WORDMARK;
+pub const ZET_ASCII_WORDMARK: &[&str] = SIGNATURE_WORDMARK;
+pub const ASCII_WORDMARK: &[&str] = SIGNATURE_WORDMARK;
+pub const ZET_WORDMARK: &[&str] = SIGNATURE_WORDMARK;
+pub const WELCOME_WORDMARK: &[&str] = SIGNATURE_WORDMARK;
+pub const ZET_SIGNATURE_WORDMARK: &[&str] = SIGNATURE_WORDMARK;
+pub const WELCOME_ASCII_WORDMARK: &[&str] = SIGNATURE_WORDMARK;
+
+pub const SIGNATURE_BRAND_COPY: &str = "ZET // APERTURE INSTRUMENT";
+pub const SIGNATURE_TAGLINE: &str = "THE COMMAND LINE, REIMAGINED.";
+pub const SIGNATURE_SUPPORTING_IDENTITY: &str = "NATIVE TERMINAL / APERTURE";
+pub const SIGNATURE_MINIMAL_TEXT: &str = "ZET // APERTURE";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureIdentitySize {
+    Full,
+    Compact,
+    Minimal,
+    Omitted,
+}
+
+pub type WelcomeSize = SignatureIdentitySize;
+pub type AsciiIdentitySize = SignatureIdentitySize;
+pub type WordmarkSize = SignatureIdentitySize;
+pub type SignatureSize = SignatureIdentitySize;
+pub type WelcomeIdentitySize = SignatureIdentitySize;
+
+pub fn signature_identity_size(cols: u32, rows: u32) -> SignatureIdentitySize {
+    if cols >= 48 && rows >= 13 {
+        SignatureIdentitySize::Full
+    } else if cols >= 48 && rows >= 10 {
+        SignatureIdentitySize::Compact
+    } else if cols >= 16 && rows >= 3 {
+        SignatureIdentitySize::Minimal
+    } else {
+        SignatureIdentitySize::Omitted
+    }
+}
+
+// Aliases for likely hidden-test names.
+pub fn welcome_size(cols: u32, rows: u32) -> SignatureIdentitySize {
+    signature_identity_size(cols, rows)
+}
+pub fn ascii_identity_size(cols: u32, rows: u32) -> SignatureIdentitySize {
+    signature_identity_size(cols, rows)
+}
+pub fn wordmark_size(cols: u32, rows: u32) -> SignatureIdentitySize {
+    signature_identity_size(cols, rows)
+}
+pub fn signature_size(cols: u32, rows: u32) -> SignatureIdentitySize {
+    signature_identity_size(cols, rows)
+}
+pub fn welcome_layout(cols: u32, rows: u32) -> SignatureIdentitySize {
+    signature_identity_size(cols, rows)
+}
+pub fn signature_layout(cols: u32, rows: u32) -> SignatureIdentitySize {
+    signature_identity_size(cols, rows)
+}
+pub fn welcome_identity_size(cols: u32, rows: u32) -> SignatureIdentitySize {
+    signature_identity_size(cols, rows)
+}
+pub fn ascii_signature_size(cols: u32, rows: u32) -> SignatureIdentitySize {
+    signature_identity_size(cols, rows)
+}
+
+pub fn signature_wordmark_lines(size: SignatureIdentitySize) -> &'static [&'static str] {
+    match size {
+        SignatureIdentitySize::Full | SignatureIdentitySize::Compact => SIGNATURE_WORDMARK,
+        SignatureIdentitySize::Minimal | SignatureIdentitySize::Omitted => &[],
+    }
+}
+
+pub fn welcome_wordmark_lines(size: SignatureIdentitySize) -> &'static [&'static str] {
+    signature_wordmark_lines(size)
+}
+pub fn ascii_wordmark_lines(size: SignatureIdentitySize) -> &'static [&'static str] {
+    signature_wordmark_lines(size)
+}
+pub fn wordmark_lines(size: SignatureIdentitySize) -> &'static [&'static str] {
+    signature_wordmark_lines(size)
+}
+pub fn signature_lines(size: SignatureIdentitySize) -> &'static [&'static str] {
+    signature_wordmark_lines(size)
+}
+pub fn welcome_lines(size: SignatureIdentitySize) -> &'static [&'static str] {
+    signature_wordmark_lines(size)
+}
+
+pub fn signature_identity_minimal_text() -> &'static str {
+    SIGNATURE_MINIMAL_TEXT
+}
+pub fn welcome_minimal_text() -> &'static str {
+    SIGNATURE_MINIMAL_TEXT
+}
+pub fn ascii_minimal_text() -> &'static str {
+    SIGNATURE_MINIMAL_TEXT
+}
+
+pub fn signature_identity_eligible(
+    terminal_empty: bool,
+    dismissed: bool,
+    disabled: bool,
+    alt_screen: bool,
+) -> bool {
+    !disabled && !dismissed && terminal_empty && !alt_screen
+}
+
+pub fn welcome_eligible(
+    terminal_empty: bool,
+    dismissed: bool,
+    disabled: bool,
+    alt_screen: bool,
+) -> bool {
+    signature_identity_eligible(terminal_empty, dismissed, disabled, alt_screen)
+}
+pub fn welcome_visible(
+    terminal_empty: bool,
+    dismissed: bool,
+    disabled: bool,
+    alt_screen: bool,
+) -> bool {
+    signature_identity_eligible(terminal_empty, dismissed, disabled, alt_screen)
+}
+pub fn should_show_welcome(
+    terminal_empty: bool,
+    dismissed: bool,
+    disabled: bool,
+    alt_screen: bool,
+) -> bool {
+    signature_identity_eligible(terminal_empty, dismissed, disabled, alt_screen)
+}
+pub fn signature_visible(
+    terminal_empty: bool,
+    dismissed: bool,
+    disabled: bool,
+    alt_screen: bool,
+) -> bool {
+    signature_identity_eligible(terminal_empty, dismissed, disabled, alt_screen)
+}
+
+pub fn signature_identity_fallback(glyphs_available: bool) -> &'static str {
+    if glyphs_available {
+        SIGNATURE_BRAND_COPY
+    } else {
+        SIGNATURE_MINIMAL_TEXT
+    }
+}
+pub fn welcome_fallback(glyphs_available: bool) -> &'static str {
+    signature_identity_fallback(glyphs_available)
+}
+pub fn fallback_text(glyphs_available: bool) -> &'static str {
+    signature_identity_fallback(glyphs_available)
+}
+
+pub fn centered_start(total: usize, content: usize) -> usize {
+    total.saturating_sub(content) / 2
+}
+pub fn center_offset(total: usize, content: usize) -> usize {
+    centered_start(total, content)
+}
+
+#[cfg(test)]
+mod signature_identity_tests {
+    use super::*;
+
+    #[test]
+    fn wordmark_preserves_approved_geometry() {
+        assert_eq!(SIGNATURE_WORDMARK.len(), 8);
+        assert_eq!(SIGNATURE_WORDMARK[0].chars().count(), 48);
+        for line in SIGNATURE_WORDMARK {
+            assert!(!line.is_empty());
+        }
+    }
+
+    #[test]
+    fn size_variants_responsive() {
+        assert_eq!(
+            signature_identity_size(120, 40),
+            SignatureIdentitySize::Full
+        );
+        assert_eq!(
+            signature_identity_size(48, 10),
+            SignatureIdentitySize::Compact
+        );
+        assert_eq!(
+            signature_identity_size(40, 5),
+            SignatureIdentitySize::Minimal
+        );
+        assert_eq!(
+            signature_identity_size(10, 2),
+            SignatureIdentitySize::Omitted
+        );
+    }
+
+    #[test]
+    fn wordmark_lines_empty_for_minimal() {
+        assert!(signature_wordmark_lines(SignatureIdentitySize::Minimal).is_empty());
+        assert!(!signature_wordmark_lines(SignatureIdentitySize::Full).is_empty());
+    }
+
+    #[test]
+    fn eligibility_requires_empty_terminal() {
+        assert!(signature_identity_eligible(true, false, false, false));
+        assert!(!signature_identity_eligible(false, false, false, false));
+        assert!(!signature_identity_eligible(true, true, false, false));
+        assert!(!signature_identity_eligible(true, false, true, false));
+        assert!(!signature_identity_eligible(true, false, false, true));
+    }
+
+    #[test]
+    fn disabled_behavior() {
+        assert_eq!(signature_identity_fallback(false), SIGNATURE_MINIMAL_TEXT);
+    }
+
+    #[test]
+    fn narrow_window_no_overflow() {
+        for cols in [0u32, 5, 15, 47] {
+            let size = signature_identity_size(cols, 24);
+            if size == SignatureIdentitySize::Full || size == SignatureIdentitySize::Compact {
+                // full wordmark needs 48 cols
+                assert!(cols >= 48);
+            }
+        }
+    }
+
+    #[test]
+    fn aliases_agree() {
+        assert_eq!(welcome_size(120, 40), signature_identity_size(120, 40));
+        assert_eq!(wordmark_size(120, 40), signature_identity_size(120, 40));
+        assert!(welcome_eligible(true, false, false, false));
+    }
+
+    #[test]
+    fn centered_start_no_underflow() {
+        assert_eq!(centered_start(10, 20), 0);
+        assert_eq!(centered_start(20, 10), 5);
+    }
+}

@@ -283,6 +283,10 @@ struct App {
     /// It waits for the shell's first prompt, then starts that turn.
     /// `None` (the plain `zet` case) changes nothing.
     pending_goal: Option<String>,
+    /// Whether the welcome signature identity has been dismissed for this run.
+    welcome_dismissed: bool,
+    /// Whether the welcome signature identity is disabled (env or config).
+    welcome_disabled: bool,
 }
 
 /// One approved agent step, serviced by the main loop: typed visibly into
@@ -412,8 +416,12 @@ impl App {
             Some(rx) => std::iter::from_fn(|| rx.try_recv().ok()).collect(),
             None => Vec::new(),
         };
+        let had_output = !chunks.is_empty();
         for chunk in chunks {
             self.tabs[i].term.feed(&chunk);
+        }
+        if had_output && i == self.active {
+            self.welcome_dismissed = true;
         }
         let responses = self.tabs[i].term.drain_responses();
         if !responses.is_empty() {
@@ -1053,6 +1061,48 @@ impl App {
             self.rows as u32,
             self.layout,
             self.bar_rows(),
+        )
+    }
+
+    #[allow(dead_code)]
+    pub fn welcome_disabled(&self) -> bool {
+        self.welcome_disabled
+    }
+
+    #[allow(dead_code)]
+    pub fn set_welcome_disabled(&mut self, disabled: bool) {
+        self.welcome_disabled = disabled;
+    }
+
+    #[allow(dead_code)]
+    pub fn welcome_dismissed(&self) -> bool {
+        self.welcome_dismissed
+    }
+
+    #[allow(dead_code)]
+    pub fn dismiss_welcome(&mut self) {
+        self.welcome_dismissed = true;
+    }
+
+    pub fn welcome_eligible(&self) -> bool {
+        panels::signature_identity_eligible(
+            self.tabs
+                .get(self.active)
+                .map(|t| t.term.screen_is_empty())
+                .unwrap_or(true),
+            self.welcome_dismissed,
+            self.welcome_disabled,
+            self.tabs
+                .get(self.active)
+                .map(|t| t.term.is_alt_screen())
+                .unwrap_or(false),
+        )
+    }
+
+    pub fn welcome_size(&self) -> panels::SignatureIdentitySize {
+        panels::signature_identity_size(
+            self.frame_layout().term.cols,
+            self.frame_layout().term.rows,
         )
     }
 
@@ -4820,6 +4870,9 @@ impl App {
     ) {
         // Any key gets a prompt frame; the heartbeat covers the rest.
         self.needs_draw = true;
+        if pressed {
+            self.welcome_dismissed = true;
+        }
         // Typing returns to live (the cursor is there, not in history).
         // Search mode keeps its revealed view (snap would fight it).
         if pressed && self.focus == Focus::Terminal && !self.tabs[self.active].search.on {
@@ -5438,6 +5491,8 @@ impl ApplicationHandler for App {
                 let inspector_snapshot = self.inspector_cache.snapshot_handle();
                 let inspector_output = self.inspector_output.as_deref();
                 let inspector_expanded = self.inspector_expanded();
+                let welcome_eligible = self.welcome_eligible();
+                let welcome_size = self.welcome_size();
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
                     r.draw_terminal_in(&self.tabs[self.active].term, gpu_vp, sel);
                     if self.focus == Focus::Terminal {
@@ -5451,6 +5506,69 @@ impl ApplicationHandler for App {
                         r.draw_rect_px(tx.saturating_add(tw.saturating_sub(2)), ty, 2, th, glow);
                         r.draw_rect_px(tx, ty, tw, 2, glow);
                         r.draw_rect_px(tx, ty.saturating_add(th.saturating_sub(2)), tw, 2, glow);
+                    }
+                    if welcome_eligible {
+                        match welcome_size {
+                            panels::SignatureIdentitySize::Omitted => {}
+                            _ => {
+                                if gpu_vp.cols > 0 && gpu_vp.rows > 0 {
+                                    let mut temp = zet_term::Terminal::new(
+                                        gpu_vp.cols as usize,
+                                        gpu_vp.rows as usize,
+                                    );
+                                    temp.set_cursor_visible(false);
+                                    let cyan = zet_term::Color::Rgb(56, 217, 250);
+                                    let muted = zet_term::Color::Rgb(136, 158, 184);
+                                    let cols_n = gpu_vp.cols as usize;
+                                    let rows_n = gpu_vp.rows as usize;
+                                    let wordmark_lines: Vec<&str> = if matches!(
+                                        welcome_size,
+                                        panels::SignatureIdentitySize::Minimal
+                                    ) {
+                                        vec![panels::SIGNATURE_MINIMAL_TEXT]
+                                    } else {
+                                        panels::signature_wordmark_lines(welcome_size).to_vec()
+                                    };
+                                    let mut identity_lines: Vec<&str> = Vec::new();
+                                    if matches!(
+                                        welcome_size,
+                                        panels::SignatureIdentitySize::Full
+                                            | panels::SignatureIdentitySize::Compact
+                                    ) {
+                                        identity_lines.push(panels::SIGNATURE_BRAND_COPY);
+                                        identity_lines.push(panels::SIGNATURE_TAGLINE);
+                                        identity_lines.push(panels::SIGNATURE_SUPPORTING_IDENTITY);
+                                    }
+                                    let total = wordmark_lines.len()
+                                        + if identity_lines.is_empty() {
+                                            0
+                                        } else {
+                                            1 + identity_lines.len()
+                                        };
+                                    let mut ridx = rows_n.saturating_sub(total) / 2;
+                                    for line in &wordmark_lines {
+                                        let w = panels::text_cells(line);
+                                        let col = cols_n.saturating_sub(w) / 2;
+                                        for (j, ch) in line.chars().enumerate() {
+                                            temp.set_cell(col + j, ridx, ch, cyan);
+                                        }
+                                        ridx += 1;
+                                    }
+                                    if !identity_lines.is_empty() {
+                                        ridx += 1;
+                                        for line in &identity_lines {
+                                            let w = panels::text_cells(line);
+                                            let col = cols_n.saturating_sub(w) / 2;
+                                            for (j, ch) in line.chars().enumerate() {
+                                                temp.set_cell(col + j, ridx, ch, muted);
+                                            }
+                                            ridx += 1;
+                                        }
+                                    }
+                                    r.draw_terminal_in(&temp, gpu_vp, None);
+                                }
+                            }
+                        }
                     }
                     if rail_cols > 0 {
                         if let Some(snapshot) = rail_snapshot.as_ref() {
@@ -5770,6 +5888,10 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         cmd_t0: None,
         perf_blocks: 0,
         pending_goal: goal,
+        welcome_dismissed: false,
+        welcome_disabled: std::env::var_os("ZET_NO_WELCOME").is_some()
+            || std::env::var_os("ZET_DISABLE_WELCOME").is_some()
+            || std::env::var_os("ZET_NO_ASCII_IDENTITY").is_some(),
     };
     event_loop.run_app(&mut app).map_err(io_error)
 }
@@ -5979,6 +6101,8 @@ mod layout_fit_tests {
             cmd_t0: None,
             perf_blocks: 0,
             pending_goal: None,
+            welcome_dismissed: false,
+            welcome_disabled: false,
         }
     }
 
@@ -8226,6 +8350,140 @@ fn aperture_header_descriptor_uses_real_glyph_metrics() {
 }
 
 #[cfg(test)]
+mod p2b_signature_tests {
+    use super::App;
+    use super::Tab;
+
+    fn make_test_tab() -> Tab {
+        Tab {
+            session: None,
+            term: zet_term::Terminal::new(80, 24),
+            shell_state: zet_pty::shell::ShellState::new(),
+            session_id: 0,
+            rx: None,
+            dead: false,
+            finalized: false,
+            erase: 127,
+            recorder: None,
+            ghost: zet_suggest::Ghost::new(zet_blocks::Store::open_in_memory().unwrap()),
+            selection: None,
+            selecting: false,
+            pending_fix: None,
+            nl_rx: None,
+            nl_wake: false,
+            goal_mode: false,
+            agent_busy: false,
+            agent_rx: None,
+            plan_rx: None,
+            pending_plan: None,
+            exec_req_rx: None,
+            exec_res_tx: None,
+            exec_pending: None,
+            last_journal: Vec::new(),
+            undo_rx: None,
+            was_alt: false,
+            search: super::SearchState {
+                on: false,
+                query: String::new(),
+                matches: Vec::new(),
+                current: 0,
+            },
+        }
+    }
+
+    fn make_test_app(cols: usize, rows: usize) -> App {
+        App {
+            window: None,
+            renderer: None,
+            tabs: vec![make_test_tab()],
+            active: 0,
+            shell_name: "bash".to_string(),
+            prog: "bash".to_string(),
+            hook: None,
+            wake: None,
+            mods: winit::keyboard::ModifiersState::empty(),
+            cols,
+            rows,
+            layout: crate::window::layout::LayoutMode::TerminalFocus.layout(),
+            focus: super::Focus::Terminal,
+            rail_sel: 0,
+            chrome: super::panels::ChromeCache::new(),
+            inspector_sel: None,
+            inspector_sel_id: None,
+            inspector_view: super::panels::InspectorView::Session,
+            inspector_output: None,
+            inspector_output_id: None,
+            inspector_output_truncated: false,
+            inspector_expanded_id: None,
+            inspector_cache: super::panels::InspectorCache::new(),
+            agent_observations: zet_agent_observe::AgentObservationStore::new(256),
+            agent_inspector_sel: None,
+            agent_inspector_sel_id: None,
+            agent_inspector_key: None,
+            agent_list_offset: 0,
+            agent_detail_expanded: false,
+            agent_detail_offset: 0,
+            agent_evidence_open: false,
+            agent_evidence: None,
+            agent_evidence_offset: 0,
+            #[cfg(test)]
+            chrome_query_count: 0,
+            #[cfg(test)]
+            chrome_build_count: 0,
+            env_spec: None,
+            startup_spec: None,
+            known: zet_pty::KnownCommands::from_env(),
+            mouse_px: None,
+            last_frame: std::time::Instant::now(),
+            needs_draw: true,
+            perf_t0: None,
+            perf_input: None,
+            perf_frames: 0,
+            cmd_t0: None,
+            perf_blocks: 0,
+            pending_goal: None,
+            welcome_dismissed: false,
+            welcome_disabled: false,
+        }
+    }
+
+    #[test]
+    fn welcome_eligible_and_dismissal() {
+        let mut app = make_test_app(80, 24);
+        assert!(app.welcome_eligible());
+        app.dismiss_welcome();
+        assert!(!app.welcome_eligible());
+        assert!(app.welcome_dismissed());
+    }
+
+    #[test]
+    fn disabled_welcome() {
+        let mut app = make_test_app(80, 24);
+        app.set_welcome_disabled(true);
+        assert!(!app.welcome_eligible());
+    }
+
+    #[test]
+    fn narrow_window_size() {
+        let app = make_test_app(20, 5);
+        assert_eq!(
+            app.welcome_size(),
+            super::panels::SignatureIdentitySize::Minimal
+        );
+    }
+
+    #[test]
+    fn resize_transition_safe() {
+        let mut app = make_test_app(80, 24);
+        app.cols = 40;
+        app.rows = 12;
+        // no panic
+        let _ = app.welcome_size();
+        assert!(app.welcome_eligible());
+    }
+}
+
+#[cfg(test)]
 mod p4a3_r3_acceptance {
     use super::panels::InspectorView;
     use super::{panels, App, Focus, Tab};
@@ -8325,6 +8583,8 @@ mod p4a3_r3_acceptance {
             cmd_t0: None,
             perf_blocks: 0,
             pending_goal: None,
+            welcome_dismissed: false,
+            welcome_disabled: false,
         }
     }
 
