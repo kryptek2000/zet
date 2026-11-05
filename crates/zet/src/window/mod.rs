@@ -3626,14 +3626,15 @@ impl App {
         );
 
         if let Some(descriptor_col) = header.descriptor_col {
-            Self::draw_ui_row(
-                r,
-                vp,
-                0,
-                descriptor_col,
+            let descriptor_x = (vp.x.saturating_add(descriptor_col)).saturating_mul(cw) as f32;
+            let descriptor_max_width = vp.cols.saturating_sub(descriptor_col).saturating_mul(cw);
+            r.draw_ui_text_px(
+                descriptor_x,
+                origin_y as f32 + 17.5,
                 descriptor,
                 UI_META,
                 descriptor_ink,
+                Some(descriptor_max_width),
             );
         }
 

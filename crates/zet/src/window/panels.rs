@@ -862,7 +862,7 @@ mod inspector_layout_tests {
         inspector_visible_commands, text_cells, timeline_display_rows, timeline_empty_row,
         timeline_layout, timeline_preview_heading, timeline_row_layout, timeline_session_badges,
         CommandRow, InspectorView, Provenance, TimelineAvailability, INSPECTOR_ACTIVITY_START,
-        TIMELINE_BADGE_COL, TIMELINE_COMMAND_COL, TIMELINE_INDEX_COL,
+        INSPECTOR_HEADER_RIGHT_INSET, TIMELINE_BADGE_COL, TIMELINE_COMMAND_COL, TIMELINE_INDEX_COL,
     };
 
     fn command(id: i64, session: &str, text: &str, exit: &str, duration: &str) -> CommandRow {
@@ -1158,6 +1158,16 @@ mod inspector_layout_tests {
             );
             assert!(layout.tab_height_px > 4, "tabs must retain usable height");
         }
+    }
+
+    #[test]
+    fn inspector_header_descriptor_has_right_breathing_room() {
+        let descriptor = "LAUNCH CANDIDATES ONLY";
+        let col = inspector_header_descriptor_col(80, "AGENT ACTIVITY", descriptor).unwrap();
+        assert!(
+            col + text_cells(descriptor) as u32 + INSPECTOR_HEADER_RIGHT_INSET <= 80,
+            "descriptor must keep the configured right-side inset"
+        );
     }
 
     #[test]
@@ -1617,6 +1627,9 @@ pub const TIMELINE_INDEX_COL: u32 = 2;
 pub const TIMELINE_BADGE_COL: u32 = 6;
 pub const TIMELINE_COMMAND_COL: u32 = 9;
 pub const TIMELINE_RIGHT_INSET: u32 = 2;
+/// Extra right-side breathing room for the Contextual Inspector header's
+/// contextual descriptor, so it does not sit in the panel's edge area.
+pub const INSPECTOR_HEADER_RIGHT_INSET: u32 = 4;
 pub const TIMELINE_MIN_COMMAND_CELLS: usize = 16;
 pub const TIMELINE_METADATA_MIN_COLS: u32 = 40;
 
@@ -1866,7 +1879,7 @@ pub fn inspector_header_descriptor_col(cols: u32, title: &str, descriptor: &str)
         return None;
     }
     let col = cols
-        .saturating_sub(TIMELINE_RIGHT_INSET)
+        .saturating_sub(INSPECTOR_HEADER_RIGHT_INSET)
         .saturating_sub(descriptor_cells);
     (col > title_end).then_some(col)
 }
