@@ -3551,6 +3551,7 @@ impl App {
         } else {
             (8u32, 16u32)
         };
+        let tab_end = tab_end.min(vp.cols);
         let tab_x = origin_x
             .saturating_add(tab_start.saturating_mul(cw))
             .saturating_add(2);
