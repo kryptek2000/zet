@@ -29,6 +29,7 @@ mod finalize;
 pub mod layout;
 mod mouse_report;
 pub mod panels;
+mod welcome;
 
 const HOOKS: [(&str, &str); 2] = [
     ("bash", "zet-integration.bash"),
@@ -283,6 +284,9 @@ struct App {
     /// It waits for the shell's first prompt, then starts that turn.
     /// `None` (the plain `zet` case) changes nothing.
     pending_goal: Option<String>,
+    /// Decorative signature identity, planned from genuinely free terminal
+    /// rows and retired on interaction or conflicting output.
+    welcome: welcome::WelcomeIdentity,
 }
 
 /// One approved agent step, serviced by the main loop: typed visibly into
@@ -1855,6 +1859,7 @@ impl App {
             self.bar_rows(),
         );
         let (cols, rows) = (cols as usize, rows as usize);
+        self.welcome.release_placement();
         for tab in &mut self.tabs {
             tab.term.resize(cols, rows);
             if let Some(s) = &tab.session {
@@ -4820,6 +4825,11 @@ impl App {
     ) {
         // Any key gets a prompt frame; the heartbeat covers the rest.
         self.needs_draw = true;
+        // Typing into the terminal retires the decorative identity before
+        // the key is forwarded, so it can never overlap shell input.
+        if pressed && self.focus == Focus::Terminal {
+            self.welcome.dismiss();
+        }
         // Typing returns to live (the cursor is there, not in history).
         // Search mode keeps its revealed view (snap would fight it).
         if pressed && self.focus == Focus::Terminal && !self.tabs[self.active].search.on {
@@ -5340,6 +5350,7 @@ impl ApplicationHandler for App {
 
             WindowEvent::Resized(size) => {
                 self.needs_draw = true;
+                self.welcome.release_placement();
                 if let Some(r) = &mut self.renderer {
                     let (cw, ch) = r.cell_px();
                     r.resize(size.width, size.height);
@@ -5438,6 +5449,13 @@ impl ApplicationHandler for App {
                 let inspector_snapshot = self.inspector_cache.snapshot_handle();
                 let inspector_output = self.inspector_output.as_deref();
                 let inspector_expanded = self.inspector_expanded();
+                // Plan before borrowing the renderer. The identity only uses
+                // genuinely free rows and retires itself when content or the
+                // cursor reaches its reserved region.
+                let welcome = self
+                    .welcome
+                    .present(&self.tabs[self.active].term, gpu_vp.cols, gpu_vp.rows)
+                    .cloned();
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
                     r.draw_terminal_in(&self.tabs[self.active].term, gpu_vp, sel);
                     if self.focus == Focus::Terminal {
@@ -5451,6 +5469,9 @@ impl ApplicationHandler for App {
                         r.draw_rect_px(tx.saturating_add(tw.saturating_sub(2)), ty, 2, th, glow);
                         r.draw_rect_px(tx, ty, tw, 2, glow);
                         r.draw_rect_px(tx, ty.saturating_add(th.saturating_sub(2)), tw, 2, glow);
+                    }
+                    if let Some(presentation) = &welcome {
+                        welcome::draw(r, gpu_vp, presentation);
                     }
                     if rail_cols > 0 {
                         if let Some(snapshot) = rail_snapshot.as_ref() {
@@ -5586,6 +5607,11 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 self.needs_draw = true;
+                // Clicking inside the live terminal is interaction: retire
+                // the identity before selection or PTY routing runs.
+                if state == ElementState::Pressed && self.mouse_cell().is_some() {
+                    self.welcome.dismiss();
+                }
                 match (button, state) {
                     // Left-drag selects; click without drag clears.
                     (MouseButton::Left, ElementState::Pressed) => {
@@ -5620,6 +5646,12 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.needs_draw = true;
+                // Wheel interaction over the terminal retires the identity
+                // before scrollback or mouse protocol handling changes the
+                // view underneath it.
+                if self.terminal_mouse_cell().is_some() {
+                    self.welcome.dismiss();
+                }
                 // Wheel notch: 3 lines (LineDelta) or ~1 line per 20px.
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => (y * 3.0).round() as isize,
@@ -5770,6 +5802,7 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         cmd_t0: None,
         perf_blocks: 0,
         pending_goal: goal,
+        welcome: welcome::WelcomeIdentity::new(welcome::WelcomeIdentity::disabled_from_env()),
     };
     event_loop.run_app(&mut app).map_err(io_error)
 }
@@ -5979,6 +6012,7 @@ mod layout_fit_tests {
             cmd_t0: None,
             perf_blocks: 0,
             pending_goal: None,
+            welcome: super::welcome::WelcomeIdentity::new(false),
         }
     }
 
@@ -8226,6 +8260,168 @@ fn aperture_header_descriptor_uses_real_glyph_metrics() {
 }
 
 #[cfg(test)]
+mod p2b_signature_tests {
+    use super::App;
+    use super::Tab;
+
+    fn make_test_tab() -> Tab {
+        Tab {
+            session: None,
+            term: zet_term::Terminal::new(80, 24),
+            shell_state: zet_pty::shell::ShellState::new(),
+            session_id: 0,
+            rx: None,
+            dead: false,
+            finalized: false,
+            erase: 127,
+            recorder: None,
+            ghost: zet_suggest::Ghost::new(zet_blocks::Store::open_in_memory().unwrap()),
+            selection: None,
+            selecting: false,
+            pending_fix: None,
+            nl_rx: None,
+            nl_wake: false,
+            goal_mode: false,
+            agent_busy: false,
+            agent_rx: None,
+            plan_rx: None,
+            pending_plan: None,
+            exec_req_rx: None,
+            exec_res_tx: None,
+            exec_pending: None,
+            last_journal: Vec::new(),
+            undo_rx: None,
+            was_alt: false,
+            search: super::SearchState {
+                on: false,
+                query: String::new(),
+                matches: Vec::new(),
+                current: 0,
+            },
+        }
+    }
+
+    fn make_test_app(cols: usize, rows: usize) -> App {
+        App {
+            window: None,
+            renderer: None,
+            tabs: vec![make_test_tab()],
+            active: 0,
+            shell_name: "bash".to_string(),
+            prog: "bash".to_string(),
+            hook: None,
+            wake: None,
+            mods: winit::keyboard::ModifiersState::empty(),
+            cols,
+            rows,
+            layout: crate::window::layout::LayoutMode::TerminalFocus.layout(),
+            focus: super::Focus::Terminal,
+            rail_sel: 0,
+            chrome: super::panels::ChromeCache::new(),
+            inspector_sel: None,
+            inspector_sel_id: None,
+            inspector_view: super::panels::InspectorView::Session,
+            inspector_output: None,
+            inspector_output_id: None,
+            inspector_output_truncated: false,
+            inspector_expanded_id: None,
+            inspector_cache: super::panels::InspectorCache::new(),
+            agent_observations: zet_agent_observe::AgentObservationStore::new(256),
+            agent_inspector_sel: None,
+            agent_inspector_sel_id: None,
+            agent_inspector_key: None,
+            agent_list_offset: 0,
+            agent_detail_expanded: false,
+            agent_detail_offset: 0,
+            agent_evidence_open: false,
+            agent_evidence: None,
+            agent_evidence_offset: 0,
+            #[cfg(test)]
+            chrome_query_count: 0,
+            #[cfg(test)]
+            chrome_build_count: 0,
+            env_spec: None,
+            startup_spec: None,
+            known: zet_pty::KnownCommands::from_env(),
+            mouse_px: None,
+            last_frame: std::time::Instant::now(),
+            needs_draw: true,
+            perf_t0: None,
+            perf_input: None,
+            perf_frames: 0,
+            cmd_t0: None,
+            perf_blocks: 0,
+            pending_goal: None,
+            welcome: super::welcome::WelcomeIdentity::new(false),
+        }
+    }
+
+    #[test]
+    fn welcome_survives_shell_prompt_and_dismisses_on_terminal_key() {
+        let mut app = make_test_app(80, 24);
+        app.tabs[0]
+            .term
+            .feed(b"\x1b]0;zet\x07\x1b[?2004h\x1b[2J\x1b[Huser@host:~$ ");
+        assert!(app.welcome.present(&app.tabs[0].term, 80, 24).is_some());
+        assert!(!app.welcome.dismissed());
+
+        app.handle_key_parts(
+            winit::keyboard::Key::Character("l".into()),
+            Some("l"),
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
+        );
+        assert!(app.welcome.dismissed());
+        assert!(app.welcome.present(&app.tabs[0].term, 80, 24).is_none());
+    }
+
+    #[test]
+    fn disabled_welcome_stays_hidden_after_shell_startup() {
+        let mut app = make_test_app(80, 24);
+        app.welcome = super::welcome::WelcomeIdentity::new(true);
+        app.tabs[0].term.feed(b"\x1b[2J\x1b[H$ ");
+        assert!(app.welcome.present(&app.tabs[0].term, 80, 24).is_none());
+        assert!(!app.welcome.dismissed());
+    }
+
+    #[test]
+    fn pty_output_does_not_dismiss_until_it_reaches_the_reserved_region() {
+        let mut app = make_test_app(80, 24);
+        app.tabs[0]
+            .term
+            .feed(b"\x1b]0;zet\x07\x1b[?2004h\x1b[2J\x1b[H$ ");
+        let rect = app
+            .welcome
+            .present(&app.tabs[0].term, 80, 24)
+            .expect("identity")
+            .rect;
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.tabs[0].rx = Some(rx);
+
+        // Ordinary shell output outside the reserved region keeps it alive.
+        tx.send(b"\x1b[?25h\x1b[2K$ ".to_vec()).unwrap();
+        app.pump_tab(0);
+        assert!(!app.welcome.dismissed());
+        assert!(app.welcome.present(&app.tabs[0].term, 80, 24).is_some());
+
+        // Output that enters the reserved region retires it before drawing.
+        tx.send(
+            format!(
+                "\x1b[{};{}H#\x1b[1;1H",
+                rect.row.saturating_add(1),
+                rect.col.saturating_add(1)
+            )
+            .into_bytes(),
+        )
+        .unwrap();
+        app.pump_tab(0);
+        assert!(app.welcome.present(&app.tabs[0].term, 80, 24).is_none());
+        assert!(app.welcome.dismissed());
+    }
+}
+
+#[cfg(test)]
 mod p4a3_r3_acceptance {
     use super::panels::InspectorView;
     use super::{panels, App, Focus, Tab};
@@ -8325,6 +8521,7 @@ mod p4a3_r3_acceptance {
             cmd_t0: None,
             perf_blocks: 0,
             pending_goal: None,
+            welcome: super::welcome::WelcomeIdentity::new(false),
         }
     }
 

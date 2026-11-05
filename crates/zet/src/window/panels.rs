@@ -2960,3 +2960,83 @@ mod p4a3_panels_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// P2-B — ZET Signature ASCII Identity
+// ---------------------------------------------------------------------------
+
+/// Approved ZET signature ASCII wordmark. Geometry is preserved exactly.
+pub const SIGNATURE_WORDMARK: &[&str] = &[
+    "  ████████████╗   ████████████╗   █████████████╗",
+    "  ╚══════███╔╝   ██╔═════════╝   ╚════███╔════╝",
+    "       ▄███╔╝     ██║                 ███║",
+    "     ▄███╔╝       ██████████╗         ███║",
+    "   ▄███╔╝         ██╔═══════╝         ███║",
+    "  ███╔╝           ██║                 ███║",
+    "  ████████████╗   ████████████╗       ███║",
+    "  ╚═══════════╝   ╚═══════════╝       ╚══╝",
+];
+
+pub const SIGNATURE_BRAND_COPY: &str = "ZET // APERTURE INSTRUMENT";
+pub const SIGNATURE_TAGLINE: &str = "THE COMMAND LINE, REIMAGINED.";
+pub const SIGNATURE_SUPPORTING_IDENTITY: &str = "NATIVE TERMINAL / APERTURE";
+pub const SIGNATURE_MINIMAL_TEXT: &str = "ZET // APERTURE";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureIdentitySize {
+    Full,
+    Compact,
+    Minimal,
+    Omitted,
+}
+
+pub(crate) fn signature_wordmark_lines(size: SignatureIdentitySize) -> &'static [&'static str] {
+    match size {
+        SignatureIdentitySize::Full | SignatureIdentitySize::Compact => SIGNATURE_WORDMARK,
+        SignatureIdentitySize::Minimal | SignatureIdentitySize::Omitted => &[],
+    }
+}
+
+#[cfg(test)]
+mod signature_identity_tests {
+    use super::*;
+
+    #[test]
+    fn wordmark_preserves_approved_geometry() {
+        assert_eq!(SIGNATURE_WORDMARK.len(), 8);
+        assert_eq!(SIGNATURE_WORDMARK[0].chars().count(), 48);
+        assert!(SIGNATURE_WORDMARK[7].chars().count() <= 48);
+        for line in SIGNATURE_WORDMARK {
+            assert!(!line.is_empty());
+            assert!(line.chars().count() <= 48);
+        }
+    }
+
+    #[test]
+    fn supporting_copy_fits_the_wordmark_grid() {
+        for line in [
+            SIGNATURE_BRAND_COPY,
+            SIGNATURE_TAGLINE,
+            SIGNATURE_SUPPORTING_IDENTITY,
+            SIGNATURE_MINIMAL_TEXT,
+        ] {
+            assert!(!line.is_empty());
+            assert!(line.chars().count() <= 48);
+        }
+        assert!(SIGNATURE_MINIMAL_TEXT.chars().count() < 48);
+    }
+
+    #[test]
+    fn wordmark_lines_exist_only_for_wide_layouts() {
+        assert_eq!(
+            signature_wordmark_lines(SignatureIdentitySize::Full),
+            SIGNATURE_WORDMARK
+        );
+        assert_eq!(
+            signature_wordmark_lines(SignatureIdentitySize::Compact),
+            SIGNATURE_WORDMARK
+        );
+        assert!(signature_wordmark_lines(SignatureIdentitySize::Minimal).is_empty());
+        assert!(signature_wordmark_lines(SignatureIdentitySize::Omitted).is_empty());
+    }
+}
