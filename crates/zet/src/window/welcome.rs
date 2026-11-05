@@ -25,6 +25,8 @@ pub const FULL_ROWS: u32 = 12;
 pub const COMPACT_ROWS: u32 = 10;
 /// Minimum terminal width for the one-line minimal identity.
 pub const MINIMAL_COLS: u32 = 16;
+/// Shared baseline inside each supporting-copy row, as a fraction of the row.
+const COPY_BASELINE: f32 = 0.72;
 
 /// A cell-aligned rectangle reserved by the identity, in viewport-relative
 /// terminal cells.
@@ -45,62 +47,59 @@ impl WelcomeRect {
         self.row.saturating_add(self.height)
     }
 
+    #[cfg(test)]
     pub const fn contains(self, col: u32, row: u32) -> bool {
         col >= self.col && col < self.right() && row >= self.row && row < self.bottom()
     }
 }
 
-/// The semantic ink role of one identity line. Colors stay in the theme so
-/// the identity follows the Aperture Instrument palette instead of baking in
-/// fixed RGB values.
+/// The semantic ink role of one supporting identity line. Colors stay in the
+/// theme so the identity follows the Aperture Instrument palette instead of
+/// baking in fixed RGB values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WelcomeLineRole {
-    Wordmark,
     Brand,
     Tagline,
     Supporting,
-    Minimal,
 }
 
 impl WelcomeLineRole {
-    fn style_and_ink(self, cell_w: u32, cell_h: u32) -> (UiTextStyle, Rgba) {
-        let cw = cell_w.max(1) as f32;
+    fn style_and_ink(self, cell_h: u32) -> (UiTextStyle, Rgba) {
         let ch = cell_h.max(1) as f32;
         match self {
-            Self::Wordmark => {
-                // Monospace advance is ~0.6em, so this makes one wordmark
-                // character occupy one terminal cell while staying inside
-                // the row's vertical bounds.
-                let size = (cw / 0.6).min(ch * 0.92).max(1.0);
+            Self::Brand => {
+                let size = (ch * 0.72).max(1.0);
                 (
-                    UiTextStyle::new(size, ch, 500, 0.0, UiFontFamily::Monospace),
+                    UiTextStyle::new(size, ch, 700, size * 0.07, UiFontFamily::Monospace),
+                    zet_gpu::renderer::PANEL_TEXT,
+                )
+            }
+            Self::Tagline => {
+                let size = (ch * 0.62).max(1.0);
+                (
+                    UiTextStyle::new(size, ch, 500, size * 0.06, UiFontFamily::Monospace),
                     zet_gpu::renderer::PANEL_CYAN,
                 )
             }
-            Self::Brand => (
-                UiTextStyle::new((ch * 0.58).max(1.0), ch, 600, 0.4, UiFontFamily::Monospace),
-                zet_gpu::renderer::PANEL_TEXT,
-            ),
-            Self::Tagline => (
-                UiTextStyle::new((ch * 0.54).max(1.0), ch, 500, 0.3, UiFontFamily::Monospace),
-                zet_gpu::renderer::PANEL_SECONDARY,
-            ),
-            Self::Supporting => (
-                UiTextStyle::new((ch * 0.50).max(1.0), ch, 500, 0.2, UiFontFamily::Monospace),
-                zet_gpu::renderer::PANEL_MUTED,
-            ),
-            Self::Minimal => {
-                let size = (cw / 0.6).min(ch * 0.82).max(1.0);
+            Self::Supporting => {
+                let size = (ch * 0.54).max(1.0);
                 (
-                    UiTextStyle::new(size, ch, 600, 0.6, UiFontFamily::Monospace),
-                    zet_gpu::renderer::PANEL_CYAN,
+                    UiTextStyle::new(size, ch, 500, size * 0.05, UiFontFamily::Monospace),
+                    zet_gpu::renderer::PANEL_SECONDARY,
                 )
             }
         }
     }
 }
 
-/// One rendered identity line, positioned relative to the terminal viewport.
+fn minimal_style(cell_w: u32, cell_h: u32) -> UiTextStyle {
+    let cw = cell_w.max(1) as f32;
+    let ch = cell_h.max(1) as f32;
+    let size = (cw / 0.6).min(ch * 0.9).max(1.0);
+    UiTextStyle::new(size, ch, 600, size * 0.06, UiFontFamily::Monospace)
+}
+
+/// One supporting identity line, positioned relative to the terminal viewport.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WelcomeLine {
     pub row: u32,
@@ -109,14 +108,26 @@ pub struct WelcomeLine {
 }
 
 /// A resolved identity presentation. `rect` is the exact reserved cell
-/// region; `lines` are the native text commands that produce the artwork.
+/// region; `wordmark_rows` is the approved character grid, and `copy_lines`
+/// are the supporting native text lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WelcomePresentation {
     pub size: SignatureIdentitySize,
     pub rect: WelcomeRect,
-    pub lines: Vec<WelcomeLine>,
+    pub wordmark_rows: &'static [&'static str],
+    pub copy_lines: Vec<WelcomeLine>,
+    pub minimal_text: Option<&'static str>,
     pub viewport_cols: u32,
     pub viewport_rows: u32,
+}
+
+/// One pixel-snapped native wordmark rectangle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WordmarkRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// One staged native presentation command. Kept renderer-independent so the
@@ -132,9 +143,21 @@ pub struct WelcomeDrawCommand {
 }
 
 impl WelcomePresentation {
-    /// Build the exact native text commands used by the application. The
-    /// caller supplies the production glyph measurement function, so tests
-    /// can assert placement and emitted lines without a display.
+    /// Top of the reserved wordmark block, pixel-centred in the viewport.
+    fn wordmark_origin(&self, viewport: Viewport, cell_px: (u32, u32)) -> (u32, u32) {
+        let cw = cell_px.0.max(1);
+        let ch = cell_px.1.max(1);
+        let left = viewport.x.saturating_mul(cw);
+        let width = viewport.cols.saturating_mul(cw);
+        let art_width = self.rect.width.saturating_mul(cw);
+        let x = left.saturating_add(width.saturating_sub(art_width) / 2);
+        let y = viewport.y.saturating_add(self.rect.row).saturating_mul(ch);
+        (x, y)
+    }
+
+    /// Build the supporting copy and minimal-mark commands used by the
+    /// application. The caller supplies the production glyph measurement
+    /// function, so tests can assert placement without a display.
     pub fn draw_commands<F>(
         &self,
         viewport: Viewport,
@@ -151,44 +174,130 @@ impl WelcomePresentation {
         let ch = cell_px.1.max(1);
         let left = viewport.x.saturating_mul(cw) as f32;
         let width = viewport.cols.saturating_mul(cw);
-        let wordmark_left = left + self.rect.col.saturating_mul(cw) as f32;
-        let wordmark_width = self.rect.width.saturating_mul(cw).min(width);
         let mut commands = Vec::new();
-        for line in &self.lines {
+        for line in &self.copy_lines {
             if line.row >= viewport.rows {
                 continue;
             }
-            let (style, ink) = line.role.style_and_ink(cw, ch);
-            let (x, max_width) = match line.role {
-                // Every wordmark row starts at the same cell so the approved
-                // leading spaces and relative letter geometry are preserved.
-                WelcomeLineRole::Wordmark => (wordmark_left, wordmark_width),
-                _ => {
-                    let measured = measure(line.text, style).min(width);
-                    (left + (width.saturating_sub(measured) as f32 / 2.0), width)
-                }
-            };
-            let top = viewport.y.saturating_add(line.row).saturating_mul(ch) as f32;
-            let baseline =
-                top + ((ch as f32 - style.line_height_px).max(0.0) * 0.5) + style.baseline_offset();
+            let (style, ink) = line.role.style_and_ink(ch);
+            let measured = measure(line.text, style).min(width);
             commands.push(WelcomeDrawCommand {
-                x,
-                baseline,
+                x: left + (width.saturating_sub(measured) as f32 / 2.0),
+                baseline: (viewport.y.saturating_add(line.row) as f32 * ch as f32)
+                    + ch as f32 * COPY_BASELINE,
                 text: line.text,
                 style,
                 ink,
-                max_width,
+                max_width: width,
             });
+        }
+        if let Some(text) = self.minimal_text {
+            if self.rect.row < viewport.rows {
+                let style = minimal_style(cw, ch);
+                let measured = measure(text, style).min(width);
+                commands.push(WelcomeDrawCommand {
+                    x: left + (width.saturating_sub(measured) as f32 / 2.0),
+                    baseline: (viewport.y.saturating_add(self.rect.row) as f32 * ch as f32)
+                        + ch as f32 * COPY_BASELINE,
+                    text,
+                    style,
+                    ink: zet_gpu::renderer::PANEL_CYAN,
+                    max_width: width,
+                });
+            }
         }
         commands
     }
 }
 
-/// Draw the identity through the native UI presentation stream. This appends
-/// glyph quads after the terminal frame; it never calls the terminal renderer
-/// and never touches PTY cells.
+/// Convert the approved character grid into pixel-snapped native rectangles.
+///
+/// The font's double-line box glyphs are inset inside their own cells while
+/// `█` fills a cell completely; that is what made the thin accents wander off
+/// the block edges. Here horizontal box runs become two precise rules attached
+/// to the top of their row, with one shared thickness/gap pair. The vertical
+/// `║` accents are omitted: the solid stems already carry the silhouette and
+/// the remaining rules are the deliberate instrument detail. The character
+/// grid and letterform silhouette are unchanged.
+pub fn wordmark_rects(
+    rows: &[&str],
+    origin_x: u32,
+    origin_y: u32,
+    cell_px: (u32, u32),
+) -> Vec<WordmarkRect> {
+    let cw = cell_px.0.max(1);
+    let ch = cell_px.1.max(1);
+    let thickness = ((ch as f32 * 0.075).round() as u32).max(1);
+    let gap = ((ch as f32 * 0.060).round() as u32).max(1);
+    let mut rects = Vec::new();
+    let mut push = |x: u32, y: u32, width: u32, height: u32| {
+        if width > 0 && height > 0 {
+            rects.push(WordmarkRect {
+                x,
+                y,
+                width,
+                height,
+            });
+        }
+    };
+
+    for (row, line) in rows.iter().enumerate() {
+        let y = origin_y.saturating_add(row as u32 * ch);
+        let chars: Vec<char> = line.chars().collect();
+        let mut col = 0usize;
+        while col < chars.len() {
+            let c = chars[col];
+            let x = origin_x.saturating_add(col as u32 * cw);
+            match c {
+                '█' | '▄' => {
+                    let start = col;
+                    while col < chars.len() && chars[col] == c {
+                        col += 1;
+                    }
+                    let cells = (col - start) as u32;
+                    if c == '█' {
+                        push(x, y, cells * cw, ch);
+                    } else {
+                        let top = ch / 2;
+                        push(x, y.saturating_add(top), cells * cw, ch - top);
+                    }
+                }
+                '╔' | '╚' | '╗' | '╝' | '═' => {
+                    let start = col;
+                    while col < chars.len() && matches!(chars[col], '╔' | '╚' | '╗' | '╝' | '═')
+                    {
+                        col += 1;
+                    }
+                    let width = (col - start) as u32 * cw;
+                    push(x, y, width, thickness);
+                    push(x, y.saturating_add(thickness + gap), width, thickness);
+                }
+                // `║` is a vertical accent only; the solid stem already
+                // defines the edge, so it is intentionally not painted.
+                _ => col += 1,
+            }
+        }
+    }
+    rects
+}
+
+/// Draw the identity through the native presentation layer. The wordmark is
+/// pixel-snapped geometry; supporting copy uses the native UI text stream.
+/// Neither path touches the terminal renderer or PTY cells.
 pub fn draw(r: &mut Renderer, viewport: Viewport, presentation: &WelcomePresentation) {
     let cell_px = r.cell_px();
+    if !presentation.wordmark_rows.is_empty() {
+        let (x, y) = presentation.wordmark_origin(viewport, cell_px);
+        for rect in wordmark_rects(presentation.wordmark_rows, x, y, cell_px) {
+            r.draw_rect_px(
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                zet_gpu::renderer::PANEL_CYAN,
+            );
+        }
+    }
     let commands = presentation.draw_commands(viewport, cell_px, |text, style| {
         r.measure_ui_text_px(text, style)
     });
@@ -275,7 +384,7 @@ fn best_top(runs: &[(usize, usize)], need: usize, viewport_rows: usize) -> Optio
         .map(|(top, _)| top)
 }
 
-fn build_lines(size: SignatureIdentitySize, top: usize) -> Vec<WelcomeLine> {
+fn build_copy_lines(size: SignatureIdentitySize, top: usize) -> Vec<WelcomeLine> {
     let mut lines = Vec::new();
     let push = |lines: &mut Vec<WelcomeLine>, offset: usize, text: &'static str, role| {
         lines.push(WelcomeLine {
@@ -286,9 +395,6 @@ fn build_lines(size: SignatureIdentitySize, top: usize) -> Vec<WelcomeLine> {
     };
     match size {
         SignatureIdentitySize::Full => {
-            for (offset, line) in signature_wordmark_lines(size).iter().enumerate() {
-                push(&mut lines, offset, line, WelcomeLineRole::Wordmark);
-            }
             push(&mut lines, 9, SIGNATURE_BRAND_COPY, WelcomeLineRole::Brand);
             push(&mut lines, 10, SIGNATURE_TAGLINE, WelcomeLineRole::Tagline);
             push(
@@ -299,20 +405,9 @@ fn build_lines(size: SignatureIdentitySize, top: usize) -> Vec<WelcomeLine> {
             );
         }
         SignatureIdentitySize::Compact => {
-            for (offset, line) in signature_wordmark_lines(size).iter().enumerate() {
-                push(&mut lines, offset, line, WelcomeLineRole::Wordmark);
-            }
             push(&mut lines, 9, SIGNATURE_BRAND_COPY, WelcomeLineRole::Brand);
         }
-        SignatureIdentitySize::Minimal => {
-            push(
-                &mut lines,
-                0,
-                SIGNATURE_MINIMAL_TEXT,
-                WelcomeLineRole::Minimal,
-            );
-        }
-        SignatureIdentitySize::Omitted => {}
+        SignatureIdentitySize::Minimal | SignatureIdentitySize::Omitted => {}
     }
     lines
 }
@@ -366,6 +461,16 @@ pub fn plan(
             continue;
         };
         let col = (cols - width) / 2;
+        let wordmark_rows = match size {
+            SignatureIdentitySize::Full | SignatureIdentitySize::Compact => {
+                signature_wordmark_lines(size)
+            }
+            SignatureIdentitySize::Minimal | SignatureIdentitySize::Omitted => &[],
+        };
+        let minimal_text = match size {
+            SignatureIdentitySize::Minimal => Some(SIGNATURE_MINIMAL_TEXT),
+            _ => None,
+        };
         return Some(WelcomePresentation {
             size,
             rect: WelcomeRect {
@@ -374,7 +479,9 @@ pub fn plan(
                 width,
                 height: height as u32,
             },
-            lines: build_lines(size, top),
+            wordmark_rows,
+            copy_lines: build_copy_lines(size, top),
+            minimal_text,
             viewport_cols,
             viewport_rows,
         });
@@ -383,7 +490,7 @@ pub fn plan(
 }
 
 /// True when terminal content, the cursor, scrolling, or a full-screen app
-/// has reached a previously reserved identity region.
+/// has reached a previously reserved identity row.
 pub fn rect_conflicts(term: &Terminal, rect: &WelcomeRect) -> bool {
     if term.alt_active() || term.view_offset() != 0 {
         return true;
@@ -391,14 +498,12 @@ pub fn rect_conflicts(term: &Terminal, rect: &WelcomeRect) -> bool {
     if rect.right() > term.cols() as u32 || rect.bottom() > term.rows() as u32 {
         return true;
     }
-    let (cursor_col, cursor_row) = term.cursor();
-    if rect.contains(cursor_col as u32, cursor_row as u32) {
+    let (_, cursor_row) = term.cursor();
+    if rect.row <= cursor_row as u32 && (cursor_row as u32) < rect.bottom() {
         return true;
     }
-    (rect.row as usize..rect.bottom() as usize).any(|y| {
-        (rect.col as usize..rect.right() as usize)
-            .any(|x| term.visible_cell(x, y).is_some_and(cell_is_content))
-    })
+    (rect.row as usize..rect.bottom() as usize)
+        .any(|y| (0..term.cols()).any(|x| term.visible_cell(x, y).is_some_and(cell_is_content)))
 }
 
 /// Per-run welcome state. `present` is the production entry point: it plans
@@ -522,9 +627,11 @@ mod tests {
         assert_eq!(presentation.size, SignatureIdentitySize::Full);
         assert!(presentation.rect.row >= 1, "prompt row must stay clear");
         assert!(free_of_content(&term, &presentation));
-        assert_eq!(presentation.lines.len(), 11);
-        assert_eq!(presentation.lines[0].text, SIGNATURE_WORDMARK[0]);
-        assert_eq!(presentation.lines[8].text, SIGNATURE_BRAND_COPY);
+        assert_eq!(presentation.wordmark_rows.len(), 8);
+        assert_eq!(presentation.copy_lines.len(), 3);
+        assert_eq!(presentation.wordmark_rows[0], SIGNATURE_WORDMARK[0]);
+        assert_eq!(presentation.copy_lines[0].text, SIGNATURE_BRAND_COPY);
+        assert!(presentation.minimal_text.is_none());
         assert!(presentation.rect.bottom() <= 24);
     }
 
@@ -631,8 +738,22 @@ mod tests {
         let presentation = plan(&term, 20, 24).expect("minimal identity");
         assert_eq!(presentation.size, SignatureIdentitySize::Minimal);
         assert!(presentation.rect.right() <= 20);
-        assert_eq!(presentation.lines.len(), 1);
-        assert_eq!(presentation.lines[0].text, SIGNATURE_MINIMAL_TEXT);
+        assert!(presentation.wordmark_rows.is_empty());
+        assert!(presentation.copy_lines.is_empty());
+        assert_eq!(presentation.minimal_text, Some(SIGNATURE_MINIMAL_TEXT));
+        assert_eq!(presentation.rect.height, 1);
+        let commands = presentation.draw_commands(
+            Viewport {
+                x: 0,
+                y: 0,
+                cols: 20,
+                rows: 24,
+            },
+            (10, 20),
+            |text, style| (text.chars().count() as f32 * style.size_px * 0.6).round() as u32,
+        );
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].text, SIGNATURE_MINIMAL_TEXT);
         assert!(plan(&term, 10, 24).is_none());
     }
 
@@ -714,26 +835,27 @@ mod tests {
         let commands = presentation.draw_commands(viewport, (10, 20), |text, style| {
             (text.chars().count() as f32 * style.size_px * 0.6).round() as u32
         });
-        assert_eq!(commands.len(), presentation.lines.len());
-        assert!(commands.iter().any(|c| c.text == SIGNATURE_WORDMARK[0]));
-        assert!(commands.iter().any(|c| c.text == SIGNATURE_TAGLINE));
+        assert_eq!(commands.len(), presentation.copy_lines.len());
+        assert_eq!(commands.len(), 3);
+        assert_eq!(commands[0].text, SIGNATURE_BRAND_COPY);
+        assert_eq!(commands[1].text, SIGNATURE_TAGLINE);
+        assert_eq!(commands[2].text, SIGNATURE_SUPPORTING_IDENTITY);
         for command in &commands {
             assert!(command.x >= 0.0);
             assert!(command.baseline > 0.0);
-            assert!(command.style.family == UiFontFamily::Monospace);
+            assert_eq!(command.max_width, 800);
+            assert_eq!(command.style.family, UiFontFamily::Monospace);
         }
-        let wordmark_x = presentation.rect.col as f32 * 10.0;
-        let wordmark_width = presentation.rect.width * 10;
-        for (command, line) in commands.iter().zip(&presentation.lines) {
-            if line.role == WelcomeLineRole::Wordmark {
-                assert_eq!(command.x, wordmark_x);
-                assert_eq!(command.max_width, wordmark_width);
-            } else {
-                assert_eq!(command.max_width, 800);
-            }
+        assert!(commands[0].style.size_px > commands[1].style.size_px);
+        assert!(commands[1].style.size_px > commands[2].style.size_px);
+        assert!((commands[1].baseline - commands[0].baseline - 20.0).abs() < 0.01);
+        assert!((commands[2].baseline - commands[1].baseline - 20.0).abs() < 0.01);
+        for command in &commands {
+            let measured =
+                (command.text.chars().count() as f32 * command.style.size_px * 0.6) as u32;
+            let expected = (800u32.saturating_sub(measured)) as f32 / 2.0;
+            assert!((command.x - expected).abs() <= 1.0);
         }
-        let first = &commands[0];
-        assert_eq!(first.x, wordmark_x);
 
         let offset = presentation.draw_commands(
             Viewport {
@@ -745,7 +867,102 @@ mod tests {
             (10, 20),
             |text, style| (text.chars().count() as f32 * style.size_px * 0.6).round() as u32,
         );
-        assert_eq!(offset[0].x, first.x + 50.0);
-        assert_eq!(offset[0].baseline, first.baseline + 40.0);
+        assert_eq!(offset[0].x, commands[0].x + 50.0);
+        assert_eq!(offset[0].baseline, commands[0].baseline + 40.0);
+    }
+
+    #[test]
+    fn wordmark_geometry_snaps_blocks_and_rules_to_cells() {
+        let cell = (10u32, 20u32);
+        let rects = wordmark_rects(SIGNATURE_WORDMARK, 100, 200, cell);
+        assert!(!rects.is_empty());
+        for rect in &rects {
+            assert!(rect.width > 0 && rect.height > 0);
+            assert!(rect.x >= 100);
+            assert!(rect.y >= 200);
+            assert!(rect.x + rect.width <= 100 + WORDMARK_COLS * cell.0);
+            assert!(rect.y + rect.height <= 200 + SIGNATURE_WORDMARK.len() as u32 * cell.1);
+        }
+
+        // The first row's leading full-block run is one merged rectangle, so
+        // no cell seams can appear inside the letterform.
+        assert!(rects.contains(&WordmarkRect {
+            x: 120,
+            y: 200,
+            width: 12 * cell.0,
+            height: cell.1,
+        }));
+        // Row two starts with `╚══════`: the seven-cell horizontal run is
+        // merged into one crisp top rule and one inset rule.
+        let thickness = ((cell.1 as f32 * 0.075).round() as u32).max(1);
+        let gap = ((cell.1 as f32 * 0.060).round() as u32).max(1);
+        assert!(rects.contains(&WordmarkRect {
+            x: 120,
+            y: 220,
+            width: 7 * cell.0,
+            height: thickness,
+        }));
+        assert!(rects.contains(&WordmarkRect {
+            x: 120,
+            y: 220 + thickness + gap,
+            width: 7 * cell.0,
+            height: thickness,
+        }));
+        // `▄` is an exact lower-half cell, not a font-shaped approximation.
+        assert!(rects.contains(&WordmarkRect {
+            x: 170,
+            y: 250,
+            width: cell.0,
+            height: cell.1 / 2,
+        }));
+    }
+
+    #[test]
+    fn wordmark_rules_share_one_consistent_stroke_width() {
+        let cell = (10u32, 20u32);
+        let rects = wordmark_rects(SIGNATURE_WORDMARK, 0, 0, cell);
+        let thickness = ((cell.1 as f32 * 0.075).round() as u32).max(1);
+        let stroked: Vec<_> = rects
+            .iter()
+            .filter(|rect| rect.height == thickness)
+            .collect();
+        assert!(!stroked.is_empty());
+        for rect in stroked {
+            assert!(rect.width >= thickness);
+            assert_eq!(rect.height, thickness);
+        }
+    }
+
+    #[test]
+    fn wordmark_omits_floating_vertical_outlines() {
+        let cell = (10u32, 20u32);
+        let rects = wordmark_rects(SIGNATURE_WORDMARK, 0, 0, cell);
+        let thickness = ((cell.1 as f32 * 0.075).round() as u32).max(1);
+        // R1's visible defect was a one-sided vertical outline floating
+        // beside a stem. The refined grid keeps only horizontal accents.
+        assert!(!rects
+            .iter()
+            .any(|rect| rect.width == thickness && rect.height == cell.1));
+    }
+
+    fn centered(viewport_width: u32, measured: u32) -> f32 {
+        (viewport_width.saturating_sub(measured)) as f32 / 2.0
+    }
+
+    #[test]
+    fn wordmark_origin_is_pixel_centered() {
+        let term = prompt_terminal();
+        let presentation = plan(&term, 79, 24).expect("identity");
+        let viewport = Viewport {
+            x: 0,
+            y: 0,
+            cols: 79,
+            rows: 24,
+        };
+        let (x, y) = presentation.wordmark_origin(viewport, (10, 20));
+        let art_width = presentation.rect.width * 10;
+        assert_eq!(x, (79 * 10 - art_width) / 2);
+        assert_eq!(y, presentation.rect.row * 20);
+        assert_eq!(x as f32, centered(79 * 10, art_width));
     }
 }
