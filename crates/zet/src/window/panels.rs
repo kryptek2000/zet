@@ -1878,10 +1878,18 @@ pub fn inspector_header_descriptor_col(cols: u32, title: &str, descriptor: &str)
     if descriptor_cells == 0 {
         return None;
     }
-    let col = cols
-        .saturating_sub(INSPECTOR_HEADER_RIGHT_INSET)
-        .saturating_sub(descriptor_cells);
-    (col > title_end).then_some(col)
+    // Prefer the roomier F2 inset, but fall back to the older, tighter
+    // insets when the viewport cannot otherwise keep the descriptor clear
+    // of the title. This restores the provisional-state label on widths
+    // where the larger inset would force it to disappear, while still
+    // avoiding the F1 overlap.
+    for inset in [INSPECTOR_HEADER_RIGHT_INSET, 3, 2, 1] {
+        let col = cols.saturating_sub(inset).saturating_sub(descriptor_cells);
+        if col > title_end {
+            return Some(col);
+        }
+    }
+    None
 }
 
 /// Shared geometry for the Contextual Inspector's two-row header.
