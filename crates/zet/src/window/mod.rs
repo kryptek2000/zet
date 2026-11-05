@@ -29,6 +29,7 @@ mod finalize;
 pub mod layout;
 mod mouse_report;
 pub mod panels;
+mod welcome;
 
 const HOOKS: [(&str, &str); 2] = [
     ("bash", "zet-integration.bash"),
@@ -283,10 +284,9 @@ struct App {
     /// It waits for the shell's first prompt, then starts that turn.
     /// `None` (the plain `zet` case) changes nothing.
     pending_goal: Option<String>,
-    /// Whether the welcome signature identity has been dismissed for this run.
-    welcome_dismissed: bool,
-    /// Whether the welcome signature identity is disabled (env or config).
-    welcome_disabled: bool,
+    /// Decorative signature identity, planned from genuinely free terminal
+    /// rows and retired on interaction or conflicting output.
+    welcome: welcome::WelcomeIdentity,
 }
 
 /// One approved agent step, serviced by the main loop: typed visibly into
@@ -416,12 +416,8 @@ impl App {
             Some(rx) => std::iter::from_fn(|| rx.try_recv().ok()).collect(),
             None => Vec::new(),
         };
-        let had_output = !chunks.is_empty();
         for chunk in chunks {
             self.tabs[i].term.feed(&chunk);
-        }
-        if had_output && i == self.active {
-            self.welcome_dismissed = true;
         }
         let responses = self.tabs[i].term.drain_responses();
         if !responses.is_empty() {
@@ -1061,48 +1057,6 @@ impl App {
             self.rows as u32,
             self.layout,
             self.bar_rows(),
-        )
-    }
-
-    #[allow(dead_code)]
-    pub fn welcome_disabled(&self) -> bool {
-        self.welcome_disabled
-    }
-
-    #[allow(dead_code)]
-    pub fn set_welcome_disabled(&mut self, disabled: bool) {
-        self.welcome_disabled = disabled;
-    }
-
-    #[allow(dead_code)]
-    pub fn welcome_dismissed(&self) -> bool {
-        self.welcome_dismissed
-    }
-
-    #[allow(dead_code)]
-    pub fn dismiss_welcome(&mut self) {
-        self.welcome_dismissed = true;
-    }
-
-    pub fn welcome_eligible(&self) -> bool {
-        panels::signature_identity_eligible(
-            self.tabs
-                .get(self.active)
-                .map(|t| t.term.screen_is_empty())
-                .unwrap_or(true),
-            self.welcome_dismissed,
-            self.welcome_disabled,
-            self.tabs
-                .get(self.active)
-                .map(|t| t.term.is_alt_screen())
-                .unwrap_or(false),
-        )
-    }
-
-    pub fn welcome_size(&self) -> panels::SignatureIdentitySize {
-        panels::signature_identity_size(
-            self.frame_layout().term.cols,
-            self.frame_layout().term.rows,
         )
     }
 
@@ -1905,6 +1859,7 @@ impl App {
             self.bar_rows(),
         );
         let (cols, rows) = (cols as usize, rows as usize);
+        self.welcome.release_placement();
         for tab in &mut self.tabs {
             tab.term.resize(cols, rows);
             if let Some(s) = &tab.session {
@@ -4870,8 +4825,10 @@ impl App {
     ) {
         // Any key gets a prompt frame; the heartbeat covers the rest.
         self.needs_draw = true;
-        if pressed {
-            self.welcome_dismissed = true;
+        // Typing into the terminal retires the decorative identity before
+        // the key is forwarded, so it can never overlap shell input.
+        if pressed && self.focus == Focus::Terminal {
+            self.welcome.dismiss();
         }
         // Typing returns to live (the cursor is there, not in history).
         // Search mode keeps its revealed view (snap would fight it).
@@ -5393,6 +5350,7 @@ impl ApplicationHandler for App {
 
             WindowEvent::Resized(size) => {
                 self.needs_draw = true;
+                self.welcome.release_placement();
                 if let Some(r) = &mut self.renderer {
                     let (cw, ch) = r.cell_px();
                     r.resize(size.width, size.height);
@@ -5491,8 +5449,13 @@ impl ApplicationHandler for App {
                 let inspector_snapshot = self.inspector_cache.snapshot_handle();
                 let inspector_output = self.inspector_output.as_deref();
                 let inspector_expanded = self.inspector_expanded();
-                let welcome_eligible = self.welcome_eligible();
-                let welcome_size = self.welcome_size();
+                // Plan before borrowing the renderer. The identity only uses
+                // genuinely free rows and retires itself when content or the
+                // cursor reaches its reserved region.
+                let welcome = self
+                    .welcome
+                    .present(&self.tabs[self.active].term, gpu_vp.cols, gpu_vp.rows)
+                    .cloned();
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
                     r.draw_terminal_in(&self.tabs[self.active].term, gpu_vp, sel);
                     if self.focus == Focus::Terminal {
@@ -5507,68 +5470,8 @@ impl ApplicationHandler for App {
                         r.draw_rect_px(tx, ty, tw, 2, glow);
                         r.draw_rect_px(tx, ty.saturating_add(th.saturating_sub(2)), tw, 2, glow);
                     }
-                    if welcome_eligible {
-                        match welcome_size {
-                            panels::SignatureIdentitySize::Omitted => {}
-                            _ => {
-                                if gpu_vp.cols > 0 && gpu_vp.rows > 0 {
-                                    let mut temp = zet_term::Terminal::new(
-                                        gpu_vp.cols as usize,
-                                        gpu_vp.rows as usize,
-                                    );
-                                    temp.set_cursor_visible(false);
-                                    let cyan = zet_term::Color::Rgb(56, 217, 250);
-                                    let muted = zet_term::Color::Rgb(136, 158, 184);
-                                    let cols_n = gpu_vp.cols as usize;
-                                    let rows_n = gpu_vp.rows as usize;
-                                    let wordmark_lines: Vec<&str> = if matches!(
-                                        welcome_size,
-                                        panels::SignatureIdentitySize::Minimal
-                                    ) {
-                                        vec![panels::SIGNATURE_MINIMAL_TEXT]
-                                    } else {
-                                        panels::signature_wordmark_lines(welcome_size).to_vec()
-                                    };
-                                    let mut identity_lines: Vec<&str> = Vec::new();
-                                    if matches!(
-                                        welcome_size,
-                                        panels::SignatureIdentitySize::Full
-                                            | panels::SignatureIdentitySize::Compact
-                                    ) {
-                                        identity_lines.push(panels::SIGNATURE_BRAND_COPY);
-                                        identity_lines.push(panels::SIGNATURE_TAGLINE);
-                                        identity_lines.push(panels::SIGNATURE_SUPPORTING_IDENTITY);
-                                    }
-                                    let total = wordmark_lines.len()
-                                        + if identity_lines.is_empty() {
-                                            0
-                                        } else {
-                                            1 + identity_lines.len()
-                                        };
-                                    let mut ridx = rows_n.saturating_sub(total) / 2;
-                                    for line in &wordmark_lines {
-                                        let w = panels::text_cells(line);
-                                        let col = cols_n.saturating_sub(w) / 2;
-                                        for (j, ch) in line.chars().enumerate() {
-                                            temp.set_cell(col + j, ridx, ch, cyan);
-                                        }
-                                        ridx += 1;
-                                    }
-                                    if !identity_lines.is_empty() {
-                                        ridx += 1;
-                                        for line in &identity_lines {
-                                            let w = panels::text_cells(line);
-                                            let col = cols_n.saturating_sub(w) / 2;
-                                            for (j, ch) in line.chars().enumerate() {
-                                                temp.set_cell(col + j, ridx, ch, muted);
-                                            }
-                                            ridx += 1;
-                                        }
-                                    }
-                                    r.draw_terminal_in(&temp, gpu_vp, None);
-                                }
-                            }
-                        }
+                    if let Some(presentation) = &welcome {
+                        welcome::draw(r, gpu_vp, presentation);
                     }
                     if rail_cols > 0 {
                         if let Some(snapshot) = rail_snapshot.as_ref() {
@@ -5704,6 +5607,11 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 self.needs_draw = true;
+                // Clicking inside the live terminal is interaction: retire
+                // the identity before selection or PTY routing runs.
+                if state == ElementState::Pressed && self.mouse_cell().is_some() {
+                    self.welcome.dismiss();
+                }
                 match (button, state) {
                     // Left-drag selects; click without drag clears.
                     (MouseButton::Left, ElementState::Pressed) => {
@@ -5738,6 +5646,12 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.needs_draw = true;
+                // Wheel interaction over the terminal retires the identity
+                // before scrollback or mouse protocol handling changes the
+                // view underneath it.
+                if self.terminal_mouse_cell().is_some() {
+                    self.welcome.dismiss();
+                }
                 // Wheel notch: 3 lines (LineDelta) or ~1 line per 20px.
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => (y * 3.0).round() as isize,
@@ -5888,10 +5802,7 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         cmd_t0: None,
         perf_blocks: 0,
         pending_goal: goal,
-        welcome_dismissed: false,
-        welcome_disabled: std::env::var_os("ZET_NO_WELCOME").is_some()
-            || std::env::var_os("ZET_DISABLE_WELCOME").is_some()
-            || std::env::var_os("ZET_NO_ASCII_IDENTITY").is_some(),
+        welcome: welcome::WelcomeIdentity::new(welcome::WelcomeIdentity::disabled_from_env()),
     };
     event_loop.run_app(&mut app).map_err(io_error)
 }
@@ -6101,8 +6012,7 @@ mod layout_fit_tests {
             cmd_t0: None,
             perf_blocks: 0,
             pending_goal: None,
-            welcome_dismissed: false,
-            welcome_disabled: false,
+            welcome: super::welcome::WelcomeIdentity::new(false),
         }
     }
 
@@ -8442,44 +8352,72 @@ mod p2b_signature_tests {
             cmd_t0: None,
             perf_blocks: 0,
             pending_goal: None,
-            welcome_dismissed: false,
-            welcome_disabled: false,
+            welcome: super::welcome::WelcomeIdentity::new(false),
         }
     }
 
     #[test]
-    fn welcome_eligible_and_dismissal() {
+    fn welcome_survives_shell_prompt_and_dismisses_on_terminal_key() {
         let mut app = make_test_app(80, 24);
-        assert!(app.welcome_eligible());
-        app.dismiss_welcome();
-        assert!(!app.welcome_eligible());
-        assert!(app.welcome_dismissed());
-    }
+        app.tabs[0]
+            .term
+            .feed(b"\x1b]0;zet\x07\x1b[?2004h\x1b[2J\x1b[Huser@host:~$ ");
+        assert!(app.welcome.present(&app.tabs[0].term, 80, 24).is_some());
+        assert!(!app.welcome.dismissed());
 
-    #[test]
-    fn disabled_welcome() {
-        let mut app = make_test_app(80, 24);
-        app.set_welcome_disabled(true);
-        assert!(!app.welcome_eligible());
-    }
-
-    #[test]
-    fn narrow_window_size() {
-        let app = make_test_app(20, 5);
-        assert_eq!(
-            app.welcome_size(),
-            super::panels::SignatureIdentitySize::Minimal
+        app.handle_key_parts(
+            winit::keyboard::Key::Character("l".into()),
+            Some("l"),
+            true,
+            winit::keyboard::ModifiersState::empty(),
+            None,
         );
+        assert!(app.welcome.dismissed());
+        assert!(app.welcome.present(&app.tabs[0].term, 80, 24).is_none());
     }
 
     #[test]
-    fn resize_transition_safe() {
+    fn disabled_welcome_stays_hidden_after_shell_startup() {
         let mut app = make_test_app(80, 24);
-        app.cols = 40;
-        app.rows = 12;
-        // no panic
-        let _ = app.welcome_size();
-        assert!(app.welcome_eligible());
+        app.welcome = super::welcome::WelcomeIdentity::new(true);
+        app.tabs[0].term.feed(b"\x1b[2J\x1b[H$ ");
+        assert!(app.welcome.present(&app.tabs[0].term, 80, 24).is_none());
+        assert!(!app.welcome.dismissed());
+    }
+
+    #[test]
+    fn pty_output_does_not_dismiss_until_it_reaches_the_reserved_region() {
+        let mut app = make_test_app(80, 24);
+        app.tabs[0]
+            .term
+            .feed(b"\x1b]0;zet\x07\x1b[?2004h\x1b[2J\x1b[H$ ");
+        let rect = app
+            .welcome
+            .present(&app.tabs[0].term, 80, 24)
+            .expect("identity")
+            .rect;
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.tabs[0].rx = Some(rx);
+
+        // Ordinary shell output outside the reserved region keeps it alive.
+        tx.send(b"\x1b[?25h\x1b[2K$ ".to_vec()).unwrap();
+        app.pump_tab(0);
+        assert!(!app.welcome.dismissed());
+        assert!(app.welcome.present(&app.tabs[0].term, 80, 24).is_some());
+
+        // Output that enters the reserved region retires it before drawing.
+        tx.send(
+            format!(
+                "\x1b[{};{}H#\x1b[1;1H",
+                rect.row.saturating_add(1),
+                rect.col.saturating_add(1)
+            )
+            .into_bytes(),
+        )
+        .unwrap();
+        app.pump_tab(0);
+        assert!(app.welcome.present(&app.tabs[0].term, 80, 24).is_none());
+        assert!(app.welcome.dismissed());
     }
 }
 
@@ -8583,8 +8521,7 @@ mod p4a3_r3_acceptance {
             cmd_t0: None,
             perf_blocks: 0,
             pending_goal: None,
-            welcome_dismissed: false,
-            welcome_disabled: false,
+            welcome: super::welcome::WelcomeIdentity::new(false),
         }
     }
 

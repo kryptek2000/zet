@@ -835,18 +835,6 @@ impl Terminal {
         self.cursor_visible
     }
 
-    pub fn set_cursor_visible(&mut self, visible: bool) {
-        self.cursor_visible = visible;
-    }
-
-    pub fn is_alt_screen(&self) -> bool {
-        self.alt_active
-    }
-
-    pub fn screen_is_empty(&self) -> bool {
-        self.grid.iter().all(|row| row.iter().all(|c| c.c == ' '))
-    }
-
     /// Resize the visible grid, preserving the overlapping top-left content.
     /// Cursor is clamped into the new bounds; scrollback is untouched.
     pub fn resize(&mut self, cols: usize, rows: usize) {
@@ -880,16 +868,6 @@ impl Terminal {
 
     pub fn cell(&self, x: usize, y: usize) -> Option<Cell> {
         self.grid.get(y)?.get(x).copied()
-    }
-
-    pub fn set_cell(&mut self, x: usize, y: usize, c: char, fg: Color) {
-        if let Some(row) = self.grid.get_mut(y) {
-            if let Some(cell) = row.get_mut(x) {
-                cell.c = c;
-                cell.fg = fg;
-                cell.bg = Color::Default;
-            }
-        }
     }
 
     pub fn line_text(&self, y: usize) -> String {
