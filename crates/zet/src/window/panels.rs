@@ -857,7 +857,7 @@ mod rail_row_tests {
 mod inspector_layout_tests {
     use super::{
         inspector_command_position, inspector_command_row, inspector_detail_start,
-        inspector_header_descriptor_col, inspector_selection_at_row,
+        inspector_header_descriptor_col, inspector_header_layout, inspector_selection_at_row,
         inspector_selection_for_command, inspector_session_command_at_row,
         inspector_visible_commands, text_cells, timeline_display_rows, timeline_empty_row,
         timeline_layout, timeline_preview_heading, timeline_row_layout, timeline_session_badges,
@@ -1131,6 +1131,40 @@ mod inspector_layout_tests {
             assert!(col > 4 + text_cells(title) as u32);
             assert!(col + text_cells(descriptor) as u32 <= 78);
         }
+    }
+
+    #[test]
+    fn inspector_header_layout_has_positive_padding_and_clearance() {
+        for ch in [20u32, 22, 24, 32] {
+            let layout = inspector_header_layout(
+                80,
+                ch,
+                "OBSERVED WORK TIMELINE",
+                "CROSS-SESSION / OBSERVED",
+            );
+            assert!(layout.mark_left_px > 0, "left padding must be positive");
+            assert!(layout.mark_top_px > 0, "top padding must be positive");
+            assert!(
+                layout.title_left_px > layout.mark_left_px + layout.mark_size_px,
+                "title must clear mark"
+            );
+            assert!(
+                layout.title_baseline_px > layout.mark_top_px as f32,
+                "title must be optically centered below top padding"
+            );
+            assert!(
+                layout.separator_px > layout.tab_top_px,
+                "separator must sit below tab row"
+            );
+            assert!(layout.tab_height_px > 4, "tabs must retain usable height");
+        }
+    }
+
+    #[test]
+    fn inspector_header_layout_narrow_width_drops_descriptor() {
+        let layout =
+            inspector_header_layout(32, 22, "OBSERVED WORK TIMELINE", "CROSS-SESSION / OBSERVED");
+        assert_eq!(layout.descriptor_col, None);
     }
 
     #[test]
@@ -1835,6 +1869,49 @@ pub fn inspector_header_descriptor_col(cols: u32, title: &str, descriptor: &str)
         .saturating_sub(TIMELINE_RIGHT_INSET)
         .saturating_sub(descriptor_cells);
     (col > title_end).then_some(col)
+}
+
+/// Shared geometry for the Contextual Inspector's two-row header.
+///
+/// The helper keeps the header inside the existing two-row footprint while
+/// giving the Aperture mark, title, descriptor, and tab row intentional
+/// padding. Pixel values are relative to the inspector viewport origin.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InspectorHeaderLayout {
+    pub mark_left_px: u32,
+    pub mark_top_px: u32,
+    pub mark_size_px: u32,
+    pub title_left_px: u32,
+    pub title_baseline_px: f32,
+    pub descriptor_col: Option<u32>,
+    pub separator_px: u32,
+    pub tab_top_px: u32,
+    pub tab_height_px: u32,
+}
+
+pub fn inspector_header_layout(
+    cols: u32,
+    ch: u32,
+    title: &str,
+    descriptor: &str,
+) -> InspectorHeaderLayout {
+    let mark_size_px = ch.saturating_sub(8).max(12);
+    let mark_left_px = 12;
+    let mark_top_px = 5;
+    let title_left_px = mark_left_px + mark_size_px + 12;
+    let title_baseline_px = 17.5;
+    let descriptor_col = inspector_header_descriptor_col(cols, title, descriptor);
+    InspectorHeaderLayout {
+        mark_left_px,
+        mark_top_px,
+        mark_size_px,
+        title_left_px,
+        title_baseline_px,
+        descriptor_col,
+        separator_px: ch.saturating_mul(2).saturating_sub(2),
+        tab_top_px: ch.saturating_add(2),
+        tab_height_px: ch.saturating_sub(4),
+    }
 }
 
 /// Preview heading plus a truthful Enter affordance when it fits.

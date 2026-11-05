@@ -3510,12 +3510,6 @@ impl App {
         );
         r.draw_rect_px(origin_x, origin_y, 1, height_px, PANEL_BORDER_STRONG);
 
-        r.draw_aperture_mark_px(
-            origin_x.saturating_add(8),
-            origin_y.saturating_add(6),
-            ch.saturating_sub(8),
-            PANEL_CYAN,
-        );
         let (title, descriptor, descriptor_ink) = if agents {
             ("AGENT ACTIVITY", "LAUNCH CANDIDATES ONLY", PANEL_AMBER)
         } else if timeline {
@@ -3531,7 +3525,26 @@ impl App {
                 PANEL_SECONDARY,
             )
         };
-        Self::draw_ui_row(r, vp, 0, 4, title, UI_HEADER, PANEL_TEXT);
+        let header = panels::inspector_header_layout(vp.cols, ch, title, descriptor);
+        let mark_x = origin_x.saturating_add(header.mark_left_px);
+        let mark_y = origin_y.saturating_add(header.mark_top_px);
+        let mark_size = header.mark_size_px;
+        r.draw_aperture_mark_px(mark_x, mark_y, mark_size, PANEL_CYAN);
+
+        let title_x = origin_x.saturating_add(header.title_left_px);
+        let title_baseline = origin_y as f32 + header.title_baseline_px;
+        let title_max_width = vp
+            .cols
+            .saturating_mul(cw)
+            .saturating_sub(header.title_left_px);
+        r.draw_ui_text_px(
+            title_x as f32,
+            title_baseline,
+            title,
+            UI_HEADER,
+            PANEL_TEXT,
+            Some(title_max_width),
+        );
         Self::draw_ui_row(r, vp, 1, 2, "VIEW", UI_META, PANEL_MUTED);
 
         r.draw_rect_px(
@@ -3612,9 +3625,7 @@ impl App {
             if agents { PANEL_CYAN } else { PANEL_MUTED },
         );
 
-        if let Some(descriptor_col) =
-            panels::inspector_header_descriptor_col(vp.cols, title, descriptor)
-        {
+        if let Some(descriptor_col) = header.descriptor_col {
             Self::draw_ui_row(
                 r,
                 vp,
@@ -9636,6 +9647,48 @@ mod p4a3_r3_acceptance {
         assert_eq!(
             layout.rows.last().map(|row| row.kind),
             Some(panels::AgentEvidenceRowKind::Footer)
+        );
+    }
+
+    #[test]
+    fn inspector_header_title_has_positive_top_padding() {
+        use zet_gpu::presentation::UI_HEADER;
+        use zet_gpu::text::Shaper;
+
+        let mut shaper = Shaper::new(16.0);
+        let (_cw, ch) = shaper.cell_px();
+        let layout = panels::inspector_header_layout(
+            80,
+            ch,
+            "OBSERVED WORK TIMELINE",
+            "CROSS-SESSION / OBSERVED",
+        );
+
+        let mut top = i32::MAX;
+        let mut bottom = i32::MIN;
+        for c in "OBSERVED WORK TIMELINE".chars() {
+            let glyph = shaper.rasterize_ui_glyph(
+                c,
+                UI_HEADER.size_px,
+                UI_HEADER.line_height_px,
+                UI_HEADER.weight,
+                UI_HEADER.family,
+            );
+            let glyph_top = (layout.title_baseline_px + glyph.offset_y as f32).round() as i32;
+            let glyph_bottom = glyph_top + glyph.height as i32;
+            top = top.min(glyph_top);
+            bottom = bottom.max(glyph_bottom);
+        }
+
+        assert!(top >= 5, "title top padding must be positive: {top}");
+        assert!(
+            bottom <= ch as i32,
+            "title must not overflow its row: {bottom} > {ch}"
+        );
+        assert!(
+            layout.mark_left_px as i32 + layout.mark_size_px as i32 + 12
+                <= layout.title_left_px as i32,
+            "mark and title must stay separated"
         );
     }
 }
