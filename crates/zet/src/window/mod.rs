@@ -4285,7 +4285,7 @@ impl App {
     ) -> (u32, u32, u32) {
         let mark_size = ch.saturating_mul(2).saturating_sub(8).max(18);
         let brand_x = 18u32.saturating_add(mark_size).saturating_add(14);
-        let descriptor_x = brand_x.saturating_add(brand_width).saturating_add(14);
+        let descriptor_x = brand_x.saturating_add(brand_width).saturating_add(30);
         let mode_x = width_px.saturating_sub(mode_width).saturating_sub(18);
         let descriptor_max_width = mode_x.saturating_sub(descriptor_x).saturating_sub(18);
         (descriptor_x, descriptor_max_width, mode_x)
