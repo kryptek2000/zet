@@ -1,7 +1,7 @@
 # P3-B2 — Native Mission Intelligence Contract (Stage A)
 
 **Status:** Stage A technical contract. Implementation of the interactive slice is tracked on branch `feat/p3b2-native-mission-intelligence`.
-**Base:** `origin/master` at `d8fe0bf8426cad62ddfe456965f26e4147d7b091`
+**Base:** `origin/master` at `3ba5c6e0da8b8b1c3f15097acff74fa392567698`
 **Scope:** Native, interactive, evidence-linked mission experience. No AI, no cloud, no browser/webview.
 
 ## 1. Data identity guarantees
@@ -47,6 +47,14 @@
 - Mission deletion CLI/UI (API exists).
 - Full print-boundary control-character sanitization for legacy recorded command text.
 - Bounded query caps and N+1 elimination in `mission_commands` (acceptable at personal scale for this slice).
+
+## 0. Corrected architectural decisions (Stage B)
+
+- Baseline corrected to master merge `3ba5c6e0da8b8b1c3f15097acff74fa392567698`.
+- Keyboard: `a` remains Agents view toggle; Add to Mission uses a conflict-free binding (planned `m`) plus visible on-screen controls.
+- SQLite ownership: `rusqlite::Connection` is not `Sync`; use a single owner/worker with request-response messages; never share across threads; never block render/PTY input.
+- Rail geometry: Missions use an explicit rail mode / bounded section; no unbounded row insertion; hit-testing aligned to visible rows.
+- Rendering safety: bound queries and cached snapshots; sanitize persisted metadata before render; no per-frame SQLite.
 
 ## 7. Verification gates
 
