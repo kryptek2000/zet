@@ -539,6 +539,21 @@ pub const SESSION_GAP_ROWS: usize = 1;
 /// Keeping this in the pure layout model makes drawing and hit-testing agree.
 pub const COMMAND_CARD_ROWS: usize = 2;
 
+/// Column for the exit label and, when it can sit clear of the exit, the
+/// right-aligned duration in a rail command detail row.
+pub const RAIL_EXIT_COL: u32 = 5;
+
+pub fn rail_command_detail_columns(cols: u32, exit: &str, duration: &str) -> (u32, Option<u32>) {
+    let exit_text = format!("exit {}", single_line(exit));
+    let exit_end = RAIL_EXIT_COL
+        .saturating_add(text_cells(&exit_text) as u32)
+        .saturating_add(1);
+    let duration_cells = text_cells(&single_line(duration)) as u32;
+    let duration_col = cols.saturating_sub(duration_cells.saturating_add(1));
+    let duration_col = (duration_cells > 0 && duration_col > exit_end).then_some(duration_col);
+    (RAIL_EXIT_COL, duration_col)
+}
+
 /// Deterministic rail row layout shared by rendering and hit testing.
 ///
 /// Expanded rails get a brand row, a mode row, a spacer, the sessions
@@ -648,7 +663,10 @@ pub fn rail_row_layout(
 
 #[cfg(test)]
 mod rail_row_tests {
-    use super::{rail_command_at_row, rail_rows, rail_session_at_row, RailRow, COMMAND_CARD_ROWS};
+    use super::{
+        rail_command_at_row, rail_command_detail_columns, rail_rows, rail_session_at_row,
+        text_cells, RailRow, COMMAND_CARD_ROWS, RAIL_EXIT_COL,
+    };
 
     #[test]
     fn one_session_has_two_rows_and_footer_last() {
@@ -815,18 +833,36 @@ mod rail_row_tests {
             assert_eq!(rail_session_at_row(rows.saturating_sub(1), 3, rows), None);
         }
     }
+
+    #[test]
+    fn command_detail_columns_never_overlap_and_keep_duration_when_readable() {
+        let (exit_col, duration_col) = rail_command_detail_columns(22, "0", "7ms");
+        assert_eq!(exit_col, RAIL_EXIT_COL);
+        let duration_col = duration_col.expect("duration fits");
+        let exit_end = exit_col + text_cells("exit 0") as u32;
+        assert!(duration_col > exit_end);
+        assert!(duration_col + text_cells("7ms") as u32 <= 22);
+
+        let (_, duration_col) = rail_command_detail_columns(12, "255", "123456789ms");
+        assert_eq!(
+            duration_col, None,
+            "crowded detail must drop metadata, not overlap"
+        );
+        let (_, duration_col) = rail_command_detail_columns(22, "0", "");
+        assert_eq!(duration_col, None);
+    }
 }
 
 #[cfg(test)]
 mod inspector_layout_tests {
     use super::{
         inspector_command_position, inspector_command_row, inspector_detail_start,
-        inspector_header_descriptor_col, inspector_selection_at_row,
+        inspector_header_descriptor_col, inspector_header_layout, inspector_selection_at_row,
         inspector_selection_for_command, inspector_session_command_at_row,
         inspector_visible_commands, text_cells, timeline_display_rows, timeline_empty_row,
         timeline_layout, timeline_preview_heading, timeline_row_layout, timeline_session_badges,
         CommandRow, InspectorView, Provenance, TimelineAvailability, INSPECTOR_ACTIVITY_START,
-        TIMELINE_BADGE_COL, TIMELINE_COMMAND_COL, TIMELINE_INDEX_COL,
+        INSPECTOR_HEADER_RIGHT_INSET, TIMELINE_BADGE_COL, TIMELINE_COMMAND_COL, TIMELINE_INDEX_COL,
     };
 
     fn command(id: i64, session: &str, text: &str, exit: &str, duration: &str) -> CommandRow {
@@ -1075,6 +1111,70 @@ mod inspector_layout_tests {
             TimelineAvailability::Recorded.empty_message(),
             TimelineAvailability::Unavailable.empty_message()
         );
+    }
+
+    #[test]
+    fn refined_inspector_descriptors_stay_clear_at_supported_widths() {
+        let views = [
+            ("CONTEXTUAL INSPECTOR", "SESSION-SCOPED / OBSERVED"),
+            ("OBSERVED WORK TIMELINE", "CROSS-SESSION / OBSERVED"),
+            ("AGENT ACTIVITY", "LAUNCH CANDIDATES ONLY"),
+        ];
+        for (title, descriptor) in views {
+            assert_eq!(
+                inspector_header_descriptor_col(32, title, descriptor),
+                None,
+                "32-col Inspector must keep the title and descriptor clear: {title}"
+            );
+            let col = inspector_header_descriptor_col(80, title, descriptor)
+                .unwrap_or_else(|| panic!("descriptor should fit at 80 cols: {title}"));
+            assert!(col > 4 + text_cells(title) as u32);
+            assert!(col + text_cells(descriptor) as u32 <= 78);
+        }
+    }
+
+    #[test]
+    fn inspector_header_layout_has_positive_padding_and_clearance() {
+        for ch in [20u32, 22, 24, 32] {
+            let layout = inspector_header_layout(
+                80,
+                ch,
+                "OBSERVED WORK TIMELINE",
+                "CROSS-SESSION / OBSERVED",
+            );
+            assert!(layout.mark_left_px > 0, "left padding must be positive");
+            assert!(layout.mark_top_px > 0, "top padding must be positive");
+            assert!(
+                layout.title_left_px > layout.mark_left_px + layout.mark_size_px,
+                "title must clear mark"
+            );
+            assert!(
+                layout.title_baseline_px > layout.mark_top_px as f32,
+                "title must be optically centered below top padding"
+            );
+            assert!(
+                layout.separator_px > layout.tab_top_px,
+                "separator must sit below tab row"
+            );
+            assert!(layout.tab_height_px > 4, "tabs must retain usable height");
+        }
+    }
+
+    #[test]
+    fn inspector_header_descriptor_has_right_breathing_room() {
+        let descriptor = "LAUNCH CANDIDATES ONLY";
+        let col = inspector_header_descriptor_col(80, "AGENT ACTIVITY", descriptor).unwrap();
+        assert!(
+            col + text_cells(descriptor) as u32 + INSPECTOR_HEADER_RIGHT_INSET <= 80,
+            "descriptor must keep the configured right-side inset"
+        );
+    }
+
+    #[test]
+    fn inspector_header_layout_narrow_width_drops_descriptor() {
+        let layout =
+            inspector_header_layout(32, 22, "OBSERVED WORK TIMELINE", "CROSS-SESSION / OBSERVED");
+        assert_eq!(layout.descriptor_col, None);
     }
 
     #[test]
@@ -1527,6 +1627,9 @@ pub const TIMELINE_INDEX_COL: u32 = 2;
 pub const TIMELINE_BADGE_COL: u32 = 6;
 pub const TIMELINE_COMMAND_COL: u32 = 9;
 pub const TIMELINE_RIGHT_INSET: u32 = 2;
+/// Extra right-side breathing room for the Contextual Inspector header's
+/// contextual descriptor, so it does not sit in the panel's edge area.
+pub const INSPECTOR_HEADER_RIGHT_INSET: u32 = 4;
 pub const TIMELINE_MIN_COMMAND_CELLS: usize = 16;
 pub const TIMELINE_METADATA_MIN_COLS: u32 = 40;
 
@@ -1775,10 +1878,61 @@ pub fn inspector_header_descriptor_col(cols: u32, title: &str, descriptor: &str)
     if descriptor_cells == 0 {
         return None;
     }
-    let col = cols
-        .saturating_sub(TIMELINE_RIGHT_INSET)
-        .saturating_sub(descriptor_cells);
-    (col > title_end).then_some(col)
+    // Prefer the roomier F2 inset, but fall back to the older, tighter
+    // insets when the viewport cannot otherwise keep the descriptor clear
+    // of the title. This restores the provisional-state label on widths
+    // where the larger inset would force it to disappear, while still
+    // avoiding the F1 overlap.
+    for inset in [INSPECTOR_HEADER_RIGHT_INSET, 3, 2, 1] {
+        let col = cols.saturating_sub(inset).saturating_sub(descriptor_cells);
+        if col > title_end {
+            return Some(col);
+        }
+    }
+    None
+}
+
+/// Shared geometry for the Contextual Inspector's two-row header.
+///
+/// The helper keeps the header inside the existing two-row footprint while
+/// giving the Aperture mark, title, descriptor, and tab row intentional
+/// padding. Pixel values are relative to the inspector viewport origin.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InspectorHeaderLayout {
+    pub mark_left_px: u32,
+    pub mark_top_px: u32,
+    pub mark_size_px: u32,
+    pub title_left_px: u32,
+    pub title_baseline_px: f32,
+    pub descriptor_col: Option<u32>,
+    pub separator_px: u32,
+    pub tab_top_px: u32,
+    pub tab_height_px: u32,
+}
+
+pub fn inspector_header_layout(
+    cols: u32,
+    ch: u32,
+    title: &str,
+    descriptor: &str,
+) -> InspectorHeaderLayout {
+    let mark_size_px = ch.saturating_sub(8).max(12);
+    let mark_left_px = 12;
+    let mark_top_px = 5;
+    let title_left_px = mark_left_px + mark_size_px + 12;
+    let title_baseline_px = 17.5;
+    let descriptor_col = inspector_header_descriptor_col(cols, title, descriptor);
+    InspectorHeaderLayout {
+        mark_left_px,
+        mark_top_px,
+        mark_size_px,
+        title_left_px,
+        title_baseline_px,
+        descriptor_col,
+        separator_px: ch.saturating_mul(3).saturating_sub(2),
+        tab_top_px: ch.saturating_mul(2).saturating_add(2),
+        tab_height_px: ch.saturating_sub(4),
+    }
 }
 
 /// Preview heading plus a truthful Enter affordance when it fits.

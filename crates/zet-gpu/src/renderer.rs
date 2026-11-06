@@ -970,6 +970,23 @@ impl Renderer {
                 ));
             }
         }
+        if let Some((start, end)) = segments.get(active) {
+            let (cw, ch) = (self.cell_w as u32, self.cell_h as u32);
+            let x = (*start as u32).saturating_mul(cw);
+            let width = end.saturating_sub(*start) as u32 * cw;
+            if width > 0 {
+                self.draw_rect_px(
+                    x,
+                    (row as u32)
+                        .saturating_add(1)
+                        .saturating_mul(ch)
+                        .saturating_sub(2),
+                    width,
+                    2,
+                    PANEL_CYAN,
+                );
+            }
+        }
     }
 
     /// Tab bar variant with an excluded leading rail region.
