@@ -66,6 +66,40 @@ impl std::ops::Deref for OutputPreview {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mission {
+    pub id: i64,
+    pub title: String,
+    pub description: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissionCommand {
+    pub mission_id: i64,
+    pub block_id: i64,
+    pub session: String,
+    pub provenance: String,
+    pub created_at: i64,
+    /// Whether the referenced block still exists in the recorded store
+    /// with the same session. False means the evidence is unavailable.
+    pub available: bool,
+}
+
+struct TransactionGuard<'a> {
+    conn: &'a Connection,
+    committed: bool,
+}
+
+impl Drop for TransactionGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = self.conn.execute("ROLLBACK", []);
+        }
+    }
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -112,6 +146,30 @@ impl Store {
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_blocks_session ON blocks (session, id)",
             (),
+        )?;
+        // P3-B1: additive mission tables. These are separate from blocks and
+        // never modify recorded command data. Foreign keys are best-effort;
+        // availability is re-checked against blocks at read time.
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS missions (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                title       TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                created_at  INTEGER NOT NULL,
+                updated_at  INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS mission_commands (
+                mission_id  INTEGER NOT NULL,
+                block_id    INTEGER NOT NULL,
+                session     TEXT NOT NULL,
+                provenance  TEXT NOT NULL DEFAULT 'user',
+                created_at  INTEGER NOT NULL,
+                PRIMARY KEY (mission_id, block_id, session)
+            );
+            CREATE INDEX IF NOT EXISTS idx_mission_commands_mission
+                ON mission_commands (mission_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_mission_commands_block
+                ON mission_commands (block_id, session);",
         )?;
         Ok(())
     }
@@ -460,6 +518,205 @@ impl Store {
             ));
         }
         Ok(out)
+    }
+
+    fn now_millis() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+    }
+
+    /// Sanitize mission title/description text before persistence:
+    /// scrub secret-like tokens and drop control characters, while
+    /// preserving legitimate UTF-8 text.
+    pub fn sanitize_mission_text(text: &str) -> String {
+        scrub_secrets(text)
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect::<String>()
+            .trim()
+            .to_string()
+    }
+
+    pub fn create_mission(&self, title: &str, description: &str) -> Result<i64> {
+        let title = Self::sanitize_mission_text(title);
+        let description = Self::sanitize_mission_text(description);
+        let now = Self::now_millis();
+        self.conn.execute(
+            "INSERT INTO missions (title, description, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![title, description, now, now],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn get_mission(&self, id: i64) -> Result<Option<Mission>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, description, created_at, updated_at FROM missions WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(Mission {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                description: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn list_missions(&self) -> Result<Vec<Mission>> {
+        let mut stmt = self.conn.prepare("SELECT id, title, description, created_at, updated_at FROM missions ORDER BY created_at ASC, id ASC")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Mission {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                description: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn update_mission(&self, id: i64, title: &str, description: &str) -> Result<bool> {
+        let title = Self::sanitize_mission_text(title);
+        let description = Self::sanitize_mission_text(description);
+        let now = Self::now_millis();
+        let changed = self.conn.execute(
+            "UPDATE missions SET title = ?1, description = ?2, updated_at = ?3 WHERE id = ?4",
+            rusqlite::params![title, description, now, id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn delete_mission(&self, id: i64) -> Result<bool> {
+        self.conn.execute("BEGIN IMMEDIATE", [])?;
+        let mut __tx_guard = TransactionGuard {
+            conn: &self.conn,
+            committed: false,
+        };
+        self.conn.execute(
+            "DELETE FROM mission_commands WHERE mission_id = ?1",
+            rusqlite::params![id],
+        )?;
+        let changed = self
+            .conn
+            .execute("DELETE FROM missions WHERE id = ?1", rusqlite::params![id])?;
+        self.conn.execute("COMMIT", [])?;
+        __tx_guard.committed = true;
+        Ok(changed > 0)
+    }
+
+    pub fn link_command(
+        &self,
+        mission_id: i64,
+        block_id: i64,
+        session: &str,
+        provenance: &str,
+    ) -> Result<bool> {
+        self.conn.execute("BEGIN IMMEDIATE", [])?;
+        let mut __tx_guard = TransactionGuard {
+            conn: &self.conn,
+            committed: false,
+        };
+        let exists: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM missions WHERE id = ?1",
+            rusqlite::params![mission_id],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        let now = Self::now_millis();
+        let provenance = if provenance.trim().is_empty() {
+            "user"
+        } else {
+            provenance.trim()
+        };
+        let inserted = self.conn.execute(
+            "INSERT OR IGNORE INTO mission_commands (mission_id, block_id, session, provenance, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![mission_id, block_id, session, provenance, now],
+        )?;
+        if inserted > 0 {
+            self.conn.execute(
+                "UPDATE missions SET updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![now, mission_id],
+            )?;
+        }
+        self.conn.execute("COMMIT", [])?;
+        __tx_guard.committed = true;
+        Ok(inserted > 0)
+    }
+
+    pub fn unlink_command(&self, mission_id: i64, block_id: i64, session: &str) -> Result<bool> {
+        self.conn.execute("BEGIN IMMEDIATE", [])?;
+        let mut __tx_guard = TransactionGuard {
+            conn: &self.conn,
+            committed: false,
+        };
+        let changed = self.conn.execute(
+            "DELETE FROM mission_commands WHERE mission_id = ?1 AND block_id = ?2 AND session = ?3",
+            rusqlite::params![mission_id, block_id, session],
+        )?;
+        if changed > 0 {
+            self.conn.execute(
+                "UPDATE missions SET updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![Self::now_millis(), mission_id],
+            )?;
+        }
+        self.conn.execute("COMMIT", [])?;
+        __tx_guard.committed = true;
+        Ok(changed > 0)
+    }
+
+    pub fn mission_commands(&self, mission_id: i64) -> Result<Vec<MissionCommand>> {
+        let mut stmt = self.conn.prepare("SELECT mission_id, block_id, session, provenance, created_at FROM mission_commands WHERE mission_id = ?1 ORDER BY created_at ASC, block_id ASC")?;
+        let rows = stmt.query_map(rusqlite::params![mission_id], |row| {
+            Ok(MissionCommand {
+                mission_id: row.get(0)?,
+                block_id: row.get(1)?,
+                session: row.get(2)?,
+                provenance: row.get(3)?,
+                created_at: row.get(4)?,
+                available: false,
+            })
+        })?;
+        let mut out: Vec<MissionCommand> = rows.collect::<Result<Vec<_>>>()?;
+        for mc in &mut out {
+            mc.available = self.block_available(mc.block_id, &mc.session)?;
+        }
+        Ok(out)
+    }
+
+    fn block_available(&self, block_id: i64, session: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM blocks WHERE id = ?1 AND session = ?2",
+            rusqlite::params![block_id, session],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn missions_for_block(&self, block_id: i64, session: &str) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT mission_id FROM mission_commands WHERE block_id = ?1 AND session = ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![block_id, session], |row| row.get(0))?;
+        rows.collect()
+    }
+
+    pub fn mission_command_block(&self, block_id: i64, session: &str) -> Result<Option<Block>> {
+        let mut stmt = self.conn.prepare("SELECT id, session, command, output, exit_code, cwd, git_branch, duration_ms FROM blocks WHERE id = ?1 AND session = ?2")?;
+        let mut rows = stmt.query(rusqlite::params![block_id, session])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row_to_block(row)?))
+        } else {
+            Ok(None)
+        }
     }
 }
 
