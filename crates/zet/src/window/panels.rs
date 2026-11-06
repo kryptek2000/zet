@@ -1929,8 +1929,8 @@ pub fn inspector_header_layout(
         title_left_px,
         title_baseline_px,
         descriptor_col,
-        separator_px: ch.saturating_mul(2).saturating_sub(2),
-        tab_top_px: ch.saturating_add(2),
+        separator_px: ch.saturating_mul(3).saturating_sub(2),
+        tab_top_px: ch.saturating_mul(2).saturating_add(2),
         tab_height_px: ch.saturating_sub(4),
     }
 }

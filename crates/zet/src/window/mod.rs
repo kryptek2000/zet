@@ -1976,7 +1976,7 @@ impl App {
                 let row = ((y - top) / ch as f64).floor() as usize;
                 let col = ((x - left) / cw as f64).floor() as usize;
                 // Clickable Inspector view switch.
-                if row == 1 {
+                if row == 2 {
                     if (8..16).contains(&col) {
                         self.set_inspector_view(panels::InspectorView::Session);
                         return;
@@ -3549,7 +3549,7 @@ impl App {
 
         r.draw_rect_px(
             origin_x.saturating_add(cw.saturating_mul(2)),
-            origin_y.saturating_add(ch.saturating_mul(2).saturating_sub(2)),
+            origin_y.saturating_add(ch.saturating_mul(3).saturating_sub(2)),
             vp.cols
                 .saturating_mul(cw)
                 .saturating_sub(cw.saturating_mul(4)),
@@ -3568,7 +3568,9 @@ impl App {
         let tab_x = origin_x
             .saturating_add(tab_start.saturating_mul(cw))
             .saturating_add(2);
-        let tab_y = origin_y.saturating_add(ch).saturating_add(2);
+        let tab_y = origin_y
+            .saturating_add(ch.saturating_mul(2))
+            .saturating_add(2);
         let tab_w = tab_end
             .saturating_sub(tab_start)
             .saturating_mul(cw)
@@ -3596,7 +3598,7 @@ impl App {
         Self::draw_ui_row(
             r,
             vp,
-            1,
+            2,
             8,
             "SESSION",
             UI_META,
@@ -3609,7 +3611,7 @@ impl App {
         Self::draw_ui_row(
             r,
             vp,
-            1,
+            2,
             16,
             "TIMELINE",
             UI_META,
@@ -3618,7 +3620,7 @@ impl App {
         Self::draw_ui_row(
             r,
             vp,
-            1,
+            2,
             25,
             "AGENTS",
             UI_META,
@@ -3626,15 +3628,14 @@ impl App {
         );
 
         if let Some(descriptor_col) = header.descriptor_col {
-            let descriptor_x = (vp.x.saturating_add(descriptor_col)).saturating_mul(cw) as f32;
-            let descriptor_max_width = vp.cols.saturating_sub(descriptor_col).saturating_mul(cw);
-            r.draw_ui_text_px(
-                descriptor_x,
-                origin_y as f32 + 17.5,
+            Self::draw_ui_row(
+                r,
+                vp,
+                1,
+                descriptor_col,
                 descriptor,
                 UI_META,
                 descriptor_ink,
-                Some(descriptor_max_width),
             );
         }
 
@@ -8951,7 +8952,7 @@ mod p4a3_r3_acceptance {
             (29usize, "AGENTS"),
         ] {
             let x = (vp.x as f64 + col_range as f64) * cw as f64 + 5.0;
-            let y = top + 1.5 * ch as f64;
+            let y = top + 2.5 * ch as f64;
             app.handle_mouse_click(x, y, cw, ch);
             assert!(
                 !app.agent_evidence_open && app.agent_evidence.is_none(),
