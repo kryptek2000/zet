@@ -582,6 +582,26 @@ impl Store {
         rows.collect()
     }
 
+    /// Bounded mission list for native panel rendering. `limit` is clamped
+    /// to a sane range so a bad caller cannot request an unbounded read.
+    pub fn list_missions_bounded(&self, limit: usize) -> Result<Vec<Mission>> {
+        let limit = limit.clamp(1, 256) as i64;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, description, created_at, updated_at
+             FROM missions ORDER BY created_at ASC, id ASC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![limit], |row| {
+            Ok(Mission {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                description: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     pub fn update_mission(&self, id: i64, title: &str, description: &str) -> Result<bool> {
         let title = Self::sanitize_mission_text(title);
         let description = Self::sanitize_mission_text(description);
@@ -676,6 +696,36 @@ impl Store {
     pub fn mission_commands(&self, mission_id: i64) -> Result<Vec<MissionCommand>> {
         let mut stmt = self.conn.prepare("SELECT mission_id, block_id, session, provenance, created_at FROM mission_commands WHERE mission_id = ?1 ORDER BY created_at ASC, block_id ASC")?;
         let rows = stmt.query_map(rusqlite::params![mission_id], |row| {
+            Ok(MissionCommand {
+                mission_id: row.get(0)?,
+                block_id: row.get(1)?,
+                session: row.get(2)?,
+                provenance: row.get(3)?,
+                created_at: row.get(4)?,
+                available: false,
+            })
+        })?;
+        let mut out: Vec<MissionCommand> = rows.collect::<Result<Vec<_>>>()?;
+        for mc in &mut out {
+            mc.available = self.block_available(mc.block_id, &mc.session)?;
+        }
+        Ok(out)
+    }
+
+    /// Bounded evidence list for the native Mission view. The limit is
+    /// clamped so panel refreshes cannot read an unbounded association set.
+    pub fn mission_commands_bounded(
+        &self,
+        mission_id: i64,
+        limit: usize,
+    ) -> Result<Vec<MissionCommand>> {
+        let limit = limit.clamp(1, 256) as i64;
+        let mut stmt = self.conn.prepare(
+            "SELECT mission_id, block_id, session, provenance, created_at
+             FROM mission_commands WHERE mission_id = ?1
+             ORDER BY created_at ASC, block_id ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![mission_id, limit], |row| {
             Ok(MissionCommand {
                 mission_id: row.get(0)?,
                 block_id: row.get(1)?,
