@@ -57,7 +57,7 @@ Native panel integration is deferred to a follow-up slice. The data model and CL
 - `cargo check --workspace --all-targets`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
-- Added `crates/zet-blocks/tests/missions.rs` (8 tests).
+- Added `crates/zet-blocks/tests/missions.rs` (12 tests).
 
 ## 9. Scope reconciliation
 

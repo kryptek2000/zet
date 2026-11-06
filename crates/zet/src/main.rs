@@ -499,9 +499,6 @@ fn blocks(argv: &[&str]) {
 /// Arg parsing and exits stay at this edge so the transcript itself is
 /// testable in-process.
 fn mission(argv: &[&str]) {
-    // Open store
-    let mut db: Option<String> = None;
-    // We'll parse subcommand first.
     if argv.is_empty() {
         eprintln!("usage: zet mission create|list|show|link|unlink ...");
         std::process::exit(2);
@@ -510,16 +507,37 @@ fn mission(argv: &[&str]) {
         "create" => {
             let mut title = String::new();
             let mut description = String::new();
+            let mut db: Option<String> = None;
             let mut i = 1;
             while i < argv.len() {
                 match argv[i] {
                     "--db" => {
                         i += 1;
-                        db = argv.get(i).map(|v| v.to_string());
+                        db = match argv.get(i) {
+                            Some(v) if !v.is_empty() => Some(v.to_string()),
+                            Some(_) => {
+                                eprintln!("--db needs a nonempty value");
+                                std::process::exit(2);
+                            }
+                            None => {
+                                eprintln!("--db needs a value");
+                                std::process::exit(2);
+                            }
+                        };
                     }
                     "--description" => {
                         i += 1;
-                        description = argv.get(i).copied().unwrap_or("").to_string();
+                        description = match argv.get(i) {
+                            Some(v) => v.to_string(),
+                            None => {
+                                eprintln!("--description needs a value");
+                                std::process::exit(2);
+                            }
+                        };
+                    }
+                    other if other.starts_with("--") => {
+                        eprintln!("unknown mission flag {other:?}");
+                        std::process::exit(2);
                     }
                     other => {
                         if title.is_empty() {
@@ -548,12 +566,32 @@ fn mission(argv: &[&str]) {
             println!("created mission #{}", id);
         }
         "list" => {
-            // parse db flag
+            let mut db: Option<String> = None;
             let mut i = 1;
             while i < argv.len() {
-                if argv[i] == "--db" {
-                    i += 1;
-                    db = argv.get(i).map(|v| v.to_string());
+                match argv[i] {
+                    "--db" => {
+                        i += 1;
+                        db = match argv.get(i) {
+                            Some(v) if !v.is_empty() => Some(v.to_string()),
+                            Some(_) => {
+                                eprintln!("--db needs a nonempty value");
+                                std::process::exit(2);
+                            }
+                            None => {
+                                eprintln!("--db needs a value");
+                                std::process::exit(2);
+                            }
+                        };
+                    }
+                    other if other.starts_with("--") => {
+                        eprintln!("unknown mission flag {other:?}");
+                        std::process::exit(2);
+                    }
+                    other => {
+                        eprintln!("unexpected mission list argument {other:?}");
+                        std::process::exit(2);
+                    }
                 }
                 i += 1;
             }
@@ -566,19 +604,51 @@ fn mission(argv: &[&str]) {
                 println!("no missions");
             } else {
                 for m in missions {
-                    println!("#{} {}", m.id, m.title);
+                    println!(
+                        "#{} {}",
+                        m.id,
+                        zet_blocks::Store::sanitize_mission_text(&m.title)
+                    );
                 }
             }
         }
         "show" => {
             let mut id: Option<i64> = None;
+            let mut db: Option<String> = None;
             let mut i = 1;
             while i < argv.len() {
-                if argv[i] == "--db" {
-                    i += 1;
-                    db = argv.get(i).map(|v| v.to_string());
-                } else if id.is_none() {
-                    id = argv[i].parse().ok();
+                match argv[i] {
+                    "--db" => {
+                        i += 1;
+                        db = match argv.get(i) {
+                            Some(v) if !v.is_empty() => Some(v.to_string()),
+                            Some(_) => {
+                                eprintln!("--db needs a nonempty value");
+                                std::process::exit(2);
+                            }
+                            None => {
+                                eprintln!("--db needs a value");
+                                std::process::exit(2);
+                            }
+                        };
+                    }
+                    other if other.starts_with("--") => {
+                        eprintln!("unknown mission flag {other:?}");
+                        std::process::exit(2);
+                    }
+                    other => match other.parse::<i64>() {
+                        Ok(v) => {
+                            if id.is_some() {
+                                eprintln!("mission show takes one id");
+                                std::process::exit(2);
+                            }
+                            id = Some(v);
+                        }
+                        Err(_) => {
+                            eprintln!("mission show needs a numeric id");
+                            std::process::exit(2);
+                        }
+                    },
                 }
                 i += 1;
             }
@@ -592,7 +662,8 @@ fn mission(argv: &[&str]) {
                 std::process::exit(1);
             }) {
                 None => {
-                    println!("mission #{} not found", id);
+                    eprintln!("mission #{} not found", id);
+                    std::process::exit(1);
                 }
                 Some(m) => {
                     println!("#{} {}", m.id, m.title);
@@ -634,24 +705,54 @@ fn mission(argv: &[&str]) {
             let mut mission_id: Option<i64> = None;
             let mut block_id: Option<i64> = None;
             let mut session: Option<String> = None;
+            let mut db: Option<String> = None;
             let mut i = 1;
             while i < argv.len() {
                 match argv[i] {
                     "--db" => {
                         i += 1;
-                        db = argv.get(i).map(|v| v.to_string());
+                        db = match argv.get(i) {
+                            Some(v) if !v.is_empty() => Some(v.to_string()),
+                            Some(_) => {
+                                eprintln!("--db needs a nonempty value");
+                                std::process::exit(2);
+                            }
+                            None => {
+                                eprintln!("--db needs a value");
+                                std::process::exit(2);
+                            }
+                        };
                     }
                     "--session" => {
                         i += 1;
-                        session = argv.get(i).map(|v| v.to_string());
+                        session = match argv.get(i) {
+                            Some(v) => Some(v.to_string()),
+                            None => {
+                                eprintln!("--session needs a value");
+                                std::process::exit(2);
+                            }
+                        };
                     }
-                    other => {
-                        if mission_id.is_none() {
-                            mission_id = other.parse().ok();
-                        } else if block_id.is_none() {
-                            block_id = other.parse().ok();
+                    other if other.starts_with("--") => {
+                        eprintln!("unknown mission flag {other:?}");
+                        std::process::exit(2);
+                    }
+                    other => match other.parse::<i64>() {
+                        Ok(v) => {
+                            if mission_id.is_none() {
+                                mission_id = Some(v);
+                            } else if block_id.is_none() {
+                                block_id = Some(v);
+                            } else {
+                                eprintln!("unexpected mission link argument {other:?}");
+                                std::process::exit(2);
+                            }
                         }
-                    }
+                        Err(_) => {
+                            eprintln!("mission link needs numeric <mission_id> <block_id>");
+                            std::process::exit(2);
+                        }
+                    },
                 }
                 i += 1;
             }
@@ -670,7 +771,21 @@ fn mission(argv: &[&str]) {
             }
             let store = open_store(db.as_deref());
             match store.link_command(mission_id, block_id, &session, "user") {
-                Ok(true) => println!("linked block #{} to mission #{}", block_id, mission_id),
+                Ok(true) => {
+                    let evidence = store
+                        .mission_command_block(block_id, &session)
+                        .ok()
+                        .flatten()
+                        .is_some();
+                    if evidence {
+                        println!("linked block #{} to mission #{}", block_id, mission_id);
+                    } else {
+                        println!(
+                            "linked block #{} to mission #{} (evidence unavailable)",
+                            block_id, mission_id
+                        );
+                    }
+                }
                 Ok(false) => println!("already linked"),
                 Err(e) => {
                     eprintln!("cannot link: {e}");
@@ -682,24 +797,54 @@ fn mission(argv: &[&str]) {
             let mut mission_id: Option<i64> = None;
             let mut block_id: Option<i64> = None;
             let mut session: Option<String> = None;
+            let mut db: Option<String> = None;
             let mut i = 1;
             while i < argv.len() {
                 match argv[i] {
                     "--db" => {
                         i += 1;
-                        db = argv.get(i).map(|v| v.to_string());
+                        db = match argv.get(i) {
+                            Some(v) if !v.is_empty() => Some(v.to_string()),
+                            Some(_) => {
+                                eprintln!("--db needs a nonempty value");
+                                std::process::exit(2);
+                            }
+                            None => {
+                                eprintln!("--db needs a value");
+                                std::process::exit(2);
+                            }
+                        };
                     }
                     "--session" => {
                         i += 1;
-                        session = argv.get(i).map(|v| v.to_string());
+                        session = match argv.get(i) {
+                            Some(v) => Some(v.to_string()),
+                            None => {
+                                eprintln!("--session needs a value");
+                                std::process::exit(2);
+                            }
+                        };
                     }
-                    other => {
-                        if mission_id.is_none() {
-                            mission_id = other.parse().ok();
-                        } else if block_id.is_none() {
-                            block_id = other.parse().ok();
+                    other if other.starts_with("--") => {
+                        eprintln!("unknown mission flag {other:?}");
+                        std::process::exit(2);
+                    }
+                    other => match other.parse::<i64>() {
+                        Ok(v) => {
+                            if mission_id.is_none() {
+                                mission_id = Some(v);
+                            } else if block_id.is_none() {
+                                block_id = Some(v);
+                            } else {
+                                eprintln!("unexpected mission unlink argument {other:?}");
+                                std::process::exit(2);
+                            }
                         }
-                    }
+                        Err(_) => {
+                            eprintln!("mission unlink needs numeric <mission_id> <block_id>");
+                            std::process::exit(2);
+                        }
+                    },
                 }
                 i += 1;
             }

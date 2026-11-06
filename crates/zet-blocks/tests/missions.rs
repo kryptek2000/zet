@@ -148,6 +148,20 @@ fn mission_persists_across_reopen() {
 }
 
 #[test]
+fn mission_metadata_is_sanitized() {
+    let store = Store::open_in_memory().unwrap();
+    let id = store
+        .create_mission(
+            "title sk-proj-abcdefghijklmnopqrstuvwxyz",
+            "desc \u{001b}[31m",
+        )
+        .unwrap();
+    let m = store.get_mission(id).unwrap().unwrap();
+    assert!(!m.title.contains("sk-proj-"), "{:?}", m.title);
+    assert!(!m.description.contains('\u{001b}'), "{:?}", m.description);
+}
+
+#[test]
 fn legacy_database_migration() {
     let path = std::env::temp_dir().join(format!("zet-legacy-{}.sqlite", std::process::id()));
     let _ = std::fs::remove_file(&path);
@@ -184,4 +198,38 @@ fn legacy_database_migration() {
     assert_eq!(cmds.len(), 1);
     assert!(cmds[0].available);
     std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn transaction_rollback_on_failed_commit() {
+    let path = std::env::temp_dir().join(format!("zet-tx-fail-{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let mission_id;
+    let block_id;
+    {
+        let store = Store::open(path.to_str().unwrap()).unwrap();
+        mission_id = store.create_mission("M", "").unwrap();
+        block_id = store.append(&sample("s1")).unwrap();
+    }
+    let blocker = rusqlite::Connection::open(&path).unwrap();
+    blocker.execute("BEGIN", []).unwrap();
+    let _: i64 = blocker
+        .query_row("SELECT COUNT(*) FROM missions", [], |r| r.get(0))
+        .unwrap();
+
+    let store = Store::open(path.to_str().unwrap()).unwrap();
+    let res = store.link_command(mission_id, block_id, "s1", "user");
+    assert!(res.is_err(), "expected failed COMMIT, got {:?}", res);
+
+    drop(blocker);
+
+    // Connection must remain usable after the failed commit.
+    let new_mission = store.create_mission("After", "").unwrap();
+    assert!(new_mission > 0);
+
+    let store2 = Store::open(path.to_str().unwrap()).unwrap();
+    let cmds = store2.mission_commands(mission_id).unwrap();
+    assert!(cmds.is_empty(), "link should have rolled back");
+
+    let _ = std::fs::remove_file(&path);
 }

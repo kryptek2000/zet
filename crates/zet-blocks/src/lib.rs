@@ -527,11 +527,25 @@ impl Store {
             .unwrap_or(0)
     }
 
+    /// Sanitize mission title/description text before persistence:
+    /// scrub secret-like tokens and drop control characters, while
+    /// preserving legitimate UTF-8 text.
+    pub fn sanitize_mission_text(text: &str) -> String {
+        scrub_secrets(text)
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect::<String>()
+            .trim()
+            .to_string()
+    }
+
     pub fn create_mission(&self, title: &str, description: &str) -> Result<i64> {
+        let title = Self::sanitize_mission_text(title);
+        let description = Self::sanitize_mission_text(description);
         let now = Self::now_millis();
         self.conn.execute(
             "INSERT INTO missions (title, description, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![title.trim(), description.trim(), now, now],
+            rusqlite::params![title, description, now, now],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -569,10 +583,12 @@ impl Store {
     }
 
     pub fn update_mission(&self, id: i64, title: &str, description: &str) -> Result<bool> {
+        let title = Self::sanitize_mission_text(title);
+        let description = Self::sanitize_mission_text(description);
         let now = Self::now_millis();
         let changed = self.conn.execute(
             "UPDATE missions SET title = ?1, description = ?2, updated_at = ?3 WHERE id = ?4",
-            rusqlite::params![title.trim(), description.trim(), now, id],
+            rusqlite::params![title, description, now, id],
         )?;
         Ok(changed > 0)
     }
@@ -590,8 +606,8 @@ impl Store {
         let changed = self
             .conn
             .execute("DELETE FROM missions WHERE id = ?1", rusqlite::params![id])?;
-        __tx_guard.committed = true;
         self.conn.execute("COMMIT", [])?;
+        __tx_guard.committed = true;
         Ok(changed > 0)
     }
 
@@ -607,14 +623,11 @@ impl Store {
             conn: &self.conn,
             committed: false,
         };
-        let exists: i64 = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM missions WHERE id = ?1",
-                rusqlite::params![mission_id],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
+        let exists: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM missions WHERE id = ?1",
+            rusqlite::params![mission_id],
+            |row| row.get(0),
+        )?;
         if exists == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
@@ -634,8 +647,8 @@ impl Store {
                 rusqlite::params![now, mission_id],
             )?;
         }
-        __tx_guard.committed = true;
         self.conn.execute("COMMIT", [])?;
+        __tx_guard.committed = true;
         Ok(inserted > 0)
     }
 
@@ -655,8 +668,8 @@ impl Store {
                 rusqlite::params![Self::now_millis(), mission_id],
             )?;
         }
-        __tx_guard.committed = true;
         self.conn.execute("COMMIT", [])?;
+        __tx_guard.committed = true;
         Ok(changed > 0)
     }
 
