@@ -2847,7 +2847,7 @@ impl App {
         Self::draw_ui_row(
             r,
             vp,
-            2,
+            3,
             2,
             "CANDIDATE EVIDENCE, NOT VERIFIED STATE",
             UI_META,
@@ -2855,18 +2855,18 @@ impl App {
         );
         let (hint_col, hint) = panels::agent_shortcut_hint(vp.cols);
         if hint_col == 2 {
-            Self::draw_ui_row(r, vp, 3, hint_col, hint, UI_META, PANEL_MUTED);
+            Self::draw_ui_row(r, vp, 4, hint_col, hint, UI_META, PANEL_MUTED);
         } else {
             Self::draw_ui_row(
                 r,
                 vp,
-                3,
+                4,
                 2,
                 "RECORDED COMMAND CANDIDATES",
                 UI_META,
                 PANEL_MUTED,
             );
-            Self::draw_ui_row(r, vp, 3, hint_col, hint, UI_META, PANEL_MUTED);
+            Self::draw_ui_row(r, vp, 4, hint_col, hint, UI_META, PANEL_MUTED);
         }
 
         let snap = match agent_snapshot {
@@ -3120,34 +3120,34 @@ impl App {
         let (cw, ch) = r.cell_px();
         let origin_x = vp.x.saturating_mul(cw);
         let origin_y = vp.y.saturating_mul(ch);
-        if vp.rows > 2 {
+        if vp.rows > 3 {
             r.draw_fill(
                 zet_gpu::renderer::Viewport {
                     x: vp.x,
-                    y: vp.y.saturating_add(2),
+                    y: vp.y.saturating_add(3),
                     cols: vp.cols,
-                    rows: vp.rows.saturating_sub(2),
+                    rows: vp.rows.saturating_sub(3),
                 },
                 PANEL_BG,
             );
         }
 
         if vp.rows > 4 {
-            Self::draw_ui_row(r, vp, 2, 2, "SOURCE", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(r, vp, 3, 2, "SOURCE", UI_META, PANEL_MUTED);
             Self::draw_ui_row(
                 r,
                 vp,
-                2,
+                3,
                 12.min(vp.cols.saturating_sub(1)),
                 "RECORDED BLOCKS",
                 UI_BODY,
                 PANEL_SECONDARY,
             );
-            Self::draw_ui_row(r, vp, 3, 2, "ORDER", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(r, vp, 4, 2, "ORDER", UI_META, PANEL_MUTED);
             Self::draw_ui_row(
                 r,
                 vp,
-                3,
+                4,
                 12.min(vp.cols.saturating_sub(1)),
                 "DATABASE INSERTION",
                 UI_BODY,
@@ -3155,7 +3155,7 @@ impl App {
             );
         }
 
-        let activity_header = 4u32;
+        let activity_header = 5u32;
         if activity_header < vp.rows {
             Self::draw_ui_row(
                 r,
@@ -3662,8 +3662,8 @@ impl App {
                 Self::draw_instrument_surface(
                     r,
                     vp,
-                    2,
-                    vp.rows.saturating_sub(3),
+                    3,
+                    vp.rows.saturating_sub(4),
                     PANEL_INSET,
                     PANEL_BORDER,
                     7,
@@ -3734,11 +3734,11 @@ impl App {
         // Session overview: real state only, kept separate from the command
         // ledger so the Inspector has a different job from the Mission Rail.
         if vp.rows > 5 {
-            Self::draw_instrument_surface(r, vp, 2, 4, PANEL_RAISED, PANEL_BORDER_STRONG, 7);
+            Self::draw_instrument_surface(r, vp, 3, 4, PANEL_RAISED, PANEL_BORDER_STRONG, 7);
             r.draw_rect_px(
                 origin_x.saturating_add(8),
                 origin_y
-                    .saturating_add(ch.saturating_mul(2))
+                    .saturating_add(ch.saturating_mul(3))
                     .saturating_add(8),
                 2,
                 ch.saturating_mul(4).saturating_sub(16),
@@ -3749,11 +3749,11 @@ impl App {
                 "running" => PANEL_TEAL,
                 _ => PANEL_CYAN,
             };
-            Self::draw_ui_row(r, vp, 2, 2, "SESSION", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(r, vp, 3, 2, "SESSION", UI_META, PANEL_MUTED);
             Self::draw_ui_row(
                 r,
                 vp,
-                2,
+                3,
                 10.min(vp.cols.saturating_sub(1)),
                 &format!("{:02}", snapshot.active.saturating_add(1)),
                 UI_VALUE,
@@ -3769,7 +3769,7 @@ impl App {
                 .saturating_sub(chip_w)
                 .saturating_sub(8);
             let chip_y = origin_y
-                .saturating_add(ch.saturating_mul(2))
+                .saturating_add(ch.saturating_mul(3))
                 .saturating_add(3);
             if chip_w > 18 && chip_h > 6 {
                 r.draw_chamfered_panel_px(
@@ -3792,17 +3792,17 @@ impl App {
                     Some(chip_w.saturating_sub(12)),
                 );
             }
-            Self::draw_ui_row(r, vp, 3, 2, "CWD", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(r, vp, 4, 2, "CWD", UI_META, PANEL_MUTED);
             Self::draw_ui_row(
                 r,
                 vp,
-                3,
+                4,
                 8.min(vp.cols.saturating_sub(1)),
                 &panels::truncate_left_to_cells(&snapshot.cwd, vp.cols.saturating_sub(9) as usize),
                 UI_BODY,
                 PANEL_SECONDARY,
             );
-            Self::draw_ui_row(r, vp, 4, 2, "LAST EXIT", UI_META, PANEL_MUTED);
+            Self::draw_ui_row(r, vp, 5, 2, "LAST EXIT", UI_META, PANEL_MUTED);
             let exit_ink = if snapshot.exit == "0" {
                 PANEL_TEAL
             } else if snapshot.exit == "—" {
@@ -3813,7 +3813,7 @@ impl App {
             Self::draw_ui_row(
                 r,
                 vp,
-                4,
+                5,
                 13.min(vp.cols.saturating_sub(1)),
                 &snapshot.exit,
                 UI_VALUE,
@@ -3824,7 +3824,7 @@ impl App {
                 .cols
                 .saturating_sub(panels::text_cells(&observed) as u32 + 2);
             if observed_col > 16 {
-                Self::draw_ui_row(r, vp, 4, observed_col, &observed, UI_META, PANEL_MUTED);
+                Self::draw_ui_row(r, vp, 5, observed_col, &observed, UI_META, PANEL_MUTED);
             }
         }
 
