@@ -58,5 +58,13 @@ Native panel integration is deferred to a follow-up slice. The data model and CL
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
 - Added `crates/zet-blocks/tests/missions.rs` (8 tests).
-EOF
-echo done
+
+## 9. Scope reconciliation
+
+This slice is **P3-B1 Foundation — CLI and Persistence Only**.
+
+It provides the mission data model, additive SQLite persistence, explicit
+command associations, missing-evidence reporting, and CLI create/list/show/
+link/unlink commands. Native Mission Rail and Inspector integration is
+explicitly deferred to a separately reviewed follow-up slice. No native
+visual acceptance is claimed.

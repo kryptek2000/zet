@@ -87,6 +87,19 @@ pub struct MissionCommand {
     pub available: bool,
 }
 
+struct TransactionGuard<'a> {
+    conn: &'a Connection,
+    committed: bool,
+}
+
+impl Drop for TransactionGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = self.conn.execute("ROLLBACK", []);
+        }
+    }
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -565,6 +578,11 @@ impl Store {
     }
 
     pub fn delete_mission(&self, id: i64) -> Result<bool> {
+        self.conn.execute("BEGIN IMMEDIATE", [])?;
+        let mut __tx_guard = TransactionGuard {
+            conn: &self.conn,
+            committed: false,
+        };
         self.conn.execute(
             "DELETE FROM mission_commands WHERE mission_id = ?1",
             rusqlite::params![id],
@@ -572,6 +590,8 @@ impl Store {
         let changed = self
             .conn
             .execute("DELETE FROM missions WHERE id = ?1", rusqlite::params![id])?;
+        __tx_guard.committed = true;
+        self.conn.execute("COMMIT", [])?;
         Ok(changed > 0)
     }
 
@@ -582,7 +602,20 @@ impl Store {
         session: &str,
         provenance: &str,
     ) -> Result<bool> {
-        if self.get_mission(mission_id)?.is_none() {
+        self.conn.execute("BEGIN IMMEDIATE", [])?;
+        let mut __tx_guard = TransactionGuard {
+            conn: &self.conn,
+            committed: false,
+        };
+        let exists: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM missions WHERE id = ?1",
+                rusqlite::params![mission_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if exists == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
         let now = Self::now_millis();
@@ -601,10 +634,17 @@ impl Store {
                 rusqlite::params![now, mission_id],
             )?;
         }
+        __tx_guard.committed = true;
+        self.conn.execute("COMMIT", [])?;
         Ok(inserted > 0)
     }
 
     pub fn unlink_command(&self, mission_id: i64, block_id: i64, session: &str) -> Result<bool> {
+        self.conn.execute("BEGIN IMMEDIATE", [])?;
+        let mut __tx_guard = TransactionGuard {
+            conn: &self.conn,
+            committed: false,
+        };
         let changed = self.conn.execute(
             "DELETE FROM mission_commands WHERE mission_id = ?1 AND block_id = ?2 AND session = ?3",
             rusqlite::params![mission_id, block_id, session],
@@ -615,6 +655,8 @@ impl Store {
                 rusqlite::params![Self::now_millis(), mission_id],
             )?;
         }
+        __tx_guard.committed = true;
+        self.conn.execute("COMMIT", [])?;
         Ok(changed > 0)
     }
 

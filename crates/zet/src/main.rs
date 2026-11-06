@@ -599,7 +599,13 @@ fn mission(argv: &[&str]) {
                     if !m.description.is_empty() {
                         println!("  {}", m.description);
                     }
-                    let cmds = store.mission_commands(id).unwrap_or_default();
+                    let cmds = match store.mission_commands(id) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("cannot read mission commands: {e}");
+                            std::process::exit(1);
+                        }
+                    };
                     if cmds.is_empty() {
                         println!("  (no linked commands)");
                     } else {
@@ -609,10 +615,14 @@ fn mission(argv: &[&str]) {
                                 "  block #{} session={} provenance={}{}",
                                 c.block_id, c.session, c.provenance, avail
                             );
-                            if let Some(b) = store
-                                .mission_command_block(c.block_id, &c.session)
-                                .unwrap_or(None)
-                            {
+                            let block = match store.mission_command_block(c.block_id, &c.session) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    eprintln!("cannot read command evidence: {e}");
+                                    std::process::exit(1);
+                                }
+                            };
+                            if let Some(b) = block {
                                 println!("    {} [exit {}]", b.command, b.exit_code);
                             }
                         }
