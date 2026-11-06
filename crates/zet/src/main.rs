@@ -38,6 +38,7 @@ fn cli_dispatch(args: &[String]) {
         ["inline", spec] => inline_set(spec),
         ["models", rest @ ..] => models_cmd(rest),
         ["blocks", rest @ ..] => blocks(rest),
+        ["mission", rest @ ..] => mission(rest),
         ["replay", rest @ ..] => replay(rest),
         ["journal", rest @ ..] => journal(rest),
         ["undo"] => undo(),
@@ -69,6 +70,11 @@ fn cli_dispatch(args: &[String]) {
             eprintln!("                            (openrouter / opencode-go keys, local server, compat URL)");
             eprintln!("  zet blocks [--db PATH] [--limit N] [--session S]");
             eprintln!("                            list recorded command blocks");
+            eprintln!("  zet mission create <title> [--description TEXT]");
+            eprintln!("  zet mission list");
+            eprintln!("  zet mission show <id>");
+            eprintln!("  zet mission link <id> <block_id> [--session S]");
+            eprintln!("  zet mission unlink <id> <block_id> [--session S]");
             eprintln!("                            (--session defaults to $ZET_SESSION)");
             eprintln!("  zet replay [--db PATH] <session>");
             eprintln!("                            print a session's transcript, block by block");
@@ -492,6 +498,244 @@ fn blocks(argv: &[&str]) {
 /// `zet replay [--db PATH] <session>`: print one session's transcript.
 /// Arg parsing and exits stay at this edge so the transcript itself is
 /// testable in-process.
+fn mission(argv: &[&str]) {
+    // Open store
+    let mut db: Option<String> = None;
+    // We'll parse subcommand first.
+    if argv.is_empty() {
+        eprintln!("usage: zet mission create|list|show|link|unlink ...");
+        std::process::exit(2);
+    }
+    match argv[0] {
+        "create" => {
+            let mut title = String::new();
+            let mut description = String::new();
+            let mut i = 1;
+            while i < argv.len() {
+                match argv[i] {
+                    "--db" => {
+                        i += 1;
+                        db = argv.get(i).map(|v| v.to_string());
+                    }
+                    "--description" => {
+                        i += 1;
+                        description = argv.get(i).copied().unwrap_or("").to_string();
+                    }
+                    other => {
+                        if title.is_empty() {
+                            title = other.to_string();
+                        } else {
+                            if !title.is_empty() {
+                                title.push(' ');
+                            }
+                            title.push_str(other);
+                        }
+                    }
+                }
+                i += 1;
+            }
+            if title.trim().is_empty() {
+                eprintln!("mission create needs a title");
+                std::process::exit(2);
+            }
+            let store = open_store(db.as_deref());
+            let id = store
+                .create_mission(&title, &description)
+                .unwrap_or_else(|e| {
+                    eprintln!("cannot create mission: {e}");
+                    std::process::exit(1);
+                });
+            println!("created mission #{}", id);
+        }
+        "list" => {
+            // parse db flag
+            let mut i = 1;
+            while i < argv.len() {
+                if argv[i] == "--db" {
+                    i += 1;
+                    db = argv.get(i).map(|v| v.to_string());
+                }
+                i += 1;
+            }
+            let store = open_store(db.as_deref());
+            let missions = store.list_missions().unwrap_or_else(|e| {
+                eprintln!("cannot list missions: {e}");
+                std::process::exit(1);
+            });
+            if missions.is_empty() {
+                println!("no missions");
+            } else {
+                for m in missions {
+                    println!("#{} {}", m.id, m.title);
+                }
+            }
+        }
+        "show" => {
+            let mut id: Option<i64> = None;
+            let mut i = 1;
+            while i < argv.len() {
+                if argv[i] == "--db" {
+                    i += 1;
+                    db = argv.get(i).map(|v| v.to_string());
+                } else if id.is_none() {
+                    id = argv[i].parse().ok();
+                }
+                i += 1;
+            }
+            let id = id.unwrap_or_else(|| {
+                eprintln!("mission show needs an id");
+                std::process::exit(2);
+            });
+            let store = open_store(db.as_deref());
+            match store.get_mission(id).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }) {
+                None => {
+                    println!("mission #{} not found", id);
+                }
+                Some(m) => {
+                    println!("#{} {}", m.id, m.title);
+                    if !m.description.is_empty() {
+                        println!("  {}", m.description);
+                    }
+                    let cmds = store.mission_commands(id).unwrap_or_default();
+                    if cmds.is_empty() {
+                        println!("  (no linked commands)");
+                    } else {
+                        for c in cmds {
+                            let avail = if c.available { "" } else { " [unavailable]" };
+                            println!(
+                                "  block #{} session={} provenance={}{}",
+                                c.block_id, c.session, c.provenance, avail
+                            );
+                            if let Some(b) = store
+                                .mission_command_block(c.block_id, &c.session)
+                                .unwrap_or(None)
+                            {
+                                println!("    {} [exit {}]", b.command, b.exit_code);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        "link" => {
+            let mut mission_id: Option<i64> = None;
+            let mut block_id: Option<i64> = None;
+            let mut session: Option<String> = None;
+            let mut i = 1;
+            while i < argv.len() {
+                match argv[i] {
+                    "--db" => {
+                        i += 1;
+                        db = argv.get(i).map(|v| v.to_string());
+                    }
+                    "--session" => {
+                        i += 1;
+                        session = argv.get(i).map(|v| v.to_string());
+                    }
+                    other => {
+                        if mission_id.is_none() {
+                            mission_id = other.parse().ok();
+                        } else if block_id.is_none() {
+                            block_id = other.parse().ok();
+                        }
+                    }
+                }
+                i += 1;
+            }
+            let mission_id = mission_id.unwrap_or_else(|| {
+                eprintln!("mission link needs <mission_id>");
+                std::process::exit(2);
+            });
+            let block_id = block_id.unwrap_or_else(|| {
+                eprintln!("mission link needs <block_id>");
+                std::process::exit(2);
+            });
+            let session = session.or_else(env_session).unwrap_or_default();
+            if session.is_empty() {
+                eprintln!("mission link needs --session (or run inside a zet window)");
+                std::process::exit(2);
+            }
+            let store = open_store(db.as_deref());
+            match store.link_command(mission_id, block_id, &session, "user") {
+                Ok(true) => println!("linked block #{} to mission #{}", block_id, mission_id),
+                Ok(false) => println!("already linked"),
+                Err(e) => {
+                    eprintln!("cannot link: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        "unlink" => {
+            let mut mission_id: Option<i64> = None;
+            let mut block_id: Option<i64> = None;
+            let mut session: Option<String> = None;
+            let mut i = 1;
+            while i < argv.len() {
+                match argv[i] {
+                    "--db" => {
+                        i += 1;
+                        db = argv.get(i).map(|v| v.to_string());
+                    }
+                    "--session" => {
+                        i += 1;
+                        session = argv.get(i).map(|v| v.to_string());
+                    }
+                    other => {
+                        if mission_id.is_none() {
+                            mission_id = other.parse().ok();
+                        } else if block_id.is_none() {
+                            block_id = other.parse().ok();
+                        }
+                    }
+                }
+                i += 1;
+            }
+            let mission_id = mission_id.unwrap_or_else(|| {
+                eprintln!("mission unlink needs <mission_id>");
+                std::process::exit(2);
+            });
+            let block_id = block_id.unwrap_or_else(|| {
+                eprintln!("mission unlink needs <block_id>");
+                std::process::exit(2);
+            });
+            let session = session.or_else(env_session).unwrap_or_default();
+            if session.is_empty() {
+                eprintln!("mission unlink needs --session (or run inside a zet window)");
+                std::process::exit(2);
+            }
+            let store = open_store(db.as_deref());
+            match store.unlink_command(mission_id, block_id, &session) {
+                Ok(true) => println!("unlinked block #{} from mission #{}", block_id, mission_id),
+                Ok(false) => println!("not linked"),
+                Err(e) => {
+                    eprintln!("cannot unlink: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => {
+            eprintln!("unknown mission subcommand");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn open_store(db: Option<&str>) -> zet_blocks::Store {
+    match db {
+        Some(path) => zet_blocks::Store::open(path).unwrap_or_else(|e| {
+            eprintln!("cannot open {path}: {e}");
+            std::process::exit(1);
+        }),
+        None => zet_blocks::Store::open_default().unwrap_or_else(|e| {
+            eprintln!("cannot open block store: {e}");
+            std::process::exit(1);
+        }),
+    }
+}
+
 fn replay(argv: &[&str]) {
     let mut db: Option<String> = None;
     let mut session: Option<String> = None;

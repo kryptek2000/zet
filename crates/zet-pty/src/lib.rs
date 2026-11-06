@@ -510,6 +510,7 @@ pub const CLI_SUBCOMMANDS: &[&str] = &[
     "schedules",
     "unschedule",
     "daemon",
+    "mission",
 ];
 
 pub fn zet_fallback(line: &str) -> Option<String> {
