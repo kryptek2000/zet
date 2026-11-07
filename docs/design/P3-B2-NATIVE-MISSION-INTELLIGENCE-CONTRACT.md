@@ -58,3 +58,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 git diff --check
 ```
+
+## 8. P3-B2-F1 finishing pass decisions
+
+- **Mouse modality:** while the New Mission editor is open, `handle_mouse_click` returns before any rail, tab, or Inspector hit-testing. Background state cannot change.
+- **Database contention:** the native UI opens its Store with a 50 ms busy timeout (`open_default_with_busy_timeout`), applied before schema initialization. CLI/recorder paths keep rusqlite's default. Contended writes fail fast with a visible error and succeed on retry after lock release.
+- **Discoverability:** Mission Evidence shows a context-aware five-step link workflow (`Ctrl+Shift+N`, `Ctrl+Shift+I`, select command, `m`, `Ctrl+Shift+N`). `a` remains Agents.
+- **Evidence selection:** arrow/mouse selection is bounded to the visible evidence rows; `link_scroll` follows the selection.
+- **Layout restore:** entering Mission mode saves the prior rail/Inspector layout; leaving restores it unless the user explicitly toggled a panel while in Mission mode.
+- **Visual finishing:** mission rail/evidence use padded headers, subtle separators, restrained borders, selection accent bars, and a single status location (rail footer).
+- **Narrow overlay:** the New Mission modal clamps to the terminal viewport in both dimensions.

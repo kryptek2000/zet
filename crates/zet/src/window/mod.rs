@@ -220,8 +220,17 @@ pub enum Focus {
 
 const MISSION_LIST_LIMIT: usize = 64;
 const MISSION_EVIDENCE_LIMIT: usize = 64;
-const MISSION_LIST_START: u32 = 3;
-const MISSION_RAIL_NEW_ROW: u32 = 1;
+const MISSION_LIST_START: u32 = 4;
+const MISSION_RAIL_NEW_ROW: u32 = 2;
+const MISSION_DB_BUSY_TIMEOUT_MS: u64 = 50;
+const MISSION_EVIDENCE_START: u32 = 6;
+const MISSION_EVIDENCE_ROW_HEIGHT: u32 = 3;
+
+fn mission_evidence_visible_rows_for(rows: u32) -> usize {
+    rows.saturating_sub(MISSION_EVIDENCE_START)
+        .saturating_sub(1) as usize
+        / MISSION_EVIDENCE_ROW_HEIGHT as usize
+}
 
 #[derive(Debug, Clone)]
 struct MissionLinkView {
@@ -252,12 +261,17 @@ struct MissionState {
     status: Option<String>,
     scroll: usize,
     link_sel: usize,
+    link_scroll: usize,
+    saved_layout: Option<crate::window::layout::Layout>,
+    layout_touched: bool,
 }
 
 impl MissionState {
     fn open_default() -> Self {
         let mut state = Self::default();
-        match zet_blocks::Store::open_default() {
+        match zet_blocks::Store::open_default_with_busy_timeout(std::time::Duration::from_millis(
+            MISSION_DB_BUSY_TIMEOUT_MS,
+        )) {
             Ok(store) => {
                 state.store = Some(store);
                 state.reload_missions();
@@ -300,12 +314,14 @@ impl MissionState {
         }
         self.selected_id = Some(id);
         self.link_sel = 0;
+        self.link_scroll = 0;
         self.reload_links();
     }
 
     fn reload_links(&mut self) {
         self.links.clear();
         self.link_sel = 0;
+        self.link_scroll = 0;
         let Some(id) = self.selected_id else {
             return;
         };
@@ -2037,6 +2053,9 @@ impl App {
     }
 
     fn toggle_rail(&mut self) {
+        if self.mission.mode {
+            self.mission.layout_touched = true;
+        }
         self.layout.rail = !self.layout.rail;
         self.focus = Focus::Terminal;
         self.chrome.mark_dirty();
@@ -2046,6 +2065,9 @@ impl App {
     }
 
     fn toggle_inspector(&mut self) {
+        if self.mission.mode {
+            self.mission.layout_touched = true;
+        }
         self.layout.inspector = !self.layout.inspector;
         if self.layout.inspector {
             self.focus = Focus::Inspector;
@@ -2067,6 +2089,10 @@ impl App {
     fn toggle_mission_mode(&mut self) {
         self.mission.mode = !self.mission.mode;
         if self.mission.mode {
+            if self.mission.saved_layout.is_none() {
+                self.mission.saved_layout = Some(self.layout);
+                self.mission.layout_touched = false;
+            }
             if !self.layout.rail || !self.layout.inspector {
                 self.layout.rail = true;
                 self.layout.inspector = true;
@@ -2077,6 +2103,16 @@ impl App {
             self.mission.reload_missions();
             self.focus = Focus::Rail;
         } else {
+            if !self.mission.layout_touched {
+                if let Some(saved) = self.mission.saved_layout.take() {
+                    self.layout = saved;
+                    self.chrome.mark_dirty();
+                    self.inspector_cache.mark_dirty();
+                    self.fit_all();
+                }
+            } else {
+                self.mission.saved_layout = None;
+            }
             self.focus = Focus::Terminal;
         }
         self.needs_draw = true;
@@ -2109,6 +2145,11 @@ impl App {
             self.mission.scroll = next.saturating_add(1).saturating_sub(visible);
         }
         self.needs_draw = true;
+    }
+
+    fn mission_evidence_visible_rows(&self) -> usize {
+        let rows = self.frame_layout().inspector.map(|vp| vp.rows).unwrap_or(0);
+        mission_evidence_visible_rows_for(rows)
     }
 
     fn selected_recorded_command(&self) -> Option<(i64, String)> {
@@ -2186,6 +2227,11 @@ impl App {
     }
 
     fn handle_mouse_click(&mut self, x: f64, y: f64, cw: u32, ch: u32) {
+        // Modal New Mission editor: background clicks must not change
+        // missions, selection, tabs, or panel state while it is open.
+        if self.mission.input.is_some() {
+            return;
+        }
         self.needs_draw = true;
         // The bottom row of Aperture's compact header owns tab switching;
         // identity/header pixels above it are not ghost controls.
@@ -2281,8 +2327,10 @@ impl App {
                 let row = ((y - top) / ch as f64).floor() as usize;
                 let col = ((x - left) / cw as f64).floor() as usize;
                 if self.mission.mode {
-                    if row >= 4 {
-                        let index = (row - 4) / 3;
+                    if row >= MISSION_EVIDENCE_START as usize {
+                        let index = self.mission.link_scroll
+                            + (row - MISSION_EVIDENCE_START as usize)
+                                / MISSION_EVIDENCE_ROW_HEIGHT as usize;
                         if index < self.mission.links.len() {
                             self.mission.link_sel = index;
                         }
@@ -2528,9 +2576,8 @@ impl App {
         focused: bool,
     ) {
         use zet_gpu::renderer::{
-            PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_DANGER, PANEL_MUTED, PANEL_SECONDARY,
-            RAIL_ACCENT, RAIL_BG, RAIL_BORDER, RAIL_FOOTER_INK, RAIL_HEADER_INK, RAIL_SELECTED_BG,
-            RAIL_TEXT_INK,
+            PANEL_CYAN, PANEL_DANGER, PANEL_MUTED, PANEL_SECONDARY, RAIL_ACCENT, RAIL_BG,
+            RAIL_BORDER, RAIL_FOOTER_INK, RAIL_HEADER_INK, RAIL_SELECTED_BG, RAIL_TEXT_INK,
         };
         let (cw, ch) = r.cell_px();
         let x = vp.x.saturating_mul(cw);
@@ -2538,27 +2585,37 @@ impl App {
         let w = vp.cols.saturating_mul(cw);
         let h = vp.rows.saturating_mul(ch);
         r.draw_rect_px(x, y, w, h, RAIL_BG);
-        r.draw_rect_px(
-            x,
-            y,
-            if focused { 2 } else { 1 },
-            h,
-            if focused {
-                PANEL_CYAN
-            } else {
-                PANEL_BORDER_STRONG
-            },
-        );
+        r.draw_rect_px(x, y, 1, h, if focused { PANEL_CYAN } else { RAIL_BORDER });
         r.draw_rect_px(x, y, w, 1, RAIL_BORDER);
         r.draw_rect_px(x, y.saturating_add(h.saturating_sub(1)), w, 1, RAIL_BORDER);
 
-        let width = vp.cols.saturating_sub(2).max(1) as usize;
+        let width = vp.cols.saturating_sub(4).max(1) as usize;
         let row = |r: &mut Renderer, row: u32, text: &str, ink| {
             let text = panels::truncate_to_cells(&Self::mission_safe_text(text), width);
-            r.draw_text_row(vp, row, 1, &text, ink);
+            r.draw_text_row(vp, row, 2, &text, ink);
         };
-        row(r, 0, "MISSIONS", RAIL_HEADER_INK);
-        row(r, MISSION_RAIL_NEW_ROW, "+ NEW MISSION  [n]", RAIL_ACCENT);
+        let separator = |r: &mut Renderer, row: u32| {
+            let line_y =
+                vp.y.saturating_add(row)
+                    .saturating_mul(ch)
+                    .saturating_add(ch.saturating_sub(2));
+            r.draw_rect_px(
+                x.saturating_add(8),
+                line_y,
+                w.saturating_sub(16),
+                1,
+                RAIL_BORDER,
+            );
+        };
+
+        row(r, 1, "MISSIONS", RAIL_HEADER_INK);
+        separator(r, 2);
+        row(
+            r,
+            MISSION_RAIL_NEW_ROW + 1,
+            "+ NEW MISSION   n",
+            RAIL_ACCENT,
+        );
 
         let list_rows = vp.rows.saturating_sub(MISSION_LIST_START).saturating_sub(1) as usize;
         if let Some(error) = &mission.error {
@@ -2566,9 +2623,10 @@ impl App {
             row(
                 r,
                 MISSION_LIST_START.saturating_add(1),
-                error,
+                "STORE ERROR — RETRY WITH N",
                 PANEL_SECONDARY,
             );
+            row(r, MISSION_LIST_START.saturating_add(2), error, PANEL_MUTED);
         } else if mission.missions.is_empty() {
             row(r, MISSION_LIST_START, "NO MISSIONS", PANEL_MUTED);
             row(
@@ -2585,6 +2643,7 @@ impl App {
                 };
                 let selected = mission.selected_id == Some(entry.id);
                 let row_number = MISSION_LIST_START + index as u32;
+                let row_y = vp.y.saturating_add(row_number).saturating_mul(ch);
                 if selected {
                     let fill = zet_gpu::renderer::Viewport {
                         x: vp.x,
@@ -2593,9 +2652,16 @@ impl App {
                         rows: 1,
                     };
                     r.draw_fill(fill, RAIL_SELECTED_BG);
+                    r.draw_rect_px(
+                        x.saturating_add(4),
+                        row_y.saturating_add(3),
+                        2,
+                        ch.saturating_sub(6),
+                        RAIL_ACCENT,
+                    );
                 }
                 let label = format!(
-                    "{:02} #{} {}",
+                    "{:02}  #{}  {}",
                     position.saturating_add(1),
                     entry.id,
                     entry.title
@@ -2612,10 +2678,11 @@ impl App {
                 );
             }
         }
+        separator(r, vp.rows.saturating_sub(2));
         let footer = mission
             .status
             .as_deref()
-            .unwrap_or("CTRL+SHIFT+N  SESSIONS");
+            .unwrap_or("CTRL+SHIFT+N   SESSIONS");
         row(
             r,
             vp.rows.saturating_sub(1),
@@ -2647,7 +2714,7 @@ impl App {
         r.draw_rect_px(
             x,
             y,
-            if focused { 2 } else { 1 },
+            1,
             h,
             if focused {
                 PANEL_CYAN
@@ -2655,27 +2722,88 @@ impl App {
                 PANEL_BORDER_STRONG
             },
         );
-        let width = vp.cols.saturating_sub(2).max(1) as usize;
+        let width = vp.cols.saturating_sub(4).max(1) as usize;
         let row = |r: &mut Renderer, row: u32, text: &str, ink| {
             let text = panels::truncate_to_cells(&Self::mission_safe_text(text), width);
-            r.draw_text_row(vp, row, 1, &text, ink);
+            r.draw_text_row(vp, row, 2, &text, ink);
         };
-        row(r, 0, "MISSION EVIDENCE", RAIL_ACCENT);
+        let separator = |r: &mut Renderer, row: u32| {
+            let line_y =
+                vp.y.saturating_add(row)
+                    .saturating_mul(ch)
+                    .saturating_add(ch.saturating_sub(2));
+            r.draw_rect_px(
+                x.saturating_add(8),
+                line_y,
+                w.saturating_sub(16),
+                1,
+                PANEL_BORDER_STRONG,
+            );
+        };
+
+        row(r, 1, "MISSION EVIDENCE", RAIL_ACCENT);
         let title = mission
             .selected()
-            .map(|m| format!("#{} {}", m.id, m.title))
+            .map(|m| format!("#{}  {}", m.id, m.title))
             .unwrap_or_else(|| "NO MISSION SELECTED".to_string());
-        row(r, 1, &title, RAIL_TEXT_INK);
-        row(r, 2, "USER-LINKED COMMANDS", PANEL_MUTED);
+        row(r, 2, &title, RAIL_TEXT_INK);
+        separator(r, 3);
+        row(r, 4, "USER-LINKED COMMANDS", PANEL_MUTED);
+
         if mission.links.is_empty() {
-            row(r, 4, "NO LINKED COMMANDS", PANEL_MUTED);
-            row(r, 5, "SELECT A COMMAND AND PRESS M", PANEL_SECONDARY);
+            row(r, MISSION_EVIDENCE_START, "NO LINKED COMMANDS", PANEL_MUTED);
+            row(
+                r,
+                MISSION_EVIDENCE_START + 1,
+                "TO LINK A COMMAND:",
+                PANEL_SECONDARY,
+            );
+            row(
+                r,
+                MISSION_EVIDENCE_START + 2,
+                "1  CTRL+SHIFT+N  COMMANDS",
+                PANEL_SECONDARY,
+            );
+            row(
+                r,
+                MISSION_EVIDENCE_START + 3,
+                "2  CTRL+SHIFT+I  INSPECTOR",
+                PANEL_SECONDARY,
+            );
+            row(
+                r,
+                MISSION_EVIDENCE_START + 4,
+                "3  SELECT RECORDED COMMAND",
+                PANEL_SECONDARY,
+            );
+            row(
+                r,
+                MISSION_EVIDENCE_START + 5,
+                "4  PRESS M TO LINK",
+                RAIL_ACCENT,
+            );
+            row(
+                r,
+                MISSION_EVIDENCE_START + 6,
+                "5  CTRL+SHIFT+N  EVIDENCE",
+                PANEL_SECONDARY,
+            );
         } else {
-            let mut row_number = 4u32;
-            for (index, link) in mission.links.iter().enumerate() {
+            let visible = mission_evidence_visible_rows_for(vp.rows);
+            let end = (mission.link_scroll + visible).min(mission.links.len());
+            for (index, link) in mission
+                .links
+                .iter()
+                .enumerate()
+                .take(end)
+                .skip(mission.link_scroll)
+            {
+                let row_number = MISSION_EVIDENCE_START
+                    + (index - mission.link_scroll) as u32 * MISSION_EVIDENCE_ROW_HEIGHT;
                 if row_number + 2 >= vp.rows.saturating_sub(1) {
                     break;
                 }
+                let row_y = vp.y.saturating_add(row_number).saturating_mul(ch);
                 if index == mission.link_sel {
                     let fill = zet_gpu::renderer::Viewport {
                         x: vp.x,
@@ -2684,6 +2812,13 @@ impl App {
                         rows: 3.min(vp.rows.saturating_sub(row_number)),
                     };
                     r.draw_fill(fill, zet_gpu::renderer::RAIL_SELECTED_BG);
+                    r.draw_rect_px(
+                        x.saturating_add(4),
+                        row_y.saturating_add(3),
+                        2,
+                        ch.saturating_sub(6),
+                        RAIL_ACCENT,
+                    );
                 }
                 let command = link
                     .command
@@ -2693,7 +2828,7 @@ impl App {
                 row(
                     r,
                     row_number,
-                    &format!("#{} {}", link.block_id, command),
+                    &format!("#{}  {}", link.block_id, command),
                     if index == mission.link_sel {
                         RAIL_TEXT_INK
                     } else {
@@ -2704,7 +2839,7 @@ impl App {
                     r,
                     row_number + 1,
                     &format!(
-                        "{}  exit {}  {}",
+                        "{}   exit {}   {}",
                         link.session,
                         link.exit
                             .map(|v| v.to_string())
@@ -2719,7 +2854,7 @@ impl App {
                     r,
                     row_number + 2,
                     &format!(
-                        "provenance={}  {}",
+                        "{}   {}",
                         link.provenance,
                         if link.available {
                             "evidence available"
@@ -2733,22 +2868,13 @@ impl App {
                         PANEL_DANGER
                     },
                 );
-                row_number += 3;
             }
         }
-        let footer = mission
-            .status
-            .as_deref()
-            .unwrap_or("ARROWS SELECT  D UNLINK  ESC TERMINAL");
         row(
             r,
             vp.rows.saturating_sub(1),
-            footer,
-            if mission.status.is_some() {
-                RAIL_ACCENT
-            } else {
-                PANEL_MUTED
-            },
+            "ARROWS SELECT   D UNLINK   ESC TERMINAL",
+            PANEL_MUTED,
         );
     }
 
@@ -2763,8 +2889,10 @@ impl App {
             PANEL_SECONDARY, RAIL_TEXT_INK,
         };
         let (cw, ch) = r.cell_px();
-        let box_cols = vp.cols.saturating_sub(8).clamp(24, 64);
-        let box_rows = 8.min(vp.rows.saturating_sub(2)).max(6);
+        // Clamp to the terminal viewport so a narrow window never paints a
+        // modal wider or taller than the space it owns.
+        let box_cols = vp.cols.saturating_sub(8).clamp(12, 64).min(vp.cols.max(1));
+        let box_rows = 8.min(vp.rows.saturating_sub(2)).max(3).min(vp.rows.max(1));
         let box_x = vp.x + (vp.cols.saturating_sub(box_cols)) / 2;
         let box_y = vp.y + (vp.rows.saturating_sub(box_rows)) / 2;
         let px = box_x.saturating_mul(cw);
@@ -2772,7 +2900,7 @@ impl App {
         let pw = box_cols.saturating_mul(cw);
         let ph = box_rows.saturating_mul(ch);
         r.draw_rect_px(px, py, pw, ph, PANEL_INSET);
-        r.draw_rect_px(px, py, pw, 1, PANEL_CYAN);
+        r.draw_rect_px(px, py, pw, 1, PANEL_BORDER_STRONG);
         r.draw_rect_px(
             px,
             py.saturating_add(ph.saturating_sub(1)),
@@ -5661,6 +5789,9 @@ impl App {
                     }
                     Key::Named(NamedKey::ArrowUp) if self.focus == Focus::Inspector => {
                         self.mission.link_sel = self.mission.link_sel.saturating_sub(1);
+                        if self.mission.link_sel < self.mission.link_scroll {
+                            self.mission.link_scroll = self.mission.link_sel;
+                        }
                         self.needs_draw = true;
                         return;
                     }
@@ -5668,6 +5799,16 @@ impl App {
                         if !self.mission.links.is_empty() {
                             self.mission.link_sel =
                                 (self.mission.link_sel + 1).min(self.mission.links.len() - 1);
+                            let visible = self.mission_evidence_visible_rows().max(1);
+                            if self.mission.link_sel
+                                >= self.mission.link_scroll.saturating_add(visible)
+                            {
+                                self.mission.link_scroll = self
+                                    .mission
+                                    .link_sel
+                                    .saturating_add(1)
+                                    .saturating_sub(visible);
+                            }
                         }
                         self.needs_draw = true;
                         return;
@@ -7002,6 +7143,65 @@ mod layout_fit_tests {
         assert_eq!(app.mission.selected_id, Some(20));
         app.move_mission_selection(-1);
         assert_eq!(app.mission.selected_id, Some(10));
+    }
+
+    #[test]
+    fn mission_overlay_blocks_background_mouse() {
+        let mut app = make_test_app(
+            160,
+            50,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.mission.missions = vec![zet_blocks::Mission {
+            id: 10,
+            title: "A".to_string(),
+            description: String::new(),
+            created_at: 0,
+            updated_at: 0,
+        }];
+        app.mission.selected_id = Some(10);
+        app.mission.input = Some("Draft".to_string());
+        let before = (
+            app.mission.selected_id,
+            app.active,
+            app.focus,
+            app.layout,
+            app.mission.input.clone(),
+        );
+        app.handle_mouse_click(5.0, 5.0, 8, 16);
+        assert_eq!(
+            (
+                app.mission.selected_id,
+                app.active,
+                app.focus,
+                app.layout,
+                app.mission.input.clone()
+            ),
+            before
+        );
+    }
+
+    #[test]
+    fn mission_mode_restores_previous_layout() {
+        let mut app = make_test_app(
+            160,
+            50,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        assert!(app.layout.rail);
+        assert!(!app.layout.inspector);
+        app.toggle_mission_mode();
+        assert!(app.layout.inspector);
+        app.toggle_mission_mode();
+        assert!(app.layout.rail);
+        assert!(!app.layout.inspector);
+    }
+
+    #[test]
+    fn mission_evidence_rows_are_bounded_to_the_viewport() {
+        assert_eq!(super::mission_evidence_visible_rows_for(6), 0);
+        assert_eq!(super::mission_evidence_visible_rows_for(10), 1);
+        assert_eq!(super::mission_evidence_visible_rows_for(20), 4);
     }
 
     #[test]

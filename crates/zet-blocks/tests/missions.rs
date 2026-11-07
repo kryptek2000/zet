@@ -233,3 +233,48 @@ fn transaction_rollback_on_failed_commit() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn ui_busy_timeout_fails_fast_and_retries() {
+    let path = std::env::temp_dir().join(format!("zet-busy-{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    {
+        let store = Store::open(path.to_str().unwrap()).unwrap();
+        store.create_mission("Seed", "").unwrap();
+    }
+    let store =
+        Store::open_with_busy_timeout(path.to_str().unwrap(), std::time::Duration::from_millis(50))
+            .unwrap();
+    let blocker = rusqlite::Connection::open(&path).unwrap();
+    blocker.execute("BEGIN EXCLUSIVE", []).unwrap();
+
+    let started = std::time::Instant::now();
+    let err = store.create_mission("Blocked", "").unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_millis(750),
+        "busy timeout took {elapsed:?}"
+    );
+    assert!(matches!(
+        err,
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::DatabaseBusy,
+                ..
+            },
+            _
+        )
+    ));
+
+    drop(blocker);
+    let id = store.create_mission("Recovered", "").unwrap();
+    assert!(id > 0);
+    let store2 = Store::open(path.to_str().unwrap()).unwrap();
+    assert!(store2
+        .list_missions_bounded(16)
+        .unwrap()
+        .iter()
+        .any(|m| m.title == "Recovered"));
+
+    let _ = std::fs::remove_file(&path);
+}

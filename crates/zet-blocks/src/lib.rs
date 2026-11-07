@@ -119,6 +119,23 @@ impl Store {
         Ok(store)
     }
 
+    /// Open a store with an explicit SQLite busy timeout applied before
+    /// schema initialization. The native UI uses this; CLI and recorder
+    /// paths keep their established default.
+    pub fn open_with_busy_timeout(path: &str, timeout: std::time::Duration) -> Result<Self> {
+        let conn = Connection::open(path)?;
+        conn.busy_timeout(timeout)?;
+        let store = Store { conn };
+        store.init()?;
+        Ok(store)
+    }
+
+    /// Set the SQLite busy timeout for this connection. Useful for stores
+    /// opened through the ordinary path.
+    pub fn set_busy_timeout(&self, timeout: std::time::Duration) -> Result<()> {
+        self.conn.busy_timeout(timeout)
+    }
+
     fn init(&self) -> Result<()> {
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS blocks (
@@ -498,6 +515,21 @@ impl Store {
             dir.join("blocks.sqlite")
                 .to_str()
                 .ok_or_else(|| std::io::Error::other("non-UTF8 state root"))?,
+        )
+        .map_err(std::io::Error::other)
+    }
+
+    /// Open the default store with an explicit busy timeout before schema
+    /// initialization. Used by the native UI to avoid multi-second freezes
+    /// when another process holds the database lock.
+    pub fn open_default_with_busy_timeout(timeout: std::time::Duration) -> std::io::Result<Self> {
+        let dir = zet_home();
+        std::fs::create_dir_all(&dir)?;
+        Self::open_with_busy_timeout(
+            dir.join("blocks.sqlite")
+                .to_str()
+                .ok_or_else(|| std::io::Error::other("non-UTF8 state root"))?,
+            timeout,
         )
         .map_err(std::io::Error::other)
     }
