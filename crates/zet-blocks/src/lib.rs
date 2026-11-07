@@ -119,6 +119,23 @@ impl Store {
         Ok(store)
     }
 
+    /// Open a store with an explicit SQLite busy timeout applied before
+    /// schema initialization. The native UI uses this; CLI and recorder
+    /// paths keep their established default.
+    pub fn open_with_busy_timeout(path: &str, timeout: std::time::Duration) -> Result<Self> {
+        let conn = Connection::open(path)?;
+        conn.busy_timeout(timeout)?;
+        let store = Store { conn };
+        store.init()?;
+        Ok(store)
+    }
+
+    /// Set the SQLite busy timeout for this connection. Useful for stores
+    /// opened through the ordinary path.
+    pub fn set_busy_timeout(&self, timeout: std::time::Duration) -> Result<()> {
+        self.conn.busy_timeout(timeout)
+    }
+
     fn init(&self) -> Result<()> {
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS blocks (
@@ -502,6 +519,21 @@ impl Store {
         .map_err(std::io::Error::other)
     }
 
+    /// Open the default store with an explicit busy timeout before schema
+    /// initialization. Used by the native UI to avoid multi-second freezes
+    /// when another process holds the database lock.
+    pub fn open_default_with_busy_timeout(timeout: std::time::Duration) -> std::io::Result<Self> {
+        let dir = zet_home();
+        std::fs::create_dir_all(&dir)?;
+        Self::open_with_busy_timeout(
+            dir.join("blocks.sqlite")
+                .to_str()
+                .ok_or_else(|| std::io::Error::other("non-UTF8 state root"))?,
+            timeout,
+        )
+        .map_err(std::io::Error::other)
+    }
+
     pub fn replay(&self, session: &str) -> Result<String> {
         let mut out = String::new();
         for block in self.list(session)? {
@@ -571,6 +603,26 @@ impl Store {
     pub fn list_missions(&self) -> Result<Vec<Mission>> {
         let mut stmt = self.conn.prepare("SELECT id, title, description, created_at, updated_at FROM missions ORDER BY created_at ASC, id ASC")?;
         let rows = stmt.query_map([], |row| {
+            Ok(Mission {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                description: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Bounded mission list for native panel rendering. `limit` is clamped
+    /// to a sane range so a bad caller cannot request an unbounded read.
+    pub fn list_missions_bounded(&self, limit: usize) -> Result<Vec<Mission>> {
+        let limit = limit.clamp(1, 256) as i64;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, description, created_at, updated_at
+             FROM missions ORDER BY created_at ASC, id ASC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![limit], |row| {
             Ok(Mission {
                 id: row.get(0)?,
                 title: row.get(1)?,
@@ -676,6 +728,36 @@ impl Store {
     pub fn mission_commands(&self, mission_id: i64) -> Result<Vec<MissionCommand>> {
         let mut stmt = self.conn.prepare("SELECT mission_id, block_id, session, provenance, created_at FROM mission_commands WHERE mission_id = ?1 ORDER BY created_at ASC, block_id ASC")?;
         let rows = stmt.query_map(rusqlite::params![mission_id], |row| {
+            Ok(MissionCommand {
+                mission_id: row.get(0)?,
+                block_id: row.get(1)?,
+                session: row.get(2)?,
+                provenance: row.get(3)?,
+                created_at: row.get(4)?,
+                available: false,
+            })
+        })?;
+        let mut out: Vec<MissionCommand> = rows.collect::<Result<Vec<_>>>()?;
+        for mc in &mut out {
+            mc.available = self.block_available(mc.block_id, &mc.session)?;
+        }
+        Ok(out)
+    }
+
+    /// Bounded evidence list for the native Mission view. The limit is
+    /// clamped so panel refreshes cannot read an unbounded association set.
+    pub fn mission_commands_bounded(
+        &self,
+        mission_id: i64,
+        limit: usize,
+    ) -> Result<Vec<MissionCommand>> {
+        let limit = limit.clamp(1, 256) as i64;
+        let mut stmt = self.conn.prepare(
+            "SELECT mission_id, block_id, session, provenance, created_at
+             FROM mission_commands WHERE mission_id = ?1
+             ORDER BY created_at ASC, block_id ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![mission_id, limit], |row| {
             Ok(MissionCommand {
                 mission_id: row.get(0)?,
                 block_id: row.get(1)?,

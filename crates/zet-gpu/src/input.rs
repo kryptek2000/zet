@@ -128,6 +128,17 @@ pub fn is_inspector_toggle(logical: &Key, pressed: bool, mods: &ModifiersState) 
     matches!(logical, Key::Character(s) if ctrl && shift && s.eq_ignore_ascii_case("i"))
 }
 
+/// True on Ctrl+Shift+N: switch the rail between Sessions and Missions.
+/// `n` inside Mission mode opens the native New Mission overlay.
+pub fn is_mission_mode(logical: &Key, pressed: bool, mods: &ModifiersState) -> bool {
+    if !pressed {
+        return false;
+    }
+    let ctrl = mods.contains(ModifiersState::CONTROL);
+    let shift = mods.contains(ModifiersState::SHIFT);
+    matches!(logical, Key::Character(s) if ctrl && shift && s.eq_ignore_ascii_case("n"))
+}
+
 /// True on Ctrl+PageDown / Ctrl+PageUp: cycle tabs. Checked before
 /// [`translate`] (which would emit scrolling escapes).
 pub fn is_cycle_tab(logical: &Key, pressed: bool, mods: &ModifiersState) -> Option<isize> {
@@ -180,5 +191,23 @@ pub fn translate(
         Key::Named(NamedKey::Delete) => Some(b"\x1b[3~".to_vec()),
         Key::Character(s) if &**s == "\u{8}" => Some(b"\x7f".to_vec()),
         _ => text.map(|t| t.as_bytes().to_vec()),
+    }
+}
+
+#[cfg(test)]
+mod mission_mode_tests {
+    use super::*;
+
+    #[test]
+    fn ctrl_shift_n_is_the_mission_rail_chord() {
+        let mods = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert!(is_mission_mode(&Key::Character("n".into()), true, &mods));
+        assert!(is_mission_mode(&Key::Character("N".into()), true, &mods));
+        assert!(!is_mission_mode(
+            &Key::Character("n".into()),
+            true,
+            &ModifiersState::CONTROL
+        ));
+        assert!(!is_mission_mode(&Key::Character("n".into()), false, &mods));
     }
 }

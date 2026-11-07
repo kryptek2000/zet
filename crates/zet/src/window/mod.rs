@@ -13,8 +13,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::Window;
 use zet_gpu::input::{
-    is_agent_toggle, is_close_tab, is_copy, is_cycle_tab, is_inspector_toggle, is_new_tab,
-    is_paste, is_rail_toggle, is_search, is_select_all, translate,
+    is_agent_toggle, is_close_tab, is_copy, is_cycle_tab, is_inspector_toggle, is_mission_mode,
+    is_new_tab, is_paste, is_rail_toggle, is_search, is_select_all, translate,
 };
 use zet_gpu::presentation::{
     UI_BODY, UI_BRAND, UI_COMMAND, UI_HEADER, UI_META, UI_OUTPUT, UI_SECTION, UI_SESSION, UI_VALUE,
@@ -218,6 +218,253 @@ pub enum Focus {
     Inspector,
 }
 
+const MISSION_LIST_LIMIT: usize = 64;
+const MISSION_EVIDENCE_LIMIT: usize = 64;
+const MISSION_DB_BUSY_TIMEOUT_MS: u64 = 50;
+const MISSION_EVIDENCE_START: u32 = 6;
+const MISSION_EVIDENCE_ROW_HEIGHT: u32 = 3;
+
+/// Single authoritative vertical map for the Mission Rail. Drawing,
+/// hit-testing, and scrolling all consume this so the New Mission label and
+/// the first mission row can never collide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MissionRailLayout {
+    header: u32,
+    separator: u32,
+    new_action: u32,
+    list_start: u32,
+    list_rows: usize,
+    footer: u32,
+}
+
+fn mission_rail_layout(rows: u32) -> MissionRailLayout {
+    if rows == 0 {
+        return MissionRailLayout {
+            header: 0,
+            separator: 0,
+            new_action: 0,
+            list_start: 0,
+            list_rows: 0,
+            footer: 0,
+        };
+    }
+    let footer = rows - 1;
+    let header = 1.min(footer);
+    let separator = 2.min(footer);
+    let new_action = 3.min(footer);
+    let list_start = new_action.saturating_add(1).min(footer);
+    let list_rows = footer.saturating_sub(list_start) as usize;
+    MissionRailLayout {
+        header,
+        separator,
+        new_action,
+        list_start,
+        list_rows,
+        footer,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MissionRailTarget {
+    NewMission,
+    Mission(usize),
+    None,
+}
+
+fn mission_rail_target(
+    layout: MissionRailLayout,
+    row: u32,
+    mission_count: usize,
+    scroll: usize,
+) -> MissionRailTarget {
+    if row == layout.new_action {
+        return MissionRailTarget::NewMission;
+    }
+    if row < layout.list_start || row >= layout.footer {
+        return MissionRailTarget::None;
+    }
+    let index = scroll + (row - layout.list_start) as usize;
+    if index < mission_count && ((row - layout.list_start) as usize) < layout.list_rows {
+        MissionRailTarget::Mission(index)
+    } else {
+        MissionRailTarget::None
+    }
+}
+
+fn mission_evidence_visible_rows_for(rows: u32) -> usize {
+    rows.saturating_sub(MISSION_EVIDENCE_START)
+        .saturating_sub(1) as usize
+        / MISSION_EVIDENCE_ROW_HEIGHT as usize
+}
+
+#[derive(Debug, Clone)]
+struct MissionLinkView {
+    block_id: i64,
+    session: String,
+    provenance: String,
+    available: bool,
+    command: Option<String>,
+    exit: Option<i32>,
+    duration: Option<u64>,
+}
+
+/// Single-owner mission state for the native UI. `rusqlite::Connection` is
+/// not `Sync`; the store is owned by the UI thread and never shared. All
+/// reads are bounded and all writes go through the audited P3-B1 Store API.
+#[derive(Default)]
+struct MissionState {
+    store: Option<zet_blocks::Store>,
+    missions: Vec<zet_blocks::Mission>,
+    selected_id: Option<i64>,
+    links: Vec<MissionLinkView>,
+    error: Option<String>,
+    /// Rail mode: true shows Missions instead of Sessions/commands.
+    mode: bool,
+    /// Active native title editor. `Some` while the overlay owns the keyboard.
+    input: Option<String>,
+    input_error: Option<String>,
+    status: Option<String>,
+    scroll: usize,
+    link_sel: usize,
+    link_scroll: usize,
+    saved_layout: Option<crate::window::layout::Layout>,
+    layout_touched: bool,
+}
+
+impl MissionState {
+    fn open_default() -> Self {
+        let mut state = Self::default();
+        match zet_blocks::Store::open_default_with_busy_timeout(std::time::Duration::from_millis(
+            MISSION_DB_BUSY_TIMEOUT_MS,
+        )) {
+            Ok(store) => {
+                state.store = Some(store);
+                state.reload_missions();
+            }
+            Err(e) => state.error = Some(format!("{e}")),
+        }
+        state
+    }
+
+    fn reload_missions(&mut self) {
+        let Some(store) = self.store.as_ref() else {
+            self.error = Some("mission store unavailable".to_string());
+            return;
+        };
+        match store.list_missions_bounded(MISSION_LIST_LIMIT) {
+            Ok(missions) => {
+                self.missions = missions;
+                self.error = None;
+                if let Some(id) = self.selected_id {
+                    if !self.missions.iter().any(|m| m.id == id) {
+                        self.selected_id = self.missions.first().map(|m| m.id);
+                    }
+                } else {
+                    self.selected_id = self.missions.first().map(|m| m.id);
+                }
+                self.reload_links();
+            }
+            Err(e) => {
+                self.missions.clear();
+                self.selected_id = None;
+                self.links.clear();
+                self.error = Some(format!("{e}"));
+            }
+        }
+    }
+
+    fn select(&mut self, id: i64) {
+        if self.selected_id == Some(id) {
+            return;
+        }
+        self.selected_id = Some(id);
+        self.link_sel = 0;
+        self.link_scroll = 0;
+        self.reload_links();
+    }
+
+    fn reload_links(&mut self) {
+        self.links.clear();
+        self.link_sel = 0;
+        self.link_scroll = 0;
+        let Some(id) = self.selected_id else {
+            return;
+        };
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        match store.mission_commands_bounded(id, MISSION_EVIDENCE_LIMIT) {
+            Ok(links) => {
+                self.links = links
+                    .into_iter()
+                    .map(|link| {
+                        let block = store
+                            .mission_command_block(link.block_id, &link.session)
+                            .ok()
+                            .flatten();
+                        MissionLinkView {
+                            block_id: link.block_id,
+                            session: link.session,
+                            provenance: link.provenance,
+                            available: link.available,
+                            command: block.as_ref().map(|b| b.command.clone()),
+                            exit: block.as_ref().map(|b| b.exit_code),
+                            duration: block.as_ref().map(|b| b.duration_ms),
+                        }
+                    })
+                    .collect();
+            }
+            Err(e) => self.error = Some(format!("{e}")),
+        }
+    }
+
+    fn begin_input(&mut self) {
+        self.input = Some(String::new());
+        self.input_error = None;
+        self.status = None;
+    }
+
+    fn cancel_input(&mut self) {
+        self.input = None;
+        self.input_error = None;
+    }
+
+    fn create_from_input(&mut self) -> bool {
+        let Some(raw) = self.input.clone() else {
+            return false;
+        };
+        let title = zet_blocks::Store::sanitize_mission_text(&raw);
+        if title.trim().is_empty() {
+            self.input_error = Some("TITLE MUST NOT BE EMPTY".to_string());
+            return false;
+        }
+        let Some(store) = self.store.as_ref() else {
+            self.input_error = Some("MISSION STORE UNAVAILABLE".to_string());
+            return false;
+        };
+        match store.create_mission(&title, "") {
+            Ok(id) => {
+                self.input = None;
+                self.input_error = None;
+                self.status = Some(format!("MISSION #{id} CREATED"));
+                self.selected_id = Some(id);
+                self.mode = true;
+                self.reload_missions();
+                true
+            }
+            Err(e) => {
+                self.input_error = Some(format!("CREATE FAILED: {e}"));
+                false
+            }
+        }
+    }
+
+    fn selected(&self) -> Option<&zet_blocks::Mission> {
+        let id = self.selected_id?;
+        self.missions.iter().find(|m| m.id == id)
+    }
+}
+
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
@@ -287,6 +534,8 @@ struct App {
     /// Decorative signature identity, planned from genuinely free terminal
     /// rows and retired on interaction or conflicting output.
     welcome: welcome::WelcomeIdentity,
+    /// Native mission rail / creation / evidence state (single-owner store).
+    mission: MissionState,
 }
 
 /// One approved agent step, serviced by the main loop: typed visibly into
@@ -1869,6 +2118,9 @@ impl App {
     }
 
     fn toggle_rail(&mut self) {
+        if self.mission.mode {
+            self.mission.layout_touched = true;
+        }
         self.layout.rail = !self.layout.rail;
         self.focus = Focus::Terminal;
         self.chrome.mark_dirty();
@@ -1878,8 +2130,13 @@ impl App {
     }
 
     fn toggle_inspector(&mut self) {
+        if self.mission.mode {
+            self.mission.layout_touched = true;
+        }
         self.layout.inspector = !self.layout.inspector;
-        if !self.layout.inspector {
+        if self.layout.inspector {
+            self.focus = Focus::Inspector;
+        } else {
             self.focus = Focus::Terminal;
             self.inspector_view = panels::InspectorView::Session;
             self.inspector_sel = None;
@@ -1894,7 +2151,154 @@ impl App {
         self.needs_draw = true;
     }
 
+    fn toggle_mission_mode(&mut self) {
+        self.mission.mode = !self.mission.mode;
+        if self.mission.mode {
+            if self.mission.saved_layout.is_none() {
+                self.mission.saved_layout = Some(self.layout);
+                self.mission.layout_touched = false;
+            }
+            if !self.layout.rail || !self.layout.inspector {
+                self.layout.rail = true;
+                self.layout.inspector = true;
+                self.chrome.mark_dirty();
+                self.inspector_cache.mark_dirty();
+                self.fit_all();
+            }
+            self.mission.reload_missions();
+            self.focus = Focus::Rail;
+        } else {
+            if !self.mission.layout_touched {
+                if let Some(saved) = self.mission.saved_layout.take() {
+                    self.layout = saved;
+                    self.chrome.mark_dirty();
+                    self.inspector_cache.mark_dirty();
+                    self.fit_all();
+                }
+            } else {
+                self.mission.saved_layout = None;
+            }
+            self.focus = Focus::Terminal;
+        }
+        self.needs_draw = true;
+    }
+
+    fn mission_visible_rows(&self) -> usize {
+        let rail_rows = self.rows.saturating_sub(self.bar_rows()) as u32;
+        mission_rail_layout(rail_rows).list_rows
+    }
+
+    fn move_mission_selection(&mut self, delta: isize) {
+        if self.mission.missions.is_empty() {
+            return;
+        }
+        let current = self
+            .mission
+            .selected_id
+            .and_then(|id| self.mission.missions.iter().position(|m| m.id == id))
+            .unwrap_or(0);
+        let next =
+            (current as isize + delta).clamp(0, self.mission.missions.len() as isize - 1) as usize;
+        let id = self.mission.missions[next].id;
+        self.mission.select(id);
+        let visible = self.mission_visible_rows().max(1);
+        if next < self.mission.scroll {
+            self.mission.scroll = next;
+        } else if next >= self.mission.scroll.saturating_add(visible) {
+            self.mission.scroll = next.saturating_add(1).saturating_sub(visible);
+        }
+        self.needs_draw = true;
+    }
+
+    fn mission_evidence_visible_rows(&self) -> usize {
+        let rows = self.frame_layout().inspector.map(|vp| vp.rows).unwrap_or(0);
+        mission_evidence_visible_rows_for(rows)
+    }
+
+    fn selected_recorded_command(&self) -> Option<(i64, String)> {
+        let id = self.inspector_sel_id?;
+        let snapshot = self.inspector_cache.snapshot()?;
+        let list = if self.inspector_view == panels::InspectorView::Timeline {
+            &snapshot.timeline
+        } else {
+            &snapshot.commands
+        };
+        list.iter()
+            .find(|command| command.id == id)
+            .map(|command| (command.id, command.session.clone()))
+    }
+
+    fn link_selected_command(&mut self) {
+        let Some(mission_id) = self.mission.selected_id else {
+            self.mission.status = Some("SELECT A MISSION FIRST".to_string());
+            self.needs_draw = true;
+            return;
+        };
+        let Some((block_id, session)) = self.selected_recorded_command() else {
+            self.mission.status = Some("SELECT A RECORDED COMMAND FIRST".to_string());
+            self.needs_draw = true;
+            return;
+        };
+        let Some(store) = self.mission.store.as_ref() else {
+            self.mission.status = Some("MISSION STORE UNAVAILABLE".to_string());
+            self.needs_draw = true;
+            return;
+        };
+        match store.link_command(mission_id, block_id, &session, "user") {
+            Ok(true) => {
+                self.mission.status =
+                    Some(format!("LINKED BLOCK #{block_id} TO MISSION #{mission_id}"));
+                self.mission.reload_links();
+            }
+            Ok(false) => {
+                self.mission.status = Some("ALREADY LINKED".to_string());
+            }
+            Err(e) => {
+                self.mission.status = Some(format!("LINK FAILED: {e}"));
+            }
+        }
+        self.needs_draw = true;
+    }
+
+    fn unlink_selected_link(&mut self) {
+        let Some(mission_id) = self.mission.selected_id else {
+            return;
+        };
+        let Some(link) = self.mission.links.get(self.mission.link_sel).cloned() else {
+            self.mission.status = Some("NO LINK SELECTED".to_string());
+            self.needs_draw = true;
+            return;
+        };
+        let Some(store) = self.mission.store.as_ref() else {
+            self.mission.status = Some("MISSION STORE UNAVAILABLE".to_string());
+            self.needs_draw = true;
+            return;
+        };
+        match store.unlink_command(mission_id, link.block_id, &link.session) {
+            Ok(true) => {
+                self.mission.status = Some(format!("UNLINKED BLOCK #{}", link.block_id));
+                self.mission.reload_links();
+            }
+            Ok(false) => {
+                self.mission.status = Some("LINK NOT FOUND".to_string());
+            }
+            Err(e) => {
+                self.mission.status = Some(format!("UNLINK FAILED: {e}"));
+            }
+        }
+        self.needs_draw = true;
+    }
+
+    fn mission_overlay_owns_pointer(&self) -> bool {
+        self.mission.input.is_some()
+    }
+
     fn handle_mouse_click(&mut self, x: f64, y: f64, cw: u32, ch: u32) {
+        // Modal New Mission editor: background clicks must not change
+        // missions, selection, tabs, or panel state while it is open.
+        if self.mission.input.is_some() {
+            return;
+        }
         self.needs_draw = true;
         // The bottom row of Aperture's compact header owns tab switching;
         // identity/header pixels above it are not ghost controls.
@@ -1937,6 +2341,27 @@ impl App {
             let bottom = (vp.y as f64 + vp.rows as f64) * ch as f64;
             if x >= 0.0 && x < rail_px && y >= top && y < bottom {
                 let row = ((y - top) / ch as f64).floor() as usize as u32;
+                if self.mission.mode {
+                    let layout = mission_rail_layout(vp.rows);
+                    match mission_rail_target(
+                        layout,
+                        row,
+                        self.mission.missions.len(),
+                        self.mission.scroll,
+                    ) {
+                        MissionRailTarget::NewMission => self.mission.begin_input(),
+                        MissionRailTarget::Mission(index) => {
+                            if let Some(mission) = self.mission.missions.get(index) {
+                                let id = mission.id;
+                                self.mission.select(id);
+                            }
+                        }
+                        MissionRailTarget::None => {}
+                    }
+                    self.focus = Focus::Rail;
+                    self.needs_draw = true;
+                    return;
+                }
                 if let Some(session) = panels::rail_row_target(row, self.tabs.len(), vp.rows) {
                     self.rail_sel = session;
                 } else if let Some(command_index) = self.chrome.snapshot().and_then(|snapshot| {
@@ -1975,6 +2400,18 @@ impl App {
                 self.focus = Focus::Inspector;
                 let row = ((y - top) / ch as f64).floor() as usize;
                 let col = ((x - left) / cw as f64).floor() as usize;
+                if self.mission.mode {
+                    if row >= MISSION_EVIDENCE_START as usize {
+                        let index = self.mission.link_scroll
+                            + (row - MISSION_EVIDENCE_START as usize)
+                                / MISSION_EVIDENCE_ROW_HEIGHT as usize;
+                        if index < self.mission.links.len() {
+                            self.mission.link_sel = index;
+                        }
+                    }
+                    self.needs_draw = true;
+                    return;
+                }
                 // Clickable Inspector view switch.
                 if row == 2 {
                     if (8..16).contains(&col) {
@@ -2200,6 +2637,376 @@ impl App {
         if status_col > text_col {
             Self::draw_ui_row(r, vp, row, status_col, &status, UI_META, status_ink);
         }
+    }
+
+    fn mission_safe_text(text: &str) -> String {
+        text.chars().filter(|c| !c.is_control()).collect()
+    }
+
+    fn draw_mission_rail(
+        r: &mut Renderer,
+        vp: zet_gpu::renderer::Viewport,
+        mission: &MissionState,
+        focused: bool,
+    ) {
+        use zet_gpu::renderer::{
+            PANEL_CYAN, PANEL_DANGER, PANEL_MUTED, PANEL_SECONDARY, RAIL_ACCENT, RAIL_BG,
+            RAIL_BORDER, RAIL_FOOTER_INK, RAIL_HEADER_INK, RAIL_SELECTED_BG, RAIL_TEXT_INK,
+        };
+        let (cw, ch) = r.cell_px();
+        let x = vp.x.saturating_mul(cw);
+        let y = vp.y.saturating_mul(ch);
+        let w = vp.cols.saturating_mul(cw);
+        let h = vp.rows.saturating_mul(ch);
+        r.draw_rect_px(x, y, w, h, RAIL_BG);
+        r.draw_rect_px(x, y, 1, h, if focused { PANEL_CYAN } else { RAIL_BORDER });
+        r.draw_rect_px(x, y, w, 1, RAIL_BORDER);
+        r.draw_rect_px(x, y.saturating_add(h.saturating_sub(1)), w, 1, RAIL_BORDER);
+
+        let width = vp.cols.saturating_sub(4).max(1) as usize;
+        let row = |r: &mut Renderer, row: u32, text: &str, ink| {
+            let text = panels::truncate_to_cells(&Self::mission_safe_text(text), width);
+            r.draw_text_row(vp, row, 2, &text, ink);
+        };
+        let separator = |r: &mut Renderer, row: u32| {
+            let line_y =
+                vp.y.saturating_add(row)
+                    .saturating_mul(ch)
+                    .saturating_add(ch.saturating_sub(2));
+            r.draw_rect_px(
+                x.saturating_add(8),
+                line_y,
+                w.saturating_sub(16),
+                1,
+                RAIL_BORDER,
+            );
+        };
+
+        let layout = mission_rail_layout(vp.rows);
+        row(r, layout.header, "MISSIONS", RAIL_HEADER_INK);
+        separator(r, layout.separator);
+        if layout.new_action < layout.footer {
+            row(r, layout.new_action, "+ NEW MISSION   n", RAIL_ACCENT);
+        }
+
+        if let Some(error) = &mission.error {
+            row(r, layout.list_start, "MISSIONS UNAVAILABLE", PANEL_DANGER);
+            if layout.list_start + 1 < layout.footer {
+                row(
+                    r,
+                    layout.list_start + 1,
+                    "STORE ERROR — RETRY WITH N",
+                    PANEL_SECONDARY,
+                );
+            }
+            if layout.list_start + 2 < layout.footer {
+                row(r, layout.list_start + 2, error, PANEL_MUTED);
+            }
+        } else if mission.missions.is_empty() {
+            row(r, layout.list_start, "NO MISSIONS", PANEL_MUTED);
+            if layout.list_start + 1 < layout.footer {
+                row(
+                    r,
+                    layout.list_start + 1,
+                    "PRESS N TO CREATE ONE",
+                    PANEL_SECONDARY,
+                );
+            }
+        } else {
+            for index in 0..layout.list_rows {
+                let position = mission.scroll + index;
+                let Some(entry) = mission.missions.get(position) else {
+                    break;
+                };
+                let selected = mission.selected_id == Some(entry.id);
+                let row_number = layout.list_start + index as u32;
+                let row_y = vp.y.saturating_add(row_number).saturating_mul(ch);
+                if selected {
+                    let fill = zet_gpu::renderer::Viewport {
+                        x: vp.x,
+                        y: vp.y.saturating_add(row_number),
+                        cols: vp.cols,
+                        rows: 1,
+                    };
+                    r.draw_fill(fill, RAIL_SELECTED_BG);
+                    r.draw_rect_px(
+                        x.saturating_add(4),
+                        row_y.saturating_add(3),
+                        2,
+                        ch.saturating_sub(6),
+                        RAIL_ACCENT,
+                    );
+                }
+                let label = format!(
+                    "{:02}  #{}  {}",
+                    position.saturating_add(1),
+                    entry.id,
+                    entry.title
+                );
+                row(
+                    r,
+                    row_number,
+                    &label,
+                    if selected {
+                        RAIL_TEXT_INK
+                    } else {
+                        PANEL_SECONDARY
+                    },
+                );
+            }
+        }
+        if layout.footer > 0 {
+            separator(r, layout.footer.saturating_sub(1));
+        }
+        let footer = mission
+            .status
+            .as_deref()
+            .unwrap_or("CTRL+SHIFT+N   SESSIONS");
+        row(
+            r,
+            layout.footer,
+            footer,
+            if mission.status.is_some() {
+                RAIL_ACCENT
+            } else {
+                RAIL_FOOTER_INK
+            },
+        );
+    }
+
+    fn draw_mission_inspector(
+        r: &mut Renderer,
+        vp: zet_gpu::renderer::Viewport,
+        mission: &MissionState,
+        focused: bool,
+    ) {
+        use zet_gpu::renderer::{
+            PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_DANGER, PANEL_INSET, PANEL_MUTED,
+            PANEL_SECONDARY, PANEL_TEXT, RAIL_ACCENT, RAIL_TEXT_INK,
+        };
+        let (cw, ch) = r.cell_px();
+        let x = vp.x.saturating_mul(cw);
+        let y = vp.y.saturating_mul(ch);
+        let w = vp.cols.saturating_mul(cw);
+        let h = vp.rows.saturating_mul(ch);
+        r.draw_rect_px(x, y, w, h, PANEL_INSET);
+        r.draw_rect_px(
+            x,
+            y,
+            1,
+            h,
+            if focused {
+                PANEL_CYAN
+            } else {
+                PANEL_BORDER_STRONG
+            },
+        );
+        let width = vp.cols.saturating_sub(4).max(1) as usize;
+        let row = |r: &mut Renderer, row: u32, text: &str, ink| {
+            let text = panels::truncate_to_cells(&Self::mission_safe_text(text), width);
+            r.draw_text_row(vp, row, 2, &text, ink);
+        };
+        let separator = |r: &mut Renderer, row: u32| {
+            let line_y =
+                vp.y.saturating_add(row)
+                    .saturating_mul(ch)
+                    .saturating_add(ch.saturating_sub(2));
+            r.draw_rect_px(
+                x.saturating_add(8),
+                line_y,
+                w.saturating_sub(16),
+                1,
+                PANEL_BORDER_STRONG,
+            );
+        };
+
+        row(r, 1, "MISSION EVIDENCE", RAIL_ACCENT);
+        let title = mission
+            .selected()
+            .map(|m| format!("#{}  {}", m.id, m.title))
+            .unwrap_or_else(|| "NO MISSION SELECTED".to_string());
+        row(r, 2, &title, RAIL_TEXT_INK);
+        separator(r, 3);
+        row(r, 4, "USER-LINKED COMMANDS", PANEL_MUTED);
+
+        if mission.links.is_empty() {
+            row(r, MISSION_EVIDENCE_START, "NO LINKED COMMANDS", PANEL_MUTED);
+            row(
+                r,
+                MISSION_EVIDENCE_START + 1,
+                "TO LINK A COMMAND:",
+                PANEL_SECONDARY,
+            );
+            row(
+                r,
+                MISSION_EVIDENCE_START + 2,
+                "1  CTRL+SHIFT+N  COMMANDS",
+                PANEL_SECONDARY,
+            );
+            row(
+                r,
+                MISSION_EVIDENCE_START + 3,
+                "2  CTRL+SHIFT+I  INSPECTOR",
+                PANEL_SECONDARY,
+            );
+            row(
+                r,
+                MISSION_EVIDENCE_START + 4,
+                "3  SELECT RECORDED COMMAND",
+                PANEL_SECONDARY,
+            );
+            row(
+                r,
+                MISSION_EVIDENCE_START + 5,
+                "4  PRESS M TO LINK",
+                RAIL_ACCENT,
+            );
+            row(
+                r,
+                MISSION_EVIDENCE_START + 6,
+                "5  CTRL+SHIFT+N  EVIDENCE",
+                PANEL_SECONDARY,
+            );
+        } else {
+            let visible = mission_evidence_visible_rows_for(vp.rows);
+            let end = (mission.link_scroll + visible).min(mission.links.len());
+            for (index, link) in mission
+                .links
+                .iter()
+                .enumerate()
+                .take(end)
+                .skip(mission.link_scroll)
+            {
+                let row_number = MISSION_EVIDENCE_START
+                    + (index - mission.link_scroll) as u32 * MISSION_EVIDENCE_ROW_HEIGHT;
+                if row_number + 2 >= vp.rows.saturating_sub(1) {
+                    break;
+                }
+                let row_y = vp.y.saturating_add(row_number).saturating_mul(ch);
+                if index == mission.link_sel {
+                    let fill = zet_gpu::renderer::Viewport {
+                        x: vp.x,
+                        y: vp.y.saturating_add(row_number),
+                        cols: vp.cols,
+                        rows: 3.min(vp.rows.saturating_sub(row_number)),
+                    };
+                    r.draw_fill(fill, zet_gpu::renderer::RAIL_SELECTED_BG);
+                    r.draw_rect_px(
+                        x.saturating_add(4),
+                        row_y.saturating_add(3),
+                        2,
+                        ch.saturating_sub(6),
+                        RAIL_ACCENT,
+                    );
+                }
+                let command = link
+                    .command
+                    .as_deref()
+                    .map(Self::mission_safe_text)
+                    .unwrap_or_else(|| "(command unavailable)".to_string());
+                row(
+                    r,
+                    row_number,
+                    &format!("#{}  {}", link.block_id, command),
+                    if index == mission.link_sel {
+                        RAIL_TEXT_INK
+                    } else {
+                        PANEL_TEXT
+                    },
+                );
+                row(
+                    r,
+                    row_number + 1,
+                    &format!(
+                        "{}   exit {}   {}",
+                        link.session,
+                        link.exit
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "—".to_string()),
+                        link.duration
+                            .map(|v| format!("{v}ms"))
+                            .unwrap_or_else(|| "—".to_string())
+                    ),
+                    PANEL_SECONDARY,
+                );
+                row(
+                    r,
+                    row_number + 2,
+                    &format!(
+                        "{}   {}",
+                        link.provenance,
+                        if link.available {
+                            "evidence available"
+                        } else {
+                            "UNAVAILABLE"
+                        }
+                    ),
+                    if link.available {
+                        PANEL_MUTED
+                    } else {
+                        PANEL_DANGER
+                    },
+                );
+            }
+        }
+        row(
+            r,
+            vp.rows.saturating_sub(1),
+            "ARROWS SELECT   D UNLINK   ESC TERMINAL",
+            PANEL_MUTED,
+        );
+    }
+
+    fn draw_mission_overlay(
+        r: &mut Renderer,
+        vp: zet_gpu::renderer::Viewport,
+        input: &str,
+        error: Option<&str>,
+    ) {
+        use zet_gpu::renderer::{
+            PANEL_BORDER_STRONG, PANEL_CYAN, PANEL_DANGER, PANEL_INSET, PANEL_MUTED,
+            PANEL_SECONDARY, RAIL_TEXT_INK,
+        };
+        let (cw, ch) = r.cell_px();
+        // Clamp to the terminal viewport so a narrow window never paints a
+        // modal wider or taller than the space it owns.
+        let box_cols = vp.cols.saturating_sub(8).clamp(12, 64).min(vp.cols.max(1));
+        let box_rows = 8.min(vp.rows.saturating_sub(2)).max(3).min(vp.rows.max(1));
+        let box_x = vp.x + (vp.cols.saturating_sub(box_cols)) / 2;
+        let box_y = vp.y + (vp.rows.saturating_sub(box_rows)) / 2;
+        let px = box_x.saturating_mul(cw);
+        let py = box_y.saturating_mul(ch);
+        let pw = box_cols.saturating_mul(cw);
+        let ph = box_rows.saturating_mul(ch);
+        r.draw_rect_px(px, py, pw, ph, PANEL_INSET);
+        r.draw_rect_px(px, py, pw, 1, PANEL_BORDER_STRONG);
+        r.draw_rect_px(
+            px,
+            py.saturating_add(ph.saturating_sub(1)),
+            pw,
+            1,
+            PANEL_BORDER_STRONG,
+        );
+        let box_vp = zet_gpu::renderer::Viewport {
+            x: box_x,
+            y: box_y,
+            cols: box_cols,
+            rows: box_rows,
+        };
+        let width = box_cols.saturating_sub(2).max(1) as usize;
+        let row = |r: &mut Renderer, row: u32, text: &str, ink| {
+            let text = panels::truncate_to_cells(&Self::mission_safe_text(text), width);
+            r.draw_text_row(box_vp, row, 1, &text, ink);
+        };
+        row(r, 1, "NEW MISSION", PANEL_CYAN);
+        row(r, 2, "TITLE", PANEL_MUTED);
+        row(r, 3, &format!("{input}_"), RAIL_TEXT_INK);
+        if let Some(error) = error {
+            row(r, 4, error, PANEL_DANGER);
+        } else {
+            row(r, 4, "ENTER CREATE   ESC CANCEL", PANEL_SECONDARY);
+        }
+        row(r, 6, "TEXT IS ISOLATED FROM THE SHELL", PANEL_MUTED);
     }
 
     fn draw_rail(
@@ -4963,6 +5770,45 @@ impl App {
     ) {
         // Any key gets a prompt frame; the heartbeat covers the rest.
         self.needs_draw = true;
+        // The native New Mission editor owns the keyboard completely:
+        // nothing typed here can reach the PTY.
+        if self.mission.input.is_some() {
+            if !pressed {
+                return;
+            }
+            let ctrl_c = mods.contains(ModifiersState::CONTROL)
+                && matches!(&logical, Key::Character(s) if s.eq_ignore_ascii_case("c"));
+            if ctrl_c || matches!(&logical, Key::Named(NamedKey::Escape)) {
+                self.mission.cancel_input();
+                return;
+            }
+            match &logical {
+                Key::Named(NamedKey::Enter) => {
+                    self.mission.create_from_input();
+                }
+                Key::Named(NamedKey::Backspace) => {
+                    if let Some(buf) = self.mission.input.as_mut() {
+                        buf.pop();
+                    }
+                }
+                Key::Character(ch)
+                    if !mods.contains(ModifiersState::CONTROL)
+                        && !mods.contains(ModifiersState::ALT)
+                        && !mods.contains(ModifiersState::SUPER) =>
+                {
+                    if let Some(buf) = self.mission.input.as_mut() {
+                        buf.push_str(ch);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        // Rail mode switch: Ctrl+Shift+N. Kept out of the PTY path.
+        if is_mission_mode(&logical, pressed, &mods) {
+            self.toggle_mission_mode();
+            return;
+        }
         // Typing into the terminal retires the decorative identity before
         // the key is forwarded, so it can never overlap shell input.
         if pressed && self.focus == Focus::Terminal {
@@ -4988,6 +5834,78 @@ impl App {
             }
             if is_inspector_toggle(&logical, pressed, &mods) {
                 self.toggle_inspector();
+                return;
+            }
+            if matches!(&logical, Key::Named(NamedKey::Tab)) {
+                self.focus = match self.focus {
+                    Focus::Rail if self.layout.inspector => Focus::Inspector,
+                    Focus::Inspector => Focus::Terminal,
+                    _ => Focus::Terminal,
+                };
+                self.needs_draw = true;
+                return;
+            }
+            if self.mission.mode {
+                match &logical {
+                    Key::Named(NamedKey::ArrowUp) if self.focus == Focus::Rail => {
+                        self.move_mission_selection(-1);
+                        return;
+                    }
+                    Key::Named(NamedKey::ArrowDown) if self.focus == Focus::Rail => {
+                        self.move_mission_selection(1);
+                        return;
+                    }
+                    Key::Named(NamedKey::Enter) if self.focus == Focus::Rail => {
+                        self.mission.reload_links();
+                        self.focus = Focus::Inspector;
+                        self.needs_draw = true;
+                        return;
+                    }
+                    Key::Character(ch) if self.focus == Focus::Rail && (ch == "n" || ch == "N") => {
+                        self.mission.begin_input();
+                        self.needs_draw = true;
+                        return;
+                    }
+                    Key::Named(NamedKey::ArrowUp) if self.focus == Focus::Inspector => {
+                        self.mission.link_sel = self.mission.link_sel.saturating_sub(1);
+                        if self.mission.link_sel < self.mission.link_scroll {
+                            self.mission.link_scroll = self.mission.link_sel;
+                        }
+                        self.needs_draw = true;
+                        return;
+                    }
+                    Key::Named(NamedKey::ArrowDown) if self.focus == Focus::Inspector => {
+                        if !self.mission.links.is_empty() {
+                            self.mission.link_sel =
+                                (self.mission.link_sel + 1).min(self.mission.links.len() - 1);
+                            let visible = self.mission_evidence_visible_rows().max(1);
+                            if self.mission.link_sel
+                                >= self.mission.link_scroll.saturating_add(visible)
+                            {
+                                self.mission.link_scroll = self
+                                    .mission
+                                    .link_sel
+                                    .saturating_add(1)
+                                    .saturating_sub(visible);
+                            }
+                        }
+                        self.needs_draw = true;
+                        return;
+                    }
+                    Key::Character(ch)
+                        if self.focus == Focus::Inspector && (ch == "d" || ch == "D") =>
+                    {
+                        self.unlink_selected_link();
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            if !self.mission.mode
+                && matches!(self.focus, Focus::Inspector | Focus::Rail)
+                && matches!(&logical, Key::Character(ch) if ch == "m" || ch == "M")
+            {
+                self.link_selected_command();
                 return;
             }
             match &logical {
@@ -5612,14 +6530,21 @@ impl ApplicationHandler for App {
                         welcome::draw(r, gpu_vp, presentation);
                     }
                     if rail_cols > 0 {
-                        if let Some(snapshot) = rail_snapshot.as_ref() {
-                            let rail_vp = zet_gpu::renderer::Viewport {
-                                x: 0,
-                                y: bar as u32,
-                                cols: rail_cols as u32,
-                                rows: (self.rows.saturating_sub(bar)) as u32,
-                            };
-                            r.draw_fill(rail_vp, zet_gpu::renderer::RAIL_BG);
+                        let rail_vp = zet_gpu::renderer::Viewport {
+                            x: 0,
+                            y: bar as u32,
+                            cols: rail_cols as u32,
+                            rows: (self.rows.saturating_sub(bar)) as u32,
+                        };
+                        r.draw_fill(rail_vp, zet_gpu::renderer::RAIL_BG);
+                        if self.mission.mode {
+                            Self::draw_mission_rail(
+                                r,
+                                rail_vp,
+                                &self.mission,
+                                self.focus == Focus::Rail,
+                            );
+                        } else if let Some(snapshot) = rail_snapshot.as_ref() {
                             Self::draw_rail(
                                 r,
                                 rail_vp,
@@ -5671,29 +6596,38 @@ impl ApplicationHandler for App {
                                 } else {
                                     None
                                 };
-                            Self::draw_inspector(
-                                r,
-                                insp_vp,
-                                inspector_snapshot,
-                                agent_snapshot,
-                                self.agent_list_offset,
-                                if self.inspector_view == panels::InspectorView::Agents {
-                                    self.agent_inspector_sel_id.map(|x| x as i64)
-                                } else {
-                                    self.inspector_sel_id
-                                },
-                                inspector_output,
-                                self.inspector_output_truncated,
-                                inspector_hover_row,
-                                self.focus == Focus::Inspector,
-                                self.inspector_view,
-                                inspector_expanded,
-                                self.agent_detail_expanded,
-                                self.agent_detail_offset,
-                                self.agent_evidence_open,
-                                self.agent_evidence.as_ref(),
-                                self.agent_evidence_offset,
-                            );
+                            if self.mission.mode {
+                                Self::draw_mission_inspector(
+                                    r,
+                                    insp_vp,
+                                    &self.mission,
+                                    self.focus == Focus::Inspector,
+                                );
+                            } else {
+                                Self::draw_inspector(
+                                    r,
+                                    insp_vp,
+                                    inspector_snapshot,
+                                    agent_snapshot,
+                                    self.agent_list_offset,
+                                    if self.inspector_view == panels::InspectorView::Agents {
+                                        self.agent_inspector_sel_id.map(|x| x as i64)
+                                    } else {
+                                        self.inspector_sel_id
+                                    },
+                                    inspector_output,
+                                    self.inspector_output_truncated,
+                                    inspector_hover_row,
+                                    self.focus == Focus::Inspector,
+                                    self.inspector_view,
+                                    inspector_expanded,
+                                    self.agent_detail_expanded,
+                                    self.agent_detail_offset,
+                                    self.agent_evidence_open,
+                                    self.agent_evidence.as_ref(),
+                                    self.agent_evidence_offset,
+                                );
+                            }
                             if self.focus == Focus::Inspector {
                                 let (cw, ch) = r.cell_px();
                                 let fx = insp_vp.x.saturating_mul(cw).saturating_add(3);
@@ -5718,6 +6652,14 @@ impl ApplicationHandler for App {
                                 );
                             }
                         }
+                    }
+                    if let Some(input) = &self.mission.input {
+                        Self::draw_mission_overlay(
+                            r,
+                            gpu_vp,
+                            input,
+                            self.mission.input_error.as_deref(),
+                        );
                     }
                     if bar > 0 {
                         let chrome_mode = if inspector_cols > 0 {
@@ -5751,6 +6693,9 @@ impl ApplicationHandler for App {
                 // No re-arm here: about_to_wait drives the heartbeat.
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                if self.mission_overlay_owns_pointer() {
+                    return;
+                }
                 self.needs_draw = true;
                 // Clicking inside the live terminal is interaction: retire
                 // the identity before selection or PTY routing runs.
@@ -5790,6 +6735,9 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if self.mission_overlay_owns_pointer() {
+                    return;
+                }
                 self.needs_draw = true;
                 // Wheel interaction over the terminal retires the identity
                 // before scrollback or mouse protocol handling changes the
@@ -5842,6 +6790,9 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                if self.mission_overlay_owns_pointer() {
+                    return;
+                }
                 let previous = self.mouse_px;
                 self.mouse_px = Some((position.x, position.y));
                 if previous != self.mouse_px {
@@ -5948,6 +6899,7 @@ pub fn run(goal: Option<String>) -> std::io::Result<()> {
         perf_blocks: 0,
         pending_goal: goal,
         welcome: welcome::WelcomeIdentity::new(welcome::WelcomeIdentity::disabled_from_env()),
+        mission: MissionState::open_default(),
     };
     event_loop.run_app(&mut app).map_err(io_error)
 }
@@ -6158,6 +7110,7 @@ mod layout_fit_tests {
             perf_blocks: 0,
             pending_goal: None,
             welcome: super::welcome::WelcomeIdentity::new(false),
+            mission: super::MissionState::default(),
         }
     }
 
@@ -6234,6 +7187,169 @@ mod layout_fit_tests {
         );
         app.finalize_tab_for_closure(0);
         assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
+    fn mission_mode_forces_rail_and_inspector() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::TerminalFocus.layout(),
+        );
+        app.toggle_mission_mode();
+        assert!(app.mission.mode);
+        assert!(app.layout.rail);
+        assert!(app.layout.inspector);
+        assert_eq!(app.focus, super::Focus::Rail);
+    }
+
+    #[test]
+    fn mission_selection_uses_stable_ids() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::TerminalFocus.layout(),
+        );
+        app.mission.missions = vec![
+            zet_blocks::Mission {
+                id: 10,
+                title: "A".to_string(),
+                description: String::new(),
+                created_at: 0,
+                updated_at: 0,
+            },
+            zet_blocks::Mission {
+                id: 20,
+                title: "B".to_string(),
+                description: String::new(),
+                created_at: 0,
+                updated_at: 0,
+            },
+        ];
+        app.mission.selected_id = Some(10);
+        app.move_mission_selection(1);
+        assert_eq!(app.mission.selected_id, Some(20));
+        app.move_mission_selection(-1);
+        assert_eq!(app.mission.selected_id, Some(10));
+    }
+
+    #[test]
+    fn mission_overlay_blocks_background_mouse() {
+        let mut app = make_test_app(
+            160,
+            50,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        app.mission.missions = vec![zet_blocks::Mission {
+            id: 10,
+            title: "A".to_string(),
+            description: String::new(),
+            created_at: 0,
+            updated_at: 0,
+        }];
+        app.mission.selected_id = Some(10);
+        app.mission.input = Some("Draft".to_string());
+        let before = (
+            app.mission.selected_id,
+            app.active,
+            app.focus,
+            app.layout,
+            app.mission.input.clone(),
+        );
+        app.handle_mouse_click(5.0, 5.0, 8, 16);
+        assert_eq!(
+            (
+                app.mission.selected_id,
+                app.active,
+                app.focus,
+                app.layout,
+                app.mission.input.clone()
+            ),
+            before
+        );
+    }
+
+    #[test]
+    fn mission_mode_restores_previous_layout() {
+        let mut app = make_test_app(
+            160,
+            50,
+            crate::window::layout::LayoutMode::Workspace.layout(),
+        );
+        assert!(app.layout.rail);
+        assert!(!app.layout.inspector);
+        app.toggle_mission_mode();
+        assert!(app.layout.inspector);
+        app.toggle_mission_mode();
+        assert!(app.layout.rail);
+        assert!(!app.layout.inspector);
+    }
+
+    #[test]
+    fn mission_evidence_rows_are_bounded_to_the_viewport() {
+        assert_eq!(super::mission_evidence_visible_rows_for(6), 0);
+        assert_eq!(super::mission_evidence_visible_rows_for(10), 1);
+        assert_eq!(super::mission_evidence_visible_rows_for(20), 4);
+    }
+
+    #[test]
+    fn mission_rail_painted_rows_and_hit_targets_agree() {
+        let layout = super::mission_rail_layout(20);
+        assert_eq!(layout.new_action, 3);
+        assert_eq!(layout.list_start, 4);
+        assert_eq!(
+            super::mission_rail_target(layout, 3, 2, 0),
+            super::MissionRailTarget::NewMission
+        );
+        assert_eq!(
+            super::mission_rail_target(layout, 4, 2, 0),
+            super::MissionRailTarget::Mission(0)
+        );
+        assert_eq!(
+            super::mission_rail_target(layout, 5, 2, 0),
+            super::MissionRailTarget::Mission(1)
+        );
+        assert_eq!(
+            super::mission_rail_target(layout, 4, 0, 0),
+            super::MissionRailTarget::None
+        );
+        assert_eq!(
+            super::mission_rail_target(layout, 4, 3, 1),
+            super::MissionRailTarget::Mission(1)
+        );
+        assert_eq!(
+            super::mission_rail_target(layout, 2, 2, 0),
+            super::MissionRailTarget::None
+        );
+        assert_eq!(
+            super::mission_rail_target(layout, layout.footer, 2, 0),
+            super::MissionRailTarget::None
+        );
+
+        let narrow = super::mission_rail_layout(5);
+        assert_eq!(narrow.new_action, 3);
+        assert_eq!(narrow.list_start, 4);
+        assert_eq!(narrow.list_rows, 0);
+        assert_eq!(
+            super::mission_rail_target(narrow, 4, 2, 0),
+            super::MissionRailTarget::None
+        );
+        assert_eq!(
+            super::mission_rail_target(narrow, 3, 0, 0),
+            super::MissionRailTarget::NewMission
+        );
+    }
+
+    #[test]
+    fn mission_overlay_owns_all_pointer_paths() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        assert!(!app.mission_overlay_owns_pointer());
+        app.mission.input = Some("Draft".to_string());
+        assert!(app.mission_overlay_owns_pointer());
     }
 
     #[test]
@@ -8498,6 +9614,7 @@ mod p2b_signature_tests {
             perf_blocks: 0,
             pending_goal: None,
             welcome: super::welcome::WelcomeIdentity::new(false),
+            mission: super::MissionState::default(),
         }
     }
 
@@ -8569,7 +9686,7 @@ mod p2b_signature_tests {
 #[cfg(test)]
 mod p4a3_r3_acceptance {
     use super::panels::InspectorView;
-    use super::{panels, App, Focus, Tab};
+    use super::{panels, App, Focus, MissionState, Tab};
     use winit::keyboard::{Key, NamedKey};
     use zet_blocks::{Block, Recorder, Store};
 
@@ -8667,6 +9784,7 @@ mod p4a3_r3_acceptance {
             perf_blocks: 0,
             pending_goal: None,
             welcome: super::welcome::WelcomeIdentity::new(false),
+            mission: super::MissionState::default(),
         }
     }
 
@@ -9692,5 +10810,114 @@ mod p4a3_r3_acceptance {
                 <= layout.title_left_px as i32,
             "mark and title must stay separated"
         );
+    }
+    #[test]
+    fn mission_state_create_and_cancel() {
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let mut state = MissionState {
+            store: Some(store),
+            ..MissionState::default()
+        };
+        state.begin_input();
+        state.input = Some("Test Mission".to_string());
+        assert!(state.create_from_input());
+        assert_eq!(state.missions.len(), 1);
+        assert_eq!(state.missions[0].title, "Test Mission");
+        assert!(state.input.is_none());
+        assert!(!state.create_from_input());
+        state.begin_input();
+        state.input = Some("Cancelled".to_string());
+        state.cancel_input();
+        assert_eq!(state.missions.len(), 1);
+    }
+
+    #[test]
+    fn mission_state_rejects_blank_title() {
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let mut state = MissionState {
+            store: Some(store),
+            ..MissionState::default()
+        };
+        state.begin_input();
+        state.input = Some("   \u{001b}  ".to_string());
+        assert!(!state.create_from_input());
+        assert!(state.input_error.is_some());
+        assert!(state.missions.is_empty());
+    }
+
+    #[test]
+    fn mission_state_link_and_unlink_preserves_command() {
+        let store = zet_blocks::Store::open_in_memory().unwrap();
+        let mission_id = store.create_mission("M", "").unwrap();
+        let block = zet_blocks::Block {
+            id: 0,
+            session: "s1".to_string(),
+            command: "echo hi".to_string(),
+            output: "hi\n".to_string(),
+            exit_code: 0,
+            cwd: "/tmp".to_string(),
+            git_branch: String::new(),
+            duration_ms: 3,
+        };
+        let block_id = store.append(&block).unwrap();
+        let mut state = MissionState {
+            store: Some(store),
+            ..MissionState::default()
+        };
+        state.reload_missions();
+        state.select(mission_id);
+        assert!(state.links.is_empty());
+        let store = state.store.as_ref().unwrap();
+        assert!(store
+            .link_command(mission_id, block_id, "s1", "user")
+            .unwrap());
+        state.reload_links();
+        assert_eq!(state.links.len(), 1);
+        assert!(state.links[0].available);
+        assert_eq!(state.links[0].command.as_deref(), Some("echo hi"));
+        let store = state.store.as_ref().unwrap();
+        assert!(store.unlink_command(mission_id, block_id, "s1").unwrap());
+        state.reload_links();
+        assert!(state.links.is_empty());
+        assert!(state
+            .store
+            .as_ref()
+            .unwrap()
+            .mission_command_block(block_id, "s1")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn mission_state_persists_across_reopen() {
+        let path = std::env::temp_dir().join(format!(
+            "zet-mission-ui-persist-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mission_id = {
+            let store = zet_blocks::Store::open(path.to_str().unwrap()).unwrap();
+            let mut state = MissionState {
+                store: Some(store),
+                ..MissionState::default()
+            };
+            state.begin_input();
+            state.input = Some("Persisted".to_string());
+            assert!(state.create_from_input());
+            state.selected_id.unwrap()
+        };
+        let store = zet_blocks::Store::open(path.to_str().unwrap()).unwrap();
+        let mut state = MissionState {
+            store: Some(store),
+            ..MissionState::default()
+        };
+        state.reload_missions();
+        assert!(state.missions.iter().any(|m| m.id == mission_id));
+        let _ = std::fs::remove_file(&path);
+    }
+    #[test]
+    fn mission_display_strips_control_sequences() {
+        assert_eq!(App::mission_safe_text("a\u{001b}[31mb"), "a[31mb");
+        assert_eq!(App::mission_safe_text("plain UTF-8 ✓"), "plain UTF-8 ✓");
     }
 }
