@@ -1,6 +1,6 @@
 # ZET — Delivery Roadmap
 
-**Updated:** 2026-10-25 · **Authority:** [Product Charter](ZET-PRODUCT-CHARTER.md)\
+**Updated:** 2026-11-07 · **Authority:** [Product Charter](ZET-PRODUCT-CHARTER.md)\
 **Product positioning:** ZET — The Outcome-Aware Terminal (provisional descriptor).  
 **No dates promised:** Release when correctness, usability, and measured performance meet gates.
 
@@ -62,9 +62,40 @@ Implementation of P2-B requires a separate owner-authorized slice; this
 subsection is a planning and visual-acceptance requirement, not authorization
 to start UI work.
 
-## Next milestone — P3: Evidence-linked commands and mission timeline
+## P3 delivery status — merged and installed
 
-**Current next product milestone.** Begin with an architect-approved bounded contract using existing command recording and provenance. Do not implement P3 in a documentation-only sync.
+- **P3-B1 — Mission Intelligence Foundation:** merged into master through PR #62; local mission storage, user-linked command evidence, and CLI operations are implemented.
+- **P3-B2 — Native Mission Intelligence:** merged through [PR #63](https://github.com/kryptek2000/zet/pull/63) at `5a01670704342926a798fa375ea5beecd70b32cf`; canonical owner installation confirmed 2026-11-07. Native create/select/link/inspect/unlink works and was owner-smoke-tested with real command associations.
+- These slices establish an **evidence-linked local foundation**, **not** a complete AI-agent control plane, persistent live-process manager, automatic mission verification system, or proof of external user demand.
+- Remaining UI polish includes Inspector heading spacing, evidence readability, clipped status text, and welcome artwork/modal layering; schedule by demonstrated impact rather than allowing polish to obscure terminal reliability.
+- Some full release performance and compatibility gates remain open. A green feature PR does not certify all product-level gates.
+
+## Next milestone — P3-B3: Developer usefulness discovery (research and thin experiments)
+
+**Decision:** Validate why someone would voluntarily choose ZET over their current terminal. Do not authorize a large new feature merely because it is AI-powered. This is a product-discovery milestone, not blanket authorization for implementation or release.
+
+**Primary user:** Developers regularly using shell commands and existing AI coding CLIs such as Claude Code, Codex CLI, Gemini CLI, or OpenCode. Their CLIs remain independent programs inside the genuine PTY. ZET must continue to be useful without models, accounts, or a network connection.
+
+### Two competing workflow hypotheses
+
+1. **AI CLI supervision:** Can a developer operate a real coding CLI, recognize genuinely observed waiting/working/error states, find its relevant session and output, and resume with fewer context switches? Unknown state must be labeled unknown. No agent status inferred merely from terminal appearance, no forced proprietary agent integration.
+2. **Command evidence and work recovery:** After a failed build or interrupted session, can a developer find the recorded command, inspect raw output and grounded metadata, recover work context, and continue faster and more accurately? Manual mission linking is a baseline to measure, not proof of effortless capture or end-to-end verified outcomes.
+
+### Discovery protocol
+
+- **Baseline:** Use the same realistic task with the participant's preferred conventional terminal/CLI workflow, then with ZET. Counterbalance task order and capture prior familiarity; do not claim comparative superiority from screenshots or self-reported enthusiasm.
+- **Internal dogfooding first:** Run repeatable AI-CLI and failed-command recovery tasks using isolated profiles and non-sensitive repositories. Keep full-screen TUI support, keyboard/input semantics, paste, resize, scrolling, focus, and PTY throughput under test.
+- **Outside developers:** Aim for 5–10 participants spanning frequent CLI users and AI-agent CLI users. Observe real tasks; record frustrations, workarounds, and what they actually use. This is exploratory, not statistical proof of market demand.
+- **Metrics:** Completion rate, task time, context switches, wrong attributions, needed manual steps, terminal compatibility defects, and whether participants voluntarily return after several days. Capture qualitative trust/discoverability observations.
+- **Provisional decision signals:** Seek roughly 20% less task time without lower completion rates; zero critical terminal regressions; at least 3 of the first 5 participants electing to use ZET again. Treat these as hypotheses to evaluate, not release promises or claims of demonstrated performance.
+- **Competitive benchmark:** Evaluate actual workflows against Warp, Wave, Herdr, and plain terminal + preferred AI CLI where relevant. Avoid cloning product categories based only on feature checklists.
+- **Evidence and privacy:** Opt in to any research logging; scrub secrets, avoid uploading private transcripts without explicit consent, and distinguish reported perceptions from directly observed results.
+
+### Gate before larger P3-B3 engineering
+
+Produce a short findings report with reproductions and performance/compatibility evidence, then choose **one** bounded next slice by observed user value. Acceptable outcomes are: pursue AI-CLI ergonomics, pursue evidence/recovery ergonomics, redesign an unhelpful interaction, or stop and reassess. The architect reviews, the independent auditor checks relevant implementation claims, and the owner authorizes any build/merge/install.
+
+**Not automatically authorized:** new built-in agent orchestration, autonomous multi-agent scheduling, account/service dependencies, rich media rendering, native split panes, custom model inference, plugins, or a general UI overhaul. These remain candidates only if discovery justifies them.
 
 ## P3 — Evidence-linked commands and mission timeline
 
