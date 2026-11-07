@@ -119,3 +119,61 @@ fn shutdown_reaps_the_child() {
         "process {pid} lingers"
     );
 }
+
+#[test]
+fn spawn_with_cwd_starts_shell_in_requested_directory() {
+    let dir = std::env::temp_dir().join(format!("zet-cwd-project-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let mut s = Session::spawn_with_cwd("sh", &["-c", "pwd"], 80, 24, Some(&dir)).unwrap();
+    let mut out = Vec::new();
+    let code = s.wait_with_output(&mut out).unwrap();
+    assert_eq!(code, 0);
+    let text = String::from_utf8_lossy(&out);
+    assert!(
+        text.contains(dir.to_str().unwrap()),
+        "pwd was {text:?}, expected {}",
+        dir.display()
+    );
+}
+
+#[test]
+fn spawn_with_cwd_falls_back_when_directory_is_invalid() {
+    let missing = std::env::temp_dir().join("zet-missing-cwd");
+    let _ = std::fs::remove_dir_all(&missing);
+    let mut s = Session::spawn_with_cwd("sh", &["-c", "pwd"], 80, 24, Some(&missing)).unwrap();
+    let mut out = Vec::new();
+    let code = s.wait_with_output(&mut out).unwrap();
+    assert_eq!(code, 0);
+    let text = String::from_utf8_lossy(&out);
+    assert!(
+        !text.contains("zet-missing-cwd"),
+        "invalid cwd leaked into shell: {text:?}"
+    );
+}
+
+#[test]
+fn spawn_inherits_process_current_directory() {
+    let dir = std::env::temp_dir().join(format!("zet-cwd-inherit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let original = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&dir).unwrap();
+    let result = Session::spawn("sh", &["-c", "pwd"], 80, 24);
+    let _ = std::env::set_current_dir(&original);
+    let mut s = result.unwrap();
+    let mut out = Vec::new();
+    let code = s.wait_with_output(&mut out).unwrap();
+    assert_eq!(code, 0);
+    let text = String::from_utf8_lossy(&out);
+    assert!(
+        text.contains(dir.to_str().unwrap()),
+        "pwd was {text:?}, expected {}",
+        dir.display()
+    );
+}
