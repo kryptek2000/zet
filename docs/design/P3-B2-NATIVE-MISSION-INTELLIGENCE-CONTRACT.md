@@ -68,3 +68,9 @@ git diff --check
 - **Layout restore:** entering Mission mode saves the prior rail/Inspector layout; leaving restores it unless the user explicitly toggled a panel while in Mission mode.
 - **Visual finishing:** mission rail/evidence use padded headers, subtle separators, restrained borders, selection accent bars, and a single status location (rail footer).
 - **Narrow overlay:** the New Mission modal clamps to the terminal viewport in both dimensions.
+
+## 9. P3-B2-F2 pre-merge corrections
+
+- **Mission rail row map:** `mission_rail_layout(rows)` is the single authoritative mapping for header, separator, New Mission control, mission list, and footer. `mission_rail_target()` is used by hit-testing and by tests, so painted rows and click targets cannot drift. New Mission and the first mission always occupy distinct rows; separators/headings are never clickable.
+- **Pointer modality:** while the New Mission editor is open, mouse button press/release, wheel, cursor movement, terminal mouse reporting, selection copy, and background panel/tab clicks are suppressed before any PTY or clipboard path. Keyboard isolation is unchanged.
+- **Isolation procedure:** automated tests run with an isolated disk-backed `HOME` (`/home/bandit/.cache/zet-p3b2-f2-test-home`), `CARGO_HOME`, `RUSTUP_HOME`, and no inherited `ZET_HOME`. The preview sets an explicit isolated `ZET_HOME`. The owner database path is checked by absolute path before/after runs.

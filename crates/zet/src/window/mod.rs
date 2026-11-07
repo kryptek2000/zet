@@ -220,11 +220,76 @@ pub enum Focus {
 
 const MISSION_LIST_LIMIT: usize = 64;
 const MISSION_EVIDENCE_LIMIT: usize = 64;
-const MISSION_LIST_START: u32 = 4;
-const MISSION_RAIL_NEW_ROW: u32 = 2;
 const MISSION_DB_BUSY_TIMEOUT_MS: u64 = 50;
 const MISSION_EVIDENCE_START: u32 = 6;
 const MISSION_EVIDENCE_ROW_HEIGHT: u32 = 3;
+
+/// Single authoritative vertical map for the Mission Rail. Drawing,
+/// hit-testing, and scrolling all consume this so the New Mission label and
+/// the first mission row can never collide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MissionRailLayout {
+    header: u32,
+    separator: u32,
+    new_action: u32,
+    list_start: u32,
+    list_rows: usize,
+    footer: u32,
+}
+
+fn mission_rail_layout(rows: u32) -> MissionRailLayout {
+    if rows == 0 {
+        return MissionRailLayout {
+            header: 0,
+            separator: 0,
+            new_action: 0,
+            list_start: 0,
+            list_rows: 0,
+            footer: 0,
+        };
+    }
+    let footer = rows - 1;
+    let header = 1.min(footer);
+    let separator = 2.min(footer);
+    let new_action = 3.min(footer);
+    let list_start = new_action.saturating_add(1).min(footer);
+    let list_rows = footer.saturating_sub(list_start) as usize;
+    MissionRailLayout {
+        header,
+        separator,
+        new_action,
+        list_start,
+        list_rows,
+        footer,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MissionRailTarget {
+    NewMission,
+    Mission(usize),
+    None,
+}
+
+fn mission_rail_target(
+    layout: MissionRailLayout,
+    row: u32,
+    mission_count: usize,
+    scroll: usize,
+) -> MissionRailTarget {
+    if row == layout.new_action {
+        return MissionRailTarget::NewMission;
+    }
+    if row < layout.list_start || row >= layout.footer {
+        return MissionRailTarget::None;
+    }
+    let index = scroll + (row - layout.list_start) as usize;
+    if index < mission_count && ((row - layout.list_start) as usize) < layout.list_rows {
+        MissionRailTarget::Mission(index)
+    } else {
+        MissionRailTarget::None
+    }
+}
 
 fn mission_evidence_visible_rows_for(rows: u32) -> usize {
     rows.saturating_sub(MISSION_EVIDENCE_START)
@@ -2119,10 +2184,8 @@ impl App {
     }
 
     fn mission_visible_rows(&self) -> usize {
-        let rail_rows = self.rows.saturating_sub(self.bar_rows());
-        rail_rows
-            .saturating_sub(MISSION_LIST_START as usize)
-            .saturating_sub(1)
+        let rail_rows = self.rows.saturating_sub(self.bar_rows()) as u32;
+        mission_rail_layout(rail_rows).list_rows
     }
 
     fn move_mission_selection(&mut self, delta: isize) {
@@ -2226,6 +2289,10 @@ impl App {
         self.needs_draw = true;
     }
 
+    fn mission_overlay_owns_pointer(&self) -> bool {
+        self.mission.input.is_some()
+    }
+
     fn handle_mouse_click(&mut self, x: f64, y: f64, cw: u32, ch: u32) {
         // Modal New Mission editor: background clicks must not change
         // missions, selection, tabs, or panel state while it is open.
@@ -2275,14 +2342,21 @@ impl App {
             if x >= 0.0 && x < rail_px && y >= top && y < bottom {
                 let row = ((y - top) / ch as f64).floor() as usize as u32;
                 if self.mission.mode {
-                    if row == MISSION_RAIL_NEW_ROW {
-                        self.mission.begin_input();
-                    } else if row >= MISSION_LIST_START {
-                        let index = self.mission.scroll + (row - MISSION_LIST_START) as usize;
-                        if let Some(mission) = self.mission.missions.get(index) {
-                            let id = mission.id;
-                            self.mission.select(id);
+                    let layout = mission_rail_layout(vp.rows);
+                    match mission_rail_target(
+                        layout,
+                        row,
+                        self.mission.missions.len(),
+                        self.mission.scroll,
+                    ) {
+                        MissionRailTarget::NewMission => self.mission.begin_input(),
+                        MissionRailTarget::Mission(index) => {
+                            if let Some(mission) = self.mission.missions.get(index) {
+                                let id = mission.id;
+                                self.mission.select(id);
+                            }
                         }
+                        MissionRailTarget::None => {}
                     }
                     self.focus = Focus::Rail;
                     self.needs_draw = true;
@@ -2608,41 +2682,44 @@ impl App {
             );
         };
 
-        row(r, 1, "MISSIONS", RAIL_HEADER_INK);
-        separator(r, 2);
-        row(
-            r,
-            MISSION_RAIL_NEW_ROW + 1,
-            "+ NEW MISSION   n",
-            RAIL_ACCENT,
-        );
+        let layout = mission_rail_layout(vp.rows);
+        row(r, layout.header, "MISSIONS", RAIL_HEADER_INK);
+        separator(r, layout.separator);
+        if layout.new_action < layout.footer {
+            row(r, layout.new_action, "+ NEW MISSION   n", RAIL_ACCENT);
+        }
 
-        let list_rows = vp.rows.saturating_sub(MISSION_LIST_START).saturating_sub(1) as usize;
         if let Some(error) = &mission.error {
-            row(r, MISSION_LIST_START, "MISSIONS UNAVAILABLE", PANEL_DANGER);
-            row(
-                r,
-                MISSION_LIST_START.saturating_add(1),
-                "STORE ERROR — RETRY WITH N",
-                PANEL_SECONDARY,
-            );
-            row(r, MISSION_LIST_START.saturating_add(2), error, PANEL_MUTED);
+            row(r, layout.list_start, "MISSIONS UNAVAILABLE", PANEL_DANGER);
+            if layout.list_start + 1 < layout.footer {
+                row(
+                    r,
+                    layout.list_start + 1,
+                    "STORE ERROR — RETRY WITH N",
+                    PANEL_SECONDARY,
+                );
+            }
+            if layout.list_start + 2 < layout.footer {
+                row(r, layout.list_start + 2, error, PANEL_MUTED);
+            }
         } else if mission.missions.is_empty() {
-            row(r, MISSION_LIST_START, "NO MISSIONS", PANEL_MUTED);
-            row(
-                r,
-                MISSION_LIST_START.saturating_add(1),
-                "PRESS N TO CREATE ONE",
-                PANEL_SECONDARY,
-            );
+            row(r, layout.list_start, "NO MISSIONS", PANEL_MUTED);
+            if layout.list_start + 1 < layout.footer {
+                row(
+                    r,
+                    layout.list_start + 1,
+                    "PRESS N TO CREATE ONE",
+                    PANEL_SECONDARY,
+                );
+            }
         } else {
-            for index in 0..list_rows {
+            for index in 0..layout.list_rows {
                 let position = mission.scroll + index;
                 let Some(entry) = mission.missions.get(position) else {
                     break;
                 };
                 let selected = mission.selected_id == Some(entry.id);
-                let row_number = MISSION_LIST_START + index as u32;
+                let row_number = layout.list_start + index as u32;
                 let row_y = vp.y.saturating_add(row_number).saturating_mul(ch);
                 if selected {
                     let fill = zet_gpu::renderer::Viewport {
@@ -2678,14 +2755,16 @@ impl App {
                 );
             }
         }
-        separator(r, vp.rows.saturating_sub(2));
+        if layout.footer > 0 {
+            separator(r, layout.footer.saturating_sub(1));
+        }
         let footer = mission
             .status
             .as_deref()
             .unwrap_or("CTRL+SHIFT+N   SESSIONS");
         row(
             r,
-            vp.rows.saturating_sub(1),
+            layout.footer,
             footer,
             if mission.status.is_some() {
                 RAIL_ACCENT
@@ -6614,6 +6693,9 @@ impl ApplicationHandler for App {
                 // No re-arm here: about_to_wait drives the heartbeat.
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                if self.mission_overlay_owns_pointer() {
+                    return;
+                }
                 self.needs_draw = true;
                 // Clicking inside the live terminal is interaction: retire
                 // the identity before selection or PTY routing runs.
@@ -6653,6 +6735,9 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if self.mission_overlay_owns_pointer() {
+                    return;
+                }
                 self.needs_draw = true;
                 // Wheel interaction over the terminal retires the identity
                 // before scrollback or mouse protocol handling changes the
@@ -6705,6 +6790,9 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                if self.mission_overlay_owns_pointer() {
+                    return;
+                }
                 let previous = self.mouse_px;
                 self.mouse_px = Some((position.x, position.y));
                 if previous != self.mouse_px {
@@ -7202,6 +7290,66 @@ mod layout_fit_tests {
         assert_eq!(super::mission_evidence_visible_rows_for(6), 0);
         assert_eq!(super::mission_evidence_visible_rows_for(10), 1);
         assert_eq!(super::mission_evidence_visible_rows_for(20), 4);
+    }
+
+    #[test]
+    fn mission_rail_painted_rows_and_hit_targets_agree() {
+        let layout = super::mission_rail_layout(20);
+        assert_eq!(layout.new_action, 3);
+        assert_eq!(layout.list_start, 4);
+        assert_eq!(
+            super::mission_rail_target(layout, 3, 2, 0),
+            super::MissionRailTarget::NewMission
+        );
+        assert_eq!(
+            super::mission_rail_target(layout, 4, 2, 0),
+            super::MissionRailTarget::Mission(0)
+        );
+        assert_eq!(
+            super::mission_rail_target(layout, 5, 2, 0),
+            super::MissionRailTarget::Mission(1)
+        );
+        assert_eq!(
+            super::mission_rail_target(layout, 4, 0, 0),
+            super::MissionRailTarget::None
+        );
+        assert_eq!(
+            super::mission_rail_target(layout, 4, 3, 1),
+            super::MissionRailTarget::Mission(1)
+        );
+        assert_eq!(
+            super::mission_rail_target(layout, 2, 2, 0),
+            super::MissionRailTarget::None
+        );
+        assert_eq!(
+            super::mission_rail_target(layout, layout.footer, 2, 0),
+            super::MissionRailTarget::None
+        );
+
+        let narrow = super::mission_rail_layout(5);
+        assert_eq!(narrow.new_action, 3);
+        assert_eq!(narrow.list_start, 4);
+        assert_eq!(narrow.list_rows, 0);
+        assert_eq!(
+            super::mission_rail_target(narrow, 4, 2, 0),
+            super::MissionRailTarget::None
+        );
+        assert_eq!(
+            super::mission_rail_target(narrow, 3, 0, 0),
+            super::MissionRailTarget::NewMission
+        );
+    }
+
+    #[test]
+    fn mission_overlay_owns_all_pointer_paths() {
+        let mut app = make_test_app(
+            120,
+            40,
+            crate::window::layout::LayoutMode::MissionControl.layout(),
+        );
+        assert!(!app.mission_overlay_owns_pointer());
+        app.mission.input = Some("Draft".to_string());
+        assert!(app.mission_overlay_owns_pointer());
     }
 
     #[test]
