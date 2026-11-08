@@ -12,6 +12,10 @@ path = "src/lib.rs"
 name = "zet"
 path = "src/main.rs"
 
+[features]
+default = []
+ghostty-vt = []
+
 [dependencies]
 zet-agent = { path = "../zet-agent" }
 zet-agent-observe = { path = "../zet-agent-observe" }

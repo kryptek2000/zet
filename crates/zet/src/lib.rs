@@ -6,3 +6,6 @@
 
 pub mod mode;
 pub mod window;
+
+#[cfg(feature = "ghostty-vt")]
+pub mod ghostty;
