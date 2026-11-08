@@ -916,6 +916,70 @@ impl Renderer {
         }
     }
 
+    pub fn draw_ghostty_frame(&mut self, frame: &GhosttyFrame, vp: Viewport) {
+        self.quads.clear();
+        self.ui_quads.clear();
+        let (cw, ch) = self.cell_px();
+        let origin_x = vp.x.saturating_mul(cw);
+        let origin_y = vp.y.saturating_mul(ch);
+        // Background fill.
+        if let Some(slot) = self.bg_slot {
+            for vy in 0..vp.rows {
+                for vx in 0..vp.cols {
+                    if let Some((cx, cy)) = viewport_cell_origin(vp, vx, vy) {
+                        self.quads.extend(cell_quad(
+                            cx,
+                            cy,
+                            cw as f32,
+                            ch as f32,
+                            (slot.x, slot.y),
+                            self.atlas_size,
+                            Rgba::rgb(0.05, 0.05, 0.08),
+                        ));
+                    }
+                }
+            }
+        }
+        for y in 0..frame.rows.min(vp.rows as usize) {
+            for x in 0..frame.cols.min(vp.cols as usize) {
+                let cell = &frame.cells[y * frame.cols + x];
+                let bg = if cell.inverse {
+                    cell.fg
+                } else {
+                    cell.bg.unwrap_or(Rgba::rgb(0.05, 0.05, 0.08))
+                };
+                if cell.bg.is_some() || cell.inverse {
+                    if let Some((cx, cy)) = viewport_cell_origin(vp, x as u32, y as u32) {
+                        if let Some(slot) = self.bg_slot {
+                            self.quads.extend(cell_quad(
+                                cx,
+                                cy,
+                                cw as f32,
+                                ch as f32,
+                                (slot.x, slot.y),
+                                self.atlas_size,
+                                bg,
+                            ));
+                        }
+                    }
+                }
+                if cell.ch != ' ' {
+                    let ink = if cell.inverse {
+                        Rgba::rgb(0.05, 0.05, 0.08)
+                    } else {
+                        cell.fg
+                    };
+                    self.draw_text_row(vp, y as u32, x as u32, &cell.ch.to_string(), ink);
+                }
+            }
+        }
+        if frame.cursor_visible {
+            let cx = origin_x + frame.cursor_x as u32 * cw;
+            let cy = origin_y + frame.cursor_y as u32 * ch;
+            self.draw_rect_px(cx, cy, cw, ch, Rgba::rgb(0.8, 0.8, 0.8));
+        }
+    }
+
     /// Tab bar on row 0: equal segments, active lifted + white ink,
     /// inactive dim. Labels pre-truncated by the caller; overlong text
     /// clips at the grid edge.
@@ -2595,4 +2659,23 @@ mod viewport_tests {
             assert!(ratio >= 3.0, "{name} marker contrast {ratio:.2} < 3.0");
         }
     }
+}
+
+#[derive(Clone, Copy)]
+pub struct GhosttyCell {
+    pub ch: char,
+    pub fg: Rgba,
+    pub bg: Option<Rgba>,
+    pub bold: bool,
+    pub inverse: bool,
+}
+
+#[derive(Clone)]
+pub struct GhosttyFrame {
+    pub cols: usize,
+    pub rows: usize,
+    pub cells: Vec<GhosttyCell>,
+    pub cursor_x: usize,
+    pub cursor_y: usize,
+    pub cursor_visible: bool,
 }

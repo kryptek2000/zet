@@ -45,7 +45,36 @@ pub struct Session {
 }
 
 impl Session {
+    /// Spawn a shell in the process's current directory.
+    ///
+    /// `portable_pty` does not inherit the caller's working directory by
+    /// default; leaving it unset starts the shell in `$HOME`. Resolve the
+    /// directory explicitly so ZET behaves like an ordinary terminal. If the
+    /// inherited directory is invalid (for example, deleted after launch),
+    /// fall back to the platform default instead of failing to start.
     pub fn spawn(program: &str, args: &[&str], cols: u16, rows: u16) -> std::io::Result<Self> {
+        Self::spawn_with_cwd(
+            program,
+            args,
+            cols,
+            rows,
+            std::env::current_dir().ok().as_deref(),
+        )
+    }
+
+    /// Spawn a shell with an explicit working directory.
+    ///
+    /// A missing or inaccessible directory falls back to `portable_pty`'s
+    /// default startup directory (`$HOME`). Passing `None` also uses that
+    /// default. This keeps callers from having to special-case deleted
+    /// launch directories while preserving explicit, testable cwd handling.
+    pub fn spawn_with_cwd(
+        program: &str,
+        args: &[&str],
+        cols: u16,
+        rows: u16,
+        cwd: Option<&std::path::Path>,
+    ) -> std::io::Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -57,6 +86,11 @@ impl Session {
             .map_err(std::io::Error::other)?;
         let mut cmd = CommandBuilder::new(program);
         cmd.args(args);
+        if let Some(cwd) = cwd {
+            if cwd.is_dir() {
+                cmd.cwd(cwd);
+            }
+        }
         let child = pair
             .slave
             .spawn_command(cmd)

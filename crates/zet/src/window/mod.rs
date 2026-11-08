@@ -104,6 +104,10 @@ struct Tab {
     undo_rx: Option<Receiver<Result<(), String>>>,
     was_alt: bool,
     search: SearchState,
+    #[cfg(feature = "ghostty-vt")]
+    ghostty: Option<crate::ghostty::GhosttyTerminal>,
+    #[cfg(feature = "ghostty-vt")]
+    ghostty_frame: Option<zet_gpu::renderer::GhosttyFrame>,
 }
 
 /// Scrollback find state (per tab): the query, absolute-row matches,
@@ -207,6 +211,14 @@ impl Tab {
                 matches: Vec::new(),
                 current: 0,
             },
+            #[cfg(feature = "ghostty-vt")]
+            ghostty: if std::env::var("ZET_TERMINAL_ENGINE").as_deref() == Ok("ghostty") {
+                crate::ghostty::GhosttyTerminal::new(80, 24).ok()
+            } else {
+                None
+            },
+            #[cfg(feature = "ghostty-vt")]
+            ghostty_frame: None,
         }
     }
 }
@@ -667,6 +679,10 @@ impl App {
         };
         for chunk in chunks {
             self.tabs[i].term.feed(&chunk);
+            #[cfg(feature = "ghostty-vt")]
+            if let Some(ghostty) = &mut self.tabs[i].ghostty {
+                ghostty.feed(&chunk);
+            }
         }
         let responses = self.tabs[i].term.drain_responses();
         if !responses.is_empty() {
@@ -710,6 +726,10 @@ impl App {
             }
             None => (Vec::new(), None, Vec::new(), 0),
         };
+        #[cfg(feature = "ghostty-vt")]
+        if let Some(ghostty) = &mut self.tabs[i].ghostty {
+            self.tabs[i].ghostty_frame = Some(ghostty.frame());
+        }
         self.agent_observations
             .record_persistence_failures(failed_persists);
         if let Some(session) = session_id {
@@ -2111,6 +2131,10 @@ impl App {
         self.welcome.release_placement();
         for tab in &mut self.tabs {
             tab.term.resize(cols, rows);
+            #[cfg(feature = "ghostty-vt")]
+            if let Some(ghostty) = &mut tab.ghostty {
+                ghostty.resize(cols as u16, rows as u16);
+            }
             if let Some(s) = &tab.session {
                 let _ = s.resize(cols.min(32767) as u16, rows.min(32767) as u16);
             }
@@ -6513,6 +6537,13 @@ impl ApplicationHandler for App {
                     .present(&self.tabs[self.active].term, gpu_vp.cols, gpu_vp.rows)
                     .cloned();
                 if let (Some(r), Some(_)) = (&mut self.renderer, &self.window) {
+                    #[cfg(feature = "ghostty-vt")]
+                    if let Some(frame) = &self.tabs[self.active].ghostty_frame {
+                        r.draw_ghostty_frame(frame, gpu_vp);
+                    } else {
+                        r.draw_terminal_in(&self.tabs[self.active].term, gpu_vp, sel);
+                    }
+                    #[cfg(not(feature = "ghostty-vt"))]
                     r.draw_terminal_in(&self.tabs[self.active].term, gpu_vp, sel);
                     if self.focus == Focus::Terminal {
                         let (cw, ch) = r.cell_px();
@@ -7055,6 +7086,10 @@ mod layout_fit_tests {
                 matches: Vec::new(),
                 current: 0,
             },
+            #[cfg(feature = "ghostty-vt")]
+            ghostty: None,
+            #[cfg(feature = "ghostty-vt")]
+            ghostty_frame: None,
         }
     }
 
@@ -9559,6 +9594,10 @@ mod p2b_signature_tests {
                 matches: Vec::new(),
                 current: 0,
             },
+            #[cfg(feature = "ghostty-vt")]
+            ghostty: None,
+            #[cfg(feature = "ghostty-vt")]
+            ghostty_frame: None,
         }
     }
 
@@ -9731,6 +9770,10 @@ mod p4a3_r3_acceptance {
                 matches: Vec::new(),
                 current: 0,
             },
+            #[cfg(feature = "ghostty-vt")]
+            ghostty: None,
+            #[cfg(feature = "ghostty-vt")]
+            ghostty_frame: None,
         }
     }
 
